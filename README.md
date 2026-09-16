@@ -8,6 +8,13 @@ WorkBuddy 采用积分制，界面上只显示积分、看不到 token 消耗。
 > 非官方第三方工具，与 WorkBuddy 官方无关。
 > 所有数据都在本地读取和计算：不联网、不上传、不修改任何原始文件。
 
+## 下载
+
+到 [Releases](https://github.com/FightZhanAng/wb-token-meter/releases) 下载：
+
+- `wb-token-meter-<版本>-setup.exe` —— 安装版，带开始菜单与桌面快捷方式
+- `wb-token-meter-<版本>-portable.exe` —— 免安装版，双击即用
+
 ![界面预览](docs/preview.png)
 
 ## 数据从哪来
@@ -67,6 +74,21 @@ pnpm dist          # 打包 Windows 安装包与免安装版到 release/
 
 启动后**不会弹主窗口** —— 看右下角的托盘图标：单击打开面板，右键出菜单，
 菜单里能控制桌面胶囊。关窗只是隐藏，要退出得点菜单里的「退出」。
+
+## 发布
+
+推一个 `v*` 标签，GitHub Actions 会自动打包并创建 Release：
+
+```bash
+git tag -a v0.1.0 -m "v0.1.0"
+git push origin v0.1.0
+```
+
+也可以在仓库的 Actions 页面手动触发 —— 手动跑只把安装包留档成 artifact，不发 Release。
+
+CI 用 GitHub 官方下载源；本地 `pnpm dist` 默认走 npmmirror（这台机器直连
+GitHub Downloads 会卡在证书吊销检查上）。两边都靠 `ELECTRON_MIRROR` 环境变量切换，
+`scripts/dist.mjs` 只在未设置时才补默认值。
 
 ## 界面
 

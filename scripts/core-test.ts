@@ -125,17 +125,24 @@ console.log(
 )
 console.log(`  比价 1 积分 ≈ ${tokenPerCredit(snapshot.totals.inputTokens + snapshot.totals.outputTokens, snapshot.totals.credits)} token`)
 
-check('扫到会话', snapshot.totals.sessions > 0)
-check('扫到调用', snapshot.totals.calls > 0)
-check('首次扫描在 15 秒内', elapsed < 15_000, `${elapsed} ms`)
-check('有积分数据', snapshot.totals.credits > 0, String(snapshot.totals.credits))
-check('traceId 对齐率 > 50%', snapshot.totals.matchedTraces / Math.max(1, snapshot.totals.traces) > 0.5)
+// CI 上没有 ~/.workbuddy，真实数据相关的断言必须能整体跳过，否则构建必红
+const hasData = snapshot.totals.sessions > 0
 
-/* 缓存命中应当显著更快 */
-const cachedStart = Date.now()
-const cachedSnapshot = collectSnapshot({ workbuddyDir, cache: new Map() })
-const cachedElapsed = Date.now() - cachedStart
-check('冷缓存二次扫描仍可完成', cachedSnapshot.totals.calls === snapshot.totals.calls, `${cachedElapsed} ms`)
+if (!hasData) {
+  console.log('  skip 未检测到 WorkBuddy 数据 —— 真实数据相关断言全部跳过（CI 环境属正常）')
+} else {
+  check('扫到会话', snapshot.totals.sessions > 0)
+  check('扫到调用', snapshot.totals.calls > 0)
+  check('首次扫描在 15 秒内', elapsed < 15_000, `${elapsed} ms`)
+  check('有积分数据', snapshot.totals.credits > 0, String(snapshot.totals.credits))
+  check('traceId 对齐率 > 50%', snapshot.totals.matchedTraces / Math.max(1, snapshot.totals.traces) > 0.5)
+
+  /* 二次扫描应当能命中文件缓存 */
+  const cachedStart = Date.now()
+  const cachedSnapshot = collectSnapshot({ workbuddyDir, cache: new Map() })
+  const cachedElapsed = Date.now() - cachedStart
+  check('冷缓存二次扫描仍可完成', cachedSnapshot.totals.calls === snapshot.totals.calls, `${cachedElapsed} ms`)
+}
 
 /* ------------------------------------------------------ 3. 交叉校验 */
 
@@ -190,10 +197,10 @@ check('模型积分不超过已归因总额（无重复计数）', modelCreditCe
 
 section('边界与形态')
 
-check('日列表非空', snapshot.days.length > 0, `${snapshot.days.length} 天`)
+check('日列表非空（有数据时）', !hasData || snapshot.days.length > 0, `${snapshot.days.length} 天`)
 check('日列表按时间倒序', snapshot.days.every((d, i) => i === 0 || snapshot.days[i - 1].date >= d.date))
 check('会话按活动时间倒序', snapshot.sessions.every((s, i) => i === 0 || snapshot.sessions[i - 1].lastActivity >= s.lastActivity))
-check('活跃会话可判定', snapshot.active !== null)
+check('活跃会话可判定（有数据时）', !hasData || snapshot.active !== null)
 check('每个会话都有标题', snapshot.sessions.every((s) => s.title.length > 0))
 
 const todayKey = localDate(Date.now())

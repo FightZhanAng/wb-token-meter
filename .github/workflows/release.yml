@@ -1,0 +1,69 @@
+name: Release
+
+# 推 v* 标签时打包并发布 Release；也支持在 Actions 页面手动跑一次（只留档不发版）
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+# gh release create 需要写权限
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+
+    # 放在 job 级别：pnpm install 期间 @electron/get 也要读 ELECTRON_MIRROR
+    env:
+      # CI 的 runner 能直连 GitHub，不要用国内镜像（scripts/dist.mjs 里的默认值
+      # 是 npmmirror，这里显式覆盖掉）
+      ELECTRON_MIRROR: https://github.com/electron/electron/releases/download/
+      ELECTRON_BUILDER_BINARIES_MIRROR: https://github.com/electron-userland/electron-builder-binaries/releases/download/
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # 必须放在 setup-node 之前 —— 后面的 cache: pnpm 依赖它
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: 安装依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 类型检查
+        run: pnpm typecheck
+
+      # 这台 runner 上没有 ~/.workbuddy，脚本会自动跳过真实数据断言
+      - name: 核心逻辑自检
+        run: pnpm test:core
+
+      # package.json 的 dist 脚本里已经带了 --publish never。
+      # 少了它，electron-builder 在 CI + tag 环境下会「隐式发布」，
+      # 抢在下面的 gh release 之前失败，把整个打包步骤带崩。
+      - name: 打包
+        run: pnpm dist
+
+      - name: 发布 Release
+        if: startsWith(github.ref, 'refs/tags/')
+        # Windows runner 默认 shell 是 pwsh，通配符不会展开，必须显式用 bash
+        shell: bash
+        run: >
+          gh release create "${{ github.ref_name }}"
+          release/*-setup.exe release/*-portable.exe
+          --generate-notes
+
+      - name: 留档构建产物
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: wb-token-meter-windows
+          path: release/*.exe
+          if-no-files-found: error
