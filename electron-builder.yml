@@ -1,0 +1,44 @@
+appId: com.tomcato.wb-token-meter
+productName: Token 计量器
+copyright: Copyright © 2026 tomcato
+
+directories:
+  buildResources: resources
+  output: release
+
+files:
+  - out/**/*
+  - package.json
+
+extraResources:
+  - from: resources
+    to: assets
+    filter:
+      - '**/*'
+
+win:
+  # 用自己生成的多尺寸 .ico，别交给 electron-builder 转 ——
+  # 它内置的 WASM 图标工具在内存受限环境下会直接崩掉打包流程
+  icon: resources/icon.ico
+  # 可执行文件名保持 ASCII：产品名带中文时，中文 exe 名在部分工具链和
+  # 快捷方式解析上会出问题，显示名交给 productName 就够了
+  executableName: wb-token-meter
+  target:
+    - target: nsis
+      arch:
+        - x64
+    - target: portable
+      arch:
+        - x64
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Token 计量器
+  artifactName: wb-token-meter-${version}-setup.${ext}
+
+portable:
+  artifactName: wb-token-meter-${version}-portable.${ext}

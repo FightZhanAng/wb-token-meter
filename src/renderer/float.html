@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Token 计量器</title>
+  </head>
+  <body>
+    <!--
+      静态兜底文案，React 挂载后替换掉。
+      胶囊是不透明/透明的小窗，一旦渲染空白，
+      屏幕上什么都看不到 —— 留着这行字才能区分「没渲染」和「没显示」。
+    -->
+    <div id="root">
+      <div
+        style="
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          height: 100%;
+          font-family: system-ui, 'Microsoft YaHei UI', sans-serif;
+          font-size: 12px;
+          color: #6b8299;
+        "
+      >
+        计量中…
+      </div>
+    </div>
+    <script type="module" src="./float.tsx"></script>
+  </body>
+</html>

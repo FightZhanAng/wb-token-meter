@@ -1,0 +1,523 @@
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, 'Microsoft YaHei UI', 'Segoe UI', sans-serif;
+  font-size: 13px;
+  line-height: 1.5;
+  color: #1c2b3a;
+  background: #f4f6f9;
+  -webkit-font-smoothing: antialiased;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+/* ------------------------------------------------------------ 顶栏 */
+
+.app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 14px;
+  background: #fff;
+  border-bottom: 1px solid #e3e8ef;
+  flex: none;
+}
+
+.app-title {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.app-subtitle {
+  font-size: 12px;
+  color: #7b8fa5;
+  font-variant-numeric: tabular-nums;
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+button {
+  font: inherit;
+  font-size: 12px;
+  padding: 5px 11px;
+  border-radius: 7px;
+  border: 1px solid #d3dce6;
+  background: #fff;
+  color: #2b4257;
+  cursor: pointer;
+}
+
+button:hover {
+  border-color: #9fb3c8;
+  background: #f7fafd;
+}
+
+button:active {
+  background: #eef4fa;
+}
+
+button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+/* ------------------------------------------------------------ 主体 */
+
+.app-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.card {
+  background: #fff;
+  border: 1px solid #e3e8ef;
+  border-radius: 10px;
+  padding: 12px 14px;
+  flex: none;
+}
+
+.card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.card-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #4a6076;
+  letter-spacing: 0.03em;
+}
+
+.card-note {
+  font-size: 11.5px;
+  color: #8b9db0;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 今日大数字 */
+
+.headline {
+  display: flex;
+  align-items: flex-end;
+  gap: 26px;
+}
+
+.headline-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.headline-value {
+  font-size: 25px;
+  font-weight: 600;
+  line-height: 1.15;
+  font-variant-numeric: tabular-nums;
+}
+
+.headline-unit {
+  font-size: 13px;
+  font-weight: 500;
+  color: #7b8fa5;
+  margin-left: 3px;
+}
+
+.headline-label {
+  font-size: 11.5px;
+  color: #8b9db0;
+}
+
+.accent-token {
+  color: #185fa5;
+}
+
+.accent-credit {
+  color: #a2641a;
+}
+
+/* 进度条 */
+
+.meter {
+  height: 8px;
+  border-radius: 4px;
+  background: #eef2f7;
+  overflow: hidden;
+}
+
+.meter-fill {
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.35s ease;
+}
+
+.meter-fill.safe {
+  background: #378add;
+}
+
+.meter-fill.warn {
+  background: #d99b28;
+}
+
+.meter-fill.danger {
+  background: #d15b4a;
+}
+
+.meter-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.meter-value {
+  font-size: 15px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.meter-foot {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 6px;
+  font-size: 11.5px;
+  color: #8b9db0;
+  font-variant-numeric: tabular-nums;
+}
+
+.session-title {
+  font-size: 12.5px;
+  color: #40566c;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 300px;
+}
+
+/* 横向条形 */
+
+.bars {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.bar-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* 模型名可能很长（deepseek-v4.1-flash），必须能省略而不是折行 */
+.bar-name {
+  flex: none;
+  width: 128px;
+  font-size: 12px;
+  color: #5c7189;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bar-track {
+  flex: 1;
+  min-width: 48px;
+  height: 7px;
+  border-radius: 4px;
+  background: #eef2f7;
+  overflow: hidden;
+}
+
+.bar-fill {
+  height: 100%;
+  /* 输出/思考相对输入小三个数量级，没有最小宽度就是一条看不见的线 */
+  min-width: 2px;
+  border-radius: 4px;
+  transition: width 0.35s ease;
+}
+
+.bar-value {
+  flex: none;
+  min-width: 74px;
+  font-size: 12px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: #33485e;
+  white-space: nowrap;
+}
+
+.bar-value em {
+  font-style: normal;
+  color: #94a6b8;
+  margin-left: 4px;
+  font-size: 11.5px;
+}
+
+/* 日趋势 */
+
+.days {
+  display: flex;
+  align-items: flex-end;
+  gap: 5px;
+  height: 78px;
+}
+
+.day-col {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  align-items: center;
+  height: 100%;
+  gap: 3px;
+  min-width: 0;
+}
+
+.day-bar {
+  width: 100%;
+  border-radius: 3px 3px 0 0;
+  background: #7fb2e3;
+  min-height: 2px;
+  transition: height 0.35s ease;
+}
+
+.day-bar.today {
+  background: #185fa5;
+}
+
+.day-label {
+  font-size: 10px;
+  color: #9aabbb;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+/* 活跃热力图 */
+
+.heat-wrap {
+  display: flex;
+  align-items: flex-start;
+}
+
+/* 星期轴：只标出一/三/五，和 7 行网格对齐 */
+.heat-axis {
+  display: grid;
+  grid-template-rows: repeat(7, 12px);
+  gap: 2px;
+  margin-right: 5px;
+  font-size: 9px;
+  line-height: 12px;
+  color: #9aabbb;
+}
+
+.heatmap {
+  display: grid;
+  grid-auto-flow: column;
+  grid-template-rows: repeat(7, 12px);
+  grid-auto-columns: 12px;
+  gap: 2px;
+  justify-content: start;
+}
+
+.heat-cell {
+  border-radius: 2px;
+  background: #eaeff5;
+}
+
+.heat-cell[data-level='1'] {
+  background: #cfe3f7;
+}
+
+.heat-cell[data-level='2'] {
+  background: #9cc4ea;
+}
+
+.heat-cell[data-level='3'] {
+  background: #5f9fd8;
+}
+
+.heat-cell[data-level='4'] {
+  background: #2f7bc4;
+}
+
+/* 未来日期留空，不要画成「零用量」 */
+.heat-cell.future {
+  background: transparent;
+}
+
+.heat-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 9px;
+  font-size: 11.5px;
+  color: #8b9db0;
+  font-variant-numeric: tabular-nums;
+}
+
+.heat-legend {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.heat-legend i {
+  display: block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  background: #eaeff5;
+}
+
+.heat-legend i[data-level='1'] {
+  background: #cfe3f7;
+}
+
+.heat-legend i[data-level='2'] {
+  background: #9cc4ea;
+}
+
+.heat-legend i[data-level='3'] {
+  background: #5f9fd8;
+}
+
+.heat-legend i[data-level='4'] {
+  background: #2f7bc4;
+}
+
+/* 会话列表 */
+
+.sessions {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 268px;
+  overflow-y: auto;
+  margin: -4px -4px -4px -4px;
+  padding: 4px;
+}
+
+.session-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 10px;
+  padding: 7px 8px;
+  border-radius: 7px;
+  align-items: center;
+}
+
+.session-row:hover {
+  background: #f5f8fb;
+}
+
+.session-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.session-meta {
+  font-size: 11px;
+  color: #94a6b8;
+  display: flex;
+  gap: 7px;
+  align-items: center;
+}
+
+.session-meta span {
+  white-space: nowrap;
+}
+
+.session-numbers {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.session-tokens {
+  font-size: 12.5px;
+  color: #33485e;
+  font-weight: 500;
+}
+
+.session-credits {
+  font-size: 11px;
+  color: #a2641a;
+}
+
+/* 杂项 */
+
+.tag {
+  display: inline-block;
+  font-size: 10.5px;
+  padding: 1px 6px;
+  border-radius: 5px;
+  background: #eef4fa;
+  color: #4a7ba7;
+  white-space: nowrap;
+}
+
+.notice {
+  font-size: 12px;
+  color: #7a6a3f;
+  background: #fdf7e8;
+  border: 1px solid #f0e2c0;
+  border-radius: 8px;
+  padding: 8px 11px;
+}
+
+.empty {
+  font-size: 12px;
+  color: #94a6b8;
+  padding: 12px 0;
+  text-align: center;
+}
+
+.fatal {
+  margin: 16px;
+  padding: 14px;
+  border-radius: 10px;
+  background: #fdeceb;
+  border: 1px solid #f3c9c5;
+  color: #8c3226;
+  font-size: 12.5px;
+  line-height: 1.7;
+}
+
+.fatal code {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 11.5px;
+  background: #f8dedb;
+  padding: 1px 4px;
+  border-radius: 4px;
+}

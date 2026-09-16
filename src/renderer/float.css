@@ -1,0 +1,116 @@
+/*
+ * 独立的 HTML 入口必须自带 box-sizing 重置 ——
+ * 主界面的那份管不到这里。漏了的话内容盒会变成「窗口尺寸 + padding」，
+ * 卡片被推出窗口边缘、圆角被裁掉，而且只有透明模式看得出来。
+ */
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: transparent;
+  font-family: system-ui, 'Microsoft YaHei UI', 'Segoe UI', sans-serif;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+  /*
+   * 给 box-shadow 留绘制空间。这个值必须和 shared/layout.ts 的 SHADOW_PAD 一致：
+   * 窗口尺寸按「胶囊 + 2×SHADOW_PAD」算，少了这层 padding 阴影会被窗口边界裁掉，
+   * 只剩右下方向的半截，看起来就像胶囊外面糊了一圈底色。
+   */
+  padding: 12px;
+}
+
+.capsule {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  height: 100%;
+  padding: 0 14px 0 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.93);
+  border: 1px solid rgba(24, 95, 165, 0.14);
+  /*
+   * 阴影的「最远触达」= |offset-y| + blur。这里 4 + 10 = 14px，而窗口留了
+   * 12px（SHADOW_PAD），差的 2px 只是最淡的边缘，看不出来。
+   * 但别再往上调 —— 原来的 0 8px 20px 触达 28px，主阴影直接被窗口边界切平，
+   * 露出一条直边，看起来就像胶囊外面糊了层底色。
+   */
+  box-shadow: 0 4px 10px rgba(16, 42, 72, 0.18);
+  cursor: grab;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.capsule.dragging {
+  cursor: grabbing;
+}
+
+/* 不透明降级模式：窗口本身已是白底矩形，胶囊就不要再画圆角和阴影了 */
+.capsule.solid {
+  border-radius: 6px;
+  border: none;
+  box-shadow: none;
+  background: #ffffff;
+}
+
+.ring {
+  flex: none;
+  display: block;
+}
+
+.readout {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.tokens {
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.15;
+  color: #17436e;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tokens em {
+  font-style: normal;
+  font-size: 10.5px;
+  font-weight: 500;
+  color: #7b8fa5;
+  margin-left: 3px;
+}
+
+.credits {
+  font-size: 11px;
+  color: #a2641a;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 最小档位放不下第二行，让位给 token */
+@media (max-width: 178px) {
+  .credits {
+    display: none;
+  }
+}
+
+@media (max-height: 50px) {
+  .tokens {
+    font-size: 14px;
+  }
+}

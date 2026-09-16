@@ -1,0 +1,15 @@
+node_modules/
+out/
+dist/
+release/
+build-out/
+.tmp-test/
+*.tsbuildinfo
+electron.vite.config.*.mjs
+_tmp_*
+*.log
+.DS_Store
+
+# 排查 Windows 通知身份问题时从开始菜单备份出来的 .lnk
+# （机器生成的快捷方式，不属于源码，别提交）
+.lnk-backup/

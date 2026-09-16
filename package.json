@@ -1,0 +1,37 @@
+{
+  "name": "wb-token-meter",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Token 计量器 —— 托盘常驻，实时读取 WorkBuddy 本地用量数据",
+  "author": "tomcato",
+  "main": "./out/main/index.js",
+  "scripts": {
+    "gen:icons": "node scripts/gen-icons.mjs",
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "test:core": "tsc -p tsconfig.test.json && node .tmp-test/scripts/core-test.js",
+    "dist": "electron-vite build && node scripts/dist.mjs --win --publish never"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "@vitejs/plugin-react": "^6.0.5",
+    "electron": "43.3.0",
+    "electron-builder": "^26.15.3",
+    "electron-vite": "^5.0.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "typescript": "^5.9.3",
+    "vite": "^8.2.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "electron",
+      "electron-builder",
+      "esbuild"
+    ]
+  }
+}
