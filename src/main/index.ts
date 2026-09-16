@@ -245,8 +245,10 @@ function bootstrap(): void {
           const image = await floatWin.webContents.capturePage()
           writeFileSync(join(dir, 'float.png'), image.toPNG())
 
-          // 直接用位图验四角透明 —— 只把 PNG 存下来肉眼分不出「透明」和「白」
-          const pixels = image.getBitmap()
+          // 直接用位图验四角透明 —— 只把 PNG 存下来肉眼分不出「透明」和「白」。
+          // Electron 43 的类型定义把 getBitmap() 标成了 void（运行时其实返回 Buffer），
+          // 这里显式断言，否则 CI 上的 typecheck 会挂。
+          const pixels = image.getBitmap() as unknown as Buffer
           const size = image.getSize()
           const alphaAt = (x: number, y: number): number => pixels[(y * size.width + x) * 4 + 3]
           smoke('float-pixels', {
