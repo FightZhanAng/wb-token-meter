@@ -1,0 +1,6 @@
+# pnpm 11 把构建脚本审批从 package.json 的 pnpm 字段挪到了这里。
+# 两个包的构建脚本都不需要跑：esbuild 的平台二进制来自 optionalDependencies，
+# electron-winstaller 只有打包 Squirrel 安装器时才用得到（本项目用 nsis）。
+allowBuilds:
+  electron-winstaller: false
+  esbuild: false
