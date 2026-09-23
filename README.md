@@ -1,11 +1,14 @@
 # Token 计量器
 
-**一个给 [WorkBuddy](https://www.workbuddy.cn/) 用的本地用量面板。**
+**一个本地用量面板，同时看得见 [WorkBuddy](https://www.workbuddy.cn/) 和 Kimi Code 的 token 消耗。**
 
 WorkBuddy 采用积分制，界面上只显示积分、看不到 token 消耗。但每次模型调用的
 官方 token 数据其实都写在本地磁盘上 —— 这个工具把它读出来，做成常驻托盘的用量面板。
 
-> 非官方第三方工具，与 WorkBuddy 官方无关。
+Kimi Code 没有积分这一层，本地留的正好就是 token 用量本身。面板右上角（或托盘菜单的
+「数据源」）可以随时切换看哪一边，两边的账本各算各的、互不影响。
+
+> 非官方第三方工具，与 WorkBuddy、Kimi Code 官方均无关。
 > 所有数据都在本地读取和计算：不联网、不上传、不修改任何原始文件。
 
 ## 下载
@@ -19,8 +22,10 @@ WorkBuddy 采用积分制，界面上只显示积分、看不到 token 消耗。
 
 ## 数据从哪来
 
-**不需要估算，也不需要调接口。** WorkBuddy 把精确的 token 用量写在本地磁盘上，
-只是没在界面上展示。三处数据源：
+**不需要估算，也不需要调接口。** 两边都把精确的 token 用量写在本地磁盘上，
+只是没在界面上展示。
+
+### WorkBuddy（带积分）
 
 | 数据源 | 位置 | 内容 |
 |---|---|---|
@@ -31,7 +36,30 @@ WorkBuddy 采用积分制，界面上只显示积分、看不到 token 消耗。
 `providerData.traceId` 是串联三者的钥匙 —— 它同时出现在会话记录和积分明细里，
 所以 token 消耗和积分扣费可以逐回合对上。
 
-### 积分口径
+### Kimi Code（只有 token）
+
+| 数据源 | 位置 | 内容 |
+|---|---|---|
+| 会话用量 | `~/.kimi-code/sessions/<工作区>/<会话id>/agents/<代理id>/wire.jsonl` | 每次模型请求的 `usage.record`：`inputOther` / `output` / `inputCacheRead` / `inputCacheCreation`，外加模型名与时间 |
+| 上下文水位 | 同文件的 `token_counting.measured` | 当前上下文多少 token（相当于 WorkBuddy 的 `used`） |
+| 会话元数据 | 同目录 `state.json` | 标题、工作目录、创建 / 更新时间、是否归档 |
+| 上下文窗口 | `~/.kimi-code/config.toml` → `[models."<别名>"]` | `max_context_size`，用来算水位百分比 |
+
+一行 `usage.record` 就是一次模型请求，四个 token 字段互不重叠：
+
+```
+输入 = inputOther + inputCacheRead + inputCacheCreation
+缓存命中 = inputCacheRead
+```
+
+子代理（`agents/<id>`，`state.json` 里 `type=sub`）各写各的 `wire.jsonl`，
+与 WorkBuddy 的处理一致：算真实消耗，但归到父会话名下。
+
+两个数据源各扫各的目录、各用各的解析缓存，聚合逻辑也各自独立 ——
+切换数据源不会碰另一边的任何数字。
+
+
+### 积分口径（仅 WorkBuddy）
 
 积分以数据库记录为**权威口径**，不是用 token 反推的：
 
@@ -40,6 +68,9 @@ WorkBuddy 采用积分制，界面上只显示积分、看不到 token 消耗。
 - `unattributedCredits` —— 只有计费记录、会话明细已被清理的部分
 
 界面底部会把最后一项单独列出来，避免总额平白少一截。
+
+Kimi Code 没有积分，这一整块（今日积分、比价、会话行的积分、未归因提示）
+在切到 Kimi Code 时会整块收起，而不是显示成 0 分。
 
 ### 两点实测结论
 
@@ -68,20 +99,21 @@ pnpm dist          # 打包 Windows 安装包与免安装版到 release/
 
 | 变量 | 用途 |
 |---|---|
-| `WB_TOKEN_METER_DIR` | 覆盖数据目录，默认 `~/.workbuddy`（便于测试） |
+| `WB_TOKEN_METER_DIR` | 覆盖 WorkBuddy 数据目录，默认 `~/.workbuddy`（便于测试） |
+| `WB_TOKEN_METER_KIMI_DIR` | 覆盖 Kimi Code 数据目录，默认 `~/.kimi-code` |
 | `WB_TOKEN_METER_SMOKE=1` | 冒烟自检：把启动状态写到 `%TEMP%\wbtm-smoke\` |
 | `WB_TOKEN_METER_SMOKE_EXIT=1` | 自检报告写完后自动退出 |
 
 启动后**不会弹主窗口** —— 看右下角的托盘图标：单击打开面板，右键出菜单，
-菜单里能控制桌面胶囊。关窗只是隐藏，要退出得点菜单里的「退出」。
+菜单里能控制桌面胶囊与数据源。关窗只是隐藏，要退出得点菜单里的「退出」。
 
 ## 发布
 
 推一个 `v*` 标签，GitHub Actions 会自动打包并创建 Release：
 
 ```bash
-git tag -a v0.1.0 -m "v0.1.0"
-git push origin v0.1.0
+git tag -a v0.2.0 -m "v0.2.0"
+git push origin v0.2.0
 ```
 
 也可以在仓库的 Actions 页面手动触发 —— 手动跑只把安装包留档成 artifact，不发 Release。
@@ -92,9 +124,11 @@ GitHub Downloads 会卡在证书吊销检查上）。两边都靠 `ELECTRON_MIRR
 
 ## 界面
 
-- **今日** —— token 与积分，以及今日的 token/积分比价
+右上角是**数据源切换**：`WorkBuddy` / `Kimi Code`，选择存在设置文件里，重启后还在。
+
+- **今日** —— token 与积分，以及今日的 token/积分比价；Kimi Code 下第二个大数字换成缓存命中率
 - **当前会话上下文** —— 上下文水位进度条，超过 70% 转琥珀、90% 转红
-- **Token 结构** —— 输入 / 缓存命中 / 输出 / 思考 的分布
+- **Token 结构** —— 输入 / 缓存命中 / 输出 / 思考 的分布（Kimi Code 不单列思考）
 - **近 14 天** —— 每日 token 柱状图（悬停看当日积分）
 - **活跃热力图** —— 近 26 周，GitHub 贡献图那种格子；越深表示当天 token 越多
 - **按模型 / 按项目** —— 用量排行
@@ -103,14 +137,15 @@ GitHub Downloads 会卡在证书吊销检查上）。两边都靠 `ELECTRON_MIRR
 ![热力图](docs/preview-heat.png)
 
 托盘图标是一圈进度环，表示当前活跃会话的上下文水位，颜色随水位变化；
-悬停显示今日 token 与积分；右键菜单可以刷新、控制桌面胶囊、打开数据目录、退出。
+悬停显示今日 token（WorkBuddy 下还有积分）；右键菜单可以切换数据源、刷新、
+控制桌面胶囊、打开数据目录、退出。
 
 关窗即隐藏到托盘，只有菜单里的「退出」才会真正结束进程。
 
 ## 桌面胶囊
 
-常驻桌面的小胶囊，显示今日 token、积分与上下文水位环。拖动移动并自动记住位置，
-单击打开主面板。
+常驻桌面的小胶囊，显示今日 token、上下文水位环与积分（Kimi Code 下换成今日调用次数）。
+拖动移动并自动记住位置，单击打开主面板。
 
 ![胶囊](docs/preview-float.png)
 
@@ -118,6 +153,7 @@ GitHub Downloads 会卡在证书吊销检查上）。两边都靠 `ELECTRON_MIRR
 
 | 菜单项 | 能改什么 |
 |---|---|
+| 数据源 | WorkBuddy / Kimi Code |
 | 桌面胶囊 | 显示 / 隐藏 |
 | 胶囊尺寸 | 小 / 中 / 大（胶囊本体 152×44、198×56、252×68） |
 | 胶囊不透明度 | 100% ~ 50% |
@@ -145,8 +181,12 @@ GitHub Downloads 会卡在证书吊销检查上）。两边都靠 `ELECTRON_MIRR
 ## 已知限制
 
 - 少数计费回合（本机实测约 4/47）找不到对应的会话明细，通常是会话已被清理 —— 界面会提示这部分「未归因」积分。
+- WorkBuddy 里带子代理的会话会在会话排行里占两行（主会话与子代理各一条，共用同一个 sessionId），
+  「N 个会话」也因此比实际会话数偏大。两行的 token 不重复计，只是没有合并成一行。
 - 会话记录是 JSONL，体量可能到几 MB。首次扫描本机 25 个会话约 0.6 秒，之后靠文件 mtime 缓存增量跳过。
 - `workbuddy.db` 带 `-wal` / `-shm`，且可能被运行中的 WorkBuddy 持有。程序先尝试只读直开，失败就把三件套复制到临时目录再读。
+- Kimi Code 的上下文水位按「会话最后一次用的模型」的 `max_context_size` 算；
+  模型不在 `config.toml` 里（例如内置模型）时窗口未知，水位显示为 0%。
 
 ## 许可
 

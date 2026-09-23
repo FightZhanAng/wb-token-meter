@@ -1,6 +1,14 @@
 import { Menu, Tray, type MenuItemConstructorOptions } from 'electron'
-import { compact, credits as formatCredits, formatClock, percent, relativeTime } from '../shared/format'
-import type { FloatSize, Snapshot } from '../shared/types'
+import {
+  compact,
+  credits as formatCredits,
+  formatClock,
+  hasCredits,
+  percent,
+  relativeTime,
+  sourceLabel
+} from '../shared/format'
+import type { FloatSize, Snapshot, SourceKind } from '../shared/types'
 import { trayIconImage } from './paths'
 
 export interface TrayCallbacks {
@@ -8,6 +16,10 @@ export interface TrayCallbacks {
   onRefresh(): void
   onOpenDataDir(): void
   onQuit(): void
+
+  /* 数据源 */
+  getSource(): SourceKind
+  onSetSource(kind: SourceKind): void
 
   /* 桌面胶囊 */
   getFloatEnabled(): boolean
@@ -55,11 +67,13 @@ export class TrayController {
   update(snapshot: Snapshot): void {
     if (!this.tray) return
 
+    const withCredits = hasCredits(snapshot.kind)
     const todayTokens = snapshot.today.inputTokens + snapshot.today.outputTokens
     const active = snapshot.active
     // 进度环表示当前活跃会话的上下文水位 —— 这是唯一有明确上限的实时指标
     const ratio = active && active.size > 0 ? Math.min(1, active.used / active.size) : 0
 
+    const source = this.cb.getSource()
     const floatEnabled = this.cb.getFloatEnabled()
     const floatSize = this.cb.getFloatSize()
     const floatOpacity = this.cb.getFloatOpacity()
@@ -68,12 +82,14 @@ export class TrayController {
 
     // 只在可见内容真的变了时才重建菜单，免得每 20 秒白干一次
     const signature = [
+      snapshot.kind,
       todayTokens,
-      snapshot.today.credits,
+      withCredits ? snapshot.today.credits : 0,
       snapshot.totals.sessions,
       Math.round(ratio * 100),
       active?.sessionId ?? '',
       snapshot.generatedAt,
+      source,
       floatEnabled,
       floatSize,
       floatOpacity.toFixed(2),
@@ -85,23 +101,40 @@ export class TrayController {
 
     this.tray.setImage(trayIconImage(ratio))
 
+    // Kimi Code 没有积分，整块收起而不是显示 0 分
+    const todayLine = withCredits
+      ? `今日 ${compact(todayTokens)} token · ${formatCredits(snapshot.today.credits)} 积分`
+      : `今日 ${compact(todayTokens)} token · ${snapshot.today.calls} 次调用`
+
     const tooltip = [
       'Token 计量器',
-      `今日 ${compact(todayTokens)} tok`,
-      `${formatCredits(snapshot.today.credits)} 积分`,
+      `${sourceLabel(snapshot.kind)} · 今日 ${compact(todayTokens)} tok`,
+      ...(withCredits ? [`${formatCredits(snapshot.today.credits)} 积分`] : []),
       active && active.size > 0 ? `上下文 ${percent(active.used, active.size)}%` : '无活跃会话'
     ].join(' · ')
     this.tray.setToolTip(tooltip)
 
     const template: MenuItemConstructorOptions[] = [
-      { label: `今日 ${compact(todayTokens)} token · ${formatCredits(snapshot.today.credits)} 积分`, enabled: false },
+      { label: todayLine, enabled: false },
       {
         label: active
           ? `上下文 ${compact(active.used)} / ${compact(active.size)}（${percent(active.used, active.size)}%）`
           : '当前无活跃会话',
         enabled: false
       },
-      { label: `比价 1 积分 ≈ ${compact(safeRate(snapshot))} token`, enabled: false },
+      ...(withCredits
+        ? [{ label: `比价 1 积分 ≈ ${compact(safeRate(snapshot))} token`, enabled: false } as MenuItemConstructorOptions]
+        : []),
+      { type: 'separator' },
+      {
+        label: `数据源：${sourceLabel(snapshot.kind)}`,
+        submenu: (['workbuddy', 'kimi'] as SourceKind[]).map((kind) => ({
+          label: sourceLabel(kind),
+          type: 'radio' as const,
+          checked: source === kind,
+          click: () => this.cb.onSetSource(kind)
+        }))
+      },
       { type: 'separator' },
       { label: '打开面板', click: () => this.cb.onOpenMain() },
       { label: '立即刷新', click: () => this.cb.onRefresh() },

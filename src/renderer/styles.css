@@ -80,6 +80,36 @@ button:disabled {
   cursor: default;
 }
 
+/* 数据源切换：两个选项，选中态一眼可辨 */
+.source-switch {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 8px;
+  background: #eef2f7;
+}
+
+.source-switch button {
+  font-size: 11.5px;
+  padding: 3px 9px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: #5c7189;
+}
+
+.source-switch button:hover:not(:disabled) {
+  border-color: transparent;
+  background: #e3ebf4;
+}
+
+.source-switch button.active {
+  background: #fff;
+  color: #185fa5;
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(24, 95, 165, 0.16);
+}
+
 /* ------------------------------------------------------------ 主体 */
 
 .app-body {
@@ -160,6 +190,11 @@ button:disabled {
 
 .accent-credit {
   color: #a2641a;
+}
+
+/* Kimi Code 没有积分，今日卡的第二个大数字改用缓存命中率 */
+.accent-cache {
+  color: #1d7a5c;
 }
 
 /* 进度条 */

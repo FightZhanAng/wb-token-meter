@@ -1,15 +1,17 @@
 import { useCallback, useEffect, useMemo, useState, type JSX } from 'react'
-import type { DayStat, Snapshot } from '@shared/types'
+import type { DayStat, Snapshot, SourceKind } from '@shared/types'
 import {
   compact,
   credits as formatCredits,
   dayKeyOf,
   formatClock,
   grouped,
+  hasCredits,
   percent,
   projectLabel,
   relativeTime,
   shiftDays,
+  sourceLabel,
   startOfToday,
   tokenPerCredit
 } from '@shared/format'
@@ -113,7 +115,7 @@ function buildHeatmap(
   return { cells, start: dayKeyOf(firstSunday), end: todayKey, activeDays }
 }
 
-function Heatmap({ days }: { days: DayStat[] }): JSX.Element {
+function Heatmap({ days, withCredits }: { days: DayStat[]; withCredits: boolean }): JSX.Element {
   const { cells, start, end, activeDays } = useMemo(() => buildHeatmap(days, HEAT_WEEKS), [days])
 
   return (
@@ -133,7 +135,7 @@ function Heatmap({ days }: { days: DayStat[] }): JSX.Element {
               title={
                 cell.future
                   ? cell.date
-                  : `${cell.date} · ${compact(cell.tokens)} token · ${formatCredits(cell.credits)} 积分 · ${cell.calls} 次调用`
+                  : `${cell.date} · ${compact(cell.tokens)} token${withCredits ? ` · ${formatCredits(cell.credits)} 积分` : ''} · ${cell.calls} 次调用`
               }
             />
           ))}
@@ -157,10 +159,43 @@ function Heatmap({ days }: { days: DayStat[] }): JSX.Element {
   )
 }
 
+/* -------------------------------------------------------- 数据源切换 */
+
+const SOURCES: SourceKind[] = ['workbuddy', 'kimi']
+
+function SourceSwitch({
+  value,
+  disabled,
+  onChange
+}: {
+  value: SourceKind
+  disabled: boolean
+  onChange: (kind: SourceKind) => void
+}): JSX.Element {
+  return (
+    <div className="source-switch" role="group" aria-label="数据源">
+      {SOURCES.map((kind) => (
+        <button
+          key={kind}
+          type="button"
+          className={kind === value ? 'active' : ''}
+          disabled={disabled}
+          onClick={() => {
+            if (kind !== value) onChange(kind)
+          }}
+        >
+          {sourceLabel(kind)}
+        </button>
+      ))}
+    </div>
+  )
+}
+
 /* ------------------------------------------------------------ 主组件 */
 
 export default function App(): JSX.Element {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null)
+  const [source, setSource] = useState<SourceKind>('workbuddy')
   const [error, setError] = useState<string>('')
   const [busy, setBusy] = useState(false)
   const [now, setNow] = useState(() => Date.now())
@@ -183,6 +218,26 @@ export default function App(): JSX.Element {
     }
   }, [])
 
+  const switchSource = useCallback(
+    async (kind: SourceKind) => {
+      const api = window.meter
+      if (!api) return
+      // 先点亮按钮：主进程要重采一次才会推新快照，中间这段空窗不该让按钮没反应
+      setSource(kind)
+      setBusy(true)
+      try {
+        const next = await api.updateSettings({ source: kind })
+        setSource(next.source)
+        await load(false)
+      } catch (cause) {
+        setError(String(cause))
+      } finally {
+        setBusy(false)
+      }
+    },
+    [load]
+  )
+
   // 首个 effect 包 try/catch：effect 抛错又没有错误边界时，
   // React 会整棵树卸载，界面变成一片空白，极难定位。
   useEffect(() => {
@@ -190,10 +245,16 @@ export default function App(): JSX.Element {
       void load(false)
       const api = window.meter
       if (!api) return
-      const off = api.onSnapshot((next) => setSnapshot(next))
+      void api
+        .getSettings()
+        .then((settings) => setSource(settings.source))
+        .catch(() => undefined)
+      const offSnapshot = api.onSnapshot((next) => setSnapshot(next))
+      const offSettings = api.onSettings((settings) => setSource(settings.source))
       const timer = window.setInterval(() => setNow(Date.now()), 30_000)
       return () => {
-        off()
+        offSnapshot()
+        offSettings()
         window.clearInterval(timer)
       }
     } catch (cause) {
@@ -204,16 +265,22 @@ export default function App(): JSX.Element {
 
   const totals = snapshot?.totals
   const today = snapshot?.today
+  // 显示口径跟着「正在展示的这份数据」走，而不是跟着开关走 ——
+  // 切过去但还没拿到新快照的那一瞬间，不该把 WorkBuddy 的积分画到 Kimi Code 上
+  const withCredits = hasCredits(snapshot?.kind ?? 'workbuddy')
 
   const structureRows = useMemo<BarRow[]>(() => {
     if (!totals) return []
-    return [
+    const rows: BarRow[] = [
       { name: '输入', value: totals.inputTokens, color: '#378ADD' },
       { name: '· 缓存命中', value: totals.cachedTokens, color: '#85B7EB' },
-      { name: '输出', value: totals.outputTokens, color: '#1D9E75' },
-      { name: '· 思考', value: totals.reasoningTokens, color: '#BA7517' }
+      { name: '输出', value: totals.outputTokens, color: '#1D9E75' }
     ]
-  }, [totals])
+    // WorkBuddy 单列思考 token；Kimi Code 的 output 里已含思考，没有这一项，
+    // 留着只会永远是一根 0 长度的空条
+    if (withCredits) rows.push({ name: '· 思考', value: totals.reasoningTokens, color: '#BA7517' })
+    return rows
+  }, [totals, withCredits])
 
   const dayBars = useMemo(() => {
     const days = (snapshot?.days ?? []).slice(0, 14).reverse()
@@ -229,6 +296,44 @@ export default function App(): JSX.Element {
       isToday: day.date === todayKey
     }))
   }, [snapshot?.days])
+
+  /**
+   * 会话排行整块交给一个 useMemo，`.sessions` 下只留**一个**子节点。
+   *
+   * key 里带上序号：WorkBuddy 的快照里同一个 sessionId 可能出现两次
+   * （collector 把 <id>.jsonl 和 <id>/subagents/*.jsonl 各推了一条），
+   * 重复 key 会让 React 的对账丢掉这些节点 —— 切数据源时会话数一缩，
+   * 上一批行就留在 DOM 里清不掉，同一屏上出现两种口径的会话。
+   */
+  const sessionRows = useMemo(() => {
+    const sessions = (snapshot?.sessions ?? []).slice(0, 40)
+    if (!sessions.length) return null
+    return sessions.map((session, index) => {
+      const tokens = session.inputTokens + session.outputTokens
+      return (
+        <div className="session-row" key={`${session.sessionId}#${index}`}>
+          <div className="session-main">
+            <div className="session-title" title={session.title}>
+              {session.title}
+            </div>
+            <div className="session-meta">
+              <span className="tag">{session.model}</span>
+              <span>{projectLabel(session.projectDir, session.cwd)}</span>
+              <span>{relativeTime(session.lastActivity, now)}</span>
+              <span>{session.calls} 次</span>
+              {session.contextSize > 0 ? <span>水位 {percent(session.contextUsed, session.contextSize)}%</span> : null}
+            </div>
+          </div>
+          <div className="session-numbers">
+            <div className="session-tokens">{compact(tokens)}</div>
+            {withCredits ? (
+              <div className="session-credits">{formatCredits(session.credits)} 积分</div>
+            ) : null}
+          </div>
+        </div>
+      )
+    })
+  }, [snapshot?.sessions, now, withCredits])
 
   if (error && !snapshot) {
     return (
@@ -251,10 +356,13 @@ export default function App(): JSX.Element {
         <div>
           <div className="app-title">Token 计量器</div>
           <div className="app-subtitle">
-            {snapshot ? `更新于 ${formatClock(snapshot.generatedAt)} · ${relativeTime(snapshot.generatedAt, now)}` : '正在读取…'}
+            {snapshot
+              ? `${sourceLabel(snapshot.kind)} · 更新于 ${formatClock(snapshot.generatedAt)} · ${relativeTime(snapshot.generatedAt, now)}`
+              : '正在读取…'}
           </div>
         </div>
         <div className="header-actions">
+          <SourceSwitch value={source} disabled={busy} onChange={(kind) => void switchSource(kind)} />
           <button type="button" disabled={busy} onClick={() => void load(true)}>
             {busy ? '刷新中…' : '刷新'}
           </button>
@@ -278,15 +386,28 @@ export default function App(): JSX.Element {
                 输入 {compact(today?.inputTokens ?? 0)} · 输出 {compact(today?.outputTokens ?? 0)}
               </div>
             </div>
-            <div className="headline-item">
-              <div className="headline-value accent-credit">
-                {formatCredits(today?.credits ?? 0)}
-                <span className="headline-unit">积分</span>
+            {withCredits ? (
+              <div className="headline-item">
+                <div className="headline-value accent-credit">
+                  {formatCredits(today?.credits ?? 0)}
+                  <span className="headline-unit">积分</span>
+                </div>
+                <div className="headline-label">
+                  今日比价 1 积分 ≈ {tokenPerCredit((today?.inputTokens ?? 0) + (today?.outputTokens ?? 0), today?.credits ?? 0)} token
+                </div>
               </div>
-              <div className="headline-label">
-                今日比价 1 积分 ≈ {tokenPerCredit((today?.inputTokens ?? 0) + (today?.outputTokens ?? 0), today?.credits ?? 0)} token
+            ) : (
+              <div className="headline-item">
+                <div className="headline-value accent-cache">
+                  {percent(today?.cachedTokens ?? 0, today?.inputTokens ?? 0)}
+                  <span className="headline-unit">% 缓存命中</span>
+                </div>
+                <div className="headline-label">
+                  命中 {compact(today?.cachedTokens ?? 0)} · 新增{' '}
+                  {compact(Math.max(0, (today?.inputTokens ?? 0) - (today?.cachedTokens ?? 0)))} token
+                </div>
               </div>
-            </div>
+            )}
           </div>
         </section>
 
@@ -338,13 +459,18 @@ export default function App(): JSX.Element {
           <div className="card-head">
             <div className="card-title">近 14 天</div>
             <div className="card-note">
-              累计 {compact((totals?.inputTokens ?? 0) + (totals?.outputTokens ?? 0))} token · {formatCredits(totals?.credits ?? 0)} 积分
+              累计 {compact((totals?.inputTokens ?? 0) + (totals?.outputTokens ?? 0))} token
+              {withCredits ? ` · ${formatCredits(totals?.credits ?? 0)} 积分` : ''}
             </div>
           </div>
           {dayBars.length ? (
             <div className="days">
               {dayBars.map((day) => (
-                <div className="day-col" key={day.date} title={`${day.date} · ${compact(day.value)} token · ${formatCredits(day.credits)} 积分`}>
+                <div
+                  className="day-col"
+                  key={day.date}
+                  title={`${day.date} · ${compact(day.value)} token${withCredits ? ` · ${formatCredits(day.credits)} 积分` : ''}`}
+                >
                   <div
                     className={`day-bar${day.isToday ? ' today' : ''}`}
                     style={{ height: `${Math.max(3, day.ratio * 100)}%` }}
@@ -365,7 +491,7 @@ export default function App(): JSX.Element {
             <div className="card-note">近 26 周 · 按 token 深浅</div>
           </div>
           {(snapshot?.days.length ?? 0) > 0 ? (
-            <Heatmap days={snapshot?.days ?? []} />
+            <Heatmap days={snapshot?.days ?? []} withCredits={withCredits} />
           ) : (
             <div className="empty">暂无数据</div>
           )}
@@ -375,7 +501,11 @@ export default function App(): JSX.Element {
         <section className="card">
           <div className="card-head">
             <div className="card-title">按模型</div>
-            <div className="card-note">1 积分 ≈ {tokenPerCredit((totals?.inputTokens ?? 0) + (totals?.outputTokens ?? 0), totals?.credits ?? 0)} token</div>
+            <div className="card-note">
+              {withCredits
+                ? `1 积分 ≈ ${tokenPerCredit((totals?.inputTokens ?? 0) + (totals?.outputTokens ?? 0), totals?.credits ?? 0)} token`
+                : `${snapshot?.models.length ?? 0} 个模型`}
+            </div>
           </div>
           {snapshot?.models.length ? (
             <Bars
@@ -383,7 +513,7 @@ export default function App(): JSX.Element {
                 name: model.model,
                 value: model.inputTokens + model.outputTokens,
                 color: '#534AB7',
-                hint: `${Math.round(model.credits)}分`
+                hint: withCredits ? `${Math.round(model.credits)}分` : `${model.calls} 次`
               }))}
             />
           ) : (
@@ -416,35 +546,13 @@ export default function App(): JSX.Element {
           <div className="card-head">
             <div className="card-title">会话排行</div>
             <div className="card-note">
-              {snapshot?.totals.sessions ?? 0} 个会话 · {snapshot?.totals.dbTraces ?? 0} 个计费回合
+              {snapshot?.totals.sessions ?? 0} 个会话 ·{' '}
+              {withCredits
+                ? `${snapshot?.totals.dbTraces ?? 0} 个计费回合`
+                : `${snapshot?.totals.calls ?? 0} 次调用`}
             </div>
           </div>
-          <div className="sessions">
-            {(snapshot?.sessions ?? []).slice(0, 40).map((session) => {
-              const tokens = session.inputTokens + session.outputTokens
-              return (
-                <div className="session-row" key={session.sessionId}>
-                  <div className="session-main">
-                    <div className="session-title" title={session.title}>
-                      {session.title}
-                    </div>
-                    <div className="session-meta">
-                      <span className="tag">{session.model}</span>
-                      <span>{projectLabel(session.projectDir, session.cwd)}</span>
-                      <span>{relativeTime(session.lastActivity, now)}</span>
-                      <span>{session.calls} 次</span>
-                      {session.contextSize > 0 ? <span>水位 {percent(session.contextUsed, session.contextSize)}%</span> : null}
-                    </div>
-                  </div>
-                  <div className="session-numbers">
-                    <div className="session-tokens">{compact(tokens)}</div>
-                    <div className="session-credits">{formatCredits(session.credits)} 积分</div>
-                  </div>
-                </div>
-              )
-            })}
-            {!snapshot?.sessions.length ? <div className="empty">暂无会话</div> : null}
-          </div>
+          <div className="sessions">{sessionRows ?? <div className="empty">暂无会话</div>}</div>
         </section>
 
         {snapshot?.warnings.length ? (
@@ -455,7 +563,7 @@ export default function App(): JSX.Element {
           </div>
         ) : null}
 
-        {snapshot && snapshot.totals.unattributedCredits > 0 ? (
+        {withCredits && snapshot && snapshot.totals.unattributedCredits > 0 ? (
           <div className="notice">
             另有 {formatCredits(snapshot.totals.unattributedCredits)} 积分找不到对应的会话明细
             （{snapshot.totals.dbTraces} 个计费回合中，只有 {snapshot.totals.matchedTraces} 个能对上本地记录）。

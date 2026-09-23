@@ -41,6 +41,13 @@ export function workbuddyDir(): string {
   return join(homedir(), '.workbuddy')
 }
 
+/** Kimi Code 的本地数据目录（桌面端与 CLI 共用这一份） */
+export function kimiDir(): string {
+  const override = process.env['WB_TOKEN_METER_KIMI_DIR']
+  if (override) return override
+  return join(homedir(), '.kimi-code')
+}
+
 export type RendererPage = 'index' | 'float'
 
 /** 按页面名加载渲染层；开发走 dev server，生产走打包后的 HTML */

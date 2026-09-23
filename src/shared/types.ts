@@ -78,13 +78,23 @@ export interface Totals extends TokenBundle {
   dbTraces: number
 }
 
+/**
+ * 数据源。两边的账本口径完全不同，界面必须知道自己在看哪一本：
+ * WorkBuddy 有积分（token 只是副产品），Kimi Code 只有 token。
+ */
+export type SourceKind = 'workbuddy' | 'kimi'
+
 export interface SnapshotSource {
-  workbuddyDir: string
-  transcriptFiles: number
+  /** 数据根目录 */
+  dir: string
+  /** 参与统计的数据文件数（transcript / wire.jsonl） */
+  files: number
+  /** 数据库行数；Kimi Code 没有库，恒为 0 */
   dbRows: number
 }
 
 export interface Snapshot {
+  kind: SourceKind
   generatedAt: number
   totals: Totals
   today: TokenBundle & { credits: number }
@@ -107,6 +117,8 @@ export interface FloatPosition {
 }
 
 export interface Settings {
+  /** 当前统计哪个数据源 */
+  source: SourceKind
   /** 是否在桌面显示胶囊 */
   floatEnabled: boolean
   /** 胶囊整体不透明度，0.3 ~ 1 */

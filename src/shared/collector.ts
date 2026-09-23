@@ -28,7 +28,8 @@ export function emptyBundle(): TokenBundle {
   return { calls: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0, reasoningTokens: 0 }
 }
 
-function addCall(bundle: TokenBundle, call: CallRecord): void {
+/** 把一次调用累加进一个 token 汇总 —— Kimi Code 采集器也用它（纯函数，无副作用） */
+export function addCall(bundle: TokenBundle, call: CallRecord): void {
   bundle.calls += 1
   bundle.inputTokens += call.inputTokens
   bundle.outputTokens += call.outputTokens
@@ -533,6 +534,7 @@ export function collectSnapshot(options: CollectOptions): Snapshot {
     : null
 
   return {
+    kind: 'workbuddy',
     generatedAt: now,
     totals,
     today: todayBundle,
@@ -542,15 +544,15 @@ export function collectSnapshot(options: CollectOptions): Snapshot {
     projects: [...projectMap.values()].sort((a, b) => b.inputTokens + b.outputTokens - (a.inputTokens + a.outputTokens)),
     active,
     source: {
-      workbuddyDir,
-      transcriptFiles: transcripts.length,
+      dir: workbuddyDir,
+      files: transcripts.length,
       dbRows: db.usage.length
     },
     warnings
   }
 }
 
-function mostFrequentModel(calls: CallRecord[]): string {
+export function mostFrequentModel(calls: CallRecord[]): string {
   const count = new Map<string, number>()
   for (const call of calls) count.set(call.model, (count.get(call.model) ?? 0) + 1)
   let best = ''

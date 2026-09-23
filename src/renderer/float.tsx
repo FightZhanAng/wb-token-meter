@@ -1,6 +1,6 @@
 import { StrictMode, useEffect, useRef, useState, type JSX } from 'react'
 import { createRoot } from 'react-dom/client'
-import { compact, credits as formatCredits, percent } from '@shared/format'
+import { compact, credits as formatCredits, hasCredits, percent } from '@shared/format'
 import type { Settings, Snapshot } from '@shared/types'
 import './float.css'
 
@@ -131,6 +131,8 @@ function Capsule(): JSX.Element {
   const todayTokens = (snapshot?.today.inputTokens ?? 0) + (snapshot?.today.outputTokens ?? 0)
   const active = snapshot?.active
   const ratio = active && active.size > 0 ? active.used / active.size : 0
+  // Kimi Code 没有积分，第二行换成今日调用次数
+  const withCredits = hasCredits(snapshot?.kind ?? 'workbuddy')
 
   const className = [
     'capsule',
@@ -148,9 +150,9 @@ function Capsule(): JSX.Element {
           {compact(todayTokens)}
           <em>token</em>
         </div>
-        <div className="credits">
+        <div className={`credits${withCredits ? '' : ' plain'}`}>
           {active ? `${percent(active.used, active.size)}% · ` : ''}
-          {formatCredits(snapshot?.today.credits ?? 0)} 分
+          {withCredits ? `${formatCredits(snapshot?.today.credits ?? 0)} 分` : `${snapshot?.today.calls ?? 0} 次`}
         </div>
       </div>
     </div>

@@ -102,6 +102,11 @@ body {
   text-overflow: ellipsis;
 }
 
+/* Kimi Code 没有积分：第二行放的是上下文水位与调用次数，用中性色，别穿积分的衣服 */
+.credits.plain {
+  color: #7b8fa5;
+}
+
 /* 最小档位放不下第二行，让位给 token */
 @media (max-width: 178px) {
   .credits {

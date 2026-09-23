@@ -13,6 +13,7 @@ import { dirname, join } from 'node:path'
 import type { FloatPosition, Settings } from '../shared/types'
 
 export const DEFAULT_SETTINGS: Settings = {
+  source: 'workbuddy',
   floatEnabled: true,
   floatOpacity: 0.94,
   floatSize: 'medium',
@@ -41,7 +42,9 @@ function parsePosition(value: unknown): FloatPosition | null {
 function parseSettings(raw: unknown): Settings {
   const input = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
   const size = input.floatSize
+  const source = input.source
   return {
+    source: source === 'kimi' || source === 'workbuddy' ? source : DEFAULT_SETTINGS.source,
     floatEnabled:
       typeof input.floatEnabled === 'boolean' ? input.floatEnabled : DEFAULT_SETTINGS.floatEnabled,
     floatOpacity: clampNumber(input.floatOpacity, 0.3, 1, DEFAULT_SETTINGS.floatOpacity),

@@ -3,9 +3,10 @@ import { mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { collectSnapshot, type ParseCache } from '../shared/collector'
-import type { FloatState, Settings, Snapshot } from '../shared/types'
+import { collectKimiSnapshot, type KimiParseCache } from '../shared/kimi-collector'
+import type { FloatState, Settings, Snapshot, SourceKind } from '../shared/types'
 import { FloatWindow } from './float'
-import { appIconPath, hardenWindow, loadRenderer, preloadPath, workbuddyDir } from './paths'
+import { appIconPath, hardenWindow, kimiDir, loadRenderer, preloadPath, workbuddyDir } from './paths'
 import { DEFAULT_SETTINGS, SettingsStore } from './settings'
 import { TrayController } from './tray'
 
@@ -47,13 +48,28 @@ let floatWindow: FloatWindow | null = null
 let settingsStore: SettingsStore | null = null
 let isQuitting = false
 let snapshot: Snapshot | null = null
-const parseCache: ParseCache = new Map()
+/** 两个数据源各有一份解析缓存 —— 切换数据源不能把对方的增量缓存冲掉 */
+const workbuddyCache: ParseCache = new Map()
+const kimiCache: KimiParseCache = new Map()
 
 /* ------------------------------------------------------------ 采集 */
 
+/** 当前数据源的数据根目录（「打开数据目录」与采集都认它） */
+function sourceDir(kind: SourceKind): string {
+  return kind === 'kimi' ? kimiDir() : workbuddyDir()
+}
+
+function currentSource(): SourceKind {
+  return settingsStore?.settings.source ?? DEFAULT_SETTINGS.source
+}
+
 function refresh(): Snapshot | null {
+  const kind = currentSource()
   try {
-    snapshot = collectSnapshot({ workbuddyDir: workbuddyDir(), cache: parseCache })
+    snapshot =
+      kind === 'kimi'
+        ? collectKimiSnapshot({ kimiDir: sourceDir(kind), cache: kimiCache })
+        : collectSnapshot({ workbuddyDir: sourceDir(kind), cache: workbuddyCache })
     tray?.update(snapshot)
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('snapshot', snapshot)
@@ -75,11 +91,14 @@ function broadcastSettings(settings: Settings): void {
 
 /** 改设置 -> 落盘 -> 广播 -> 同步窗口。一处收口，免得漏掉某条链路 */
 function patchSettings(patch: Partial<Settings>): void {
+  const before = settingsStore?.settings.source
   const next = settingsStore?.patch(patch)
   if (!next) return
   broadcastSettings(next)
   floatWindow?.syncFromSettings()
   tray?.notifyRefreshed()
+  // 换数据源要立刻重采一次，否则界面会停在旧数据源上直到下一次轮询
+  if (patch.source && patch.source !== before) refresh()
 }
 
 function setFloatEnabled(enabled: boolean): void {
@@ -168,12 +187,16 @@ function bootstrap(): void {
       tray?.notifyRefreshed()
     },
     onOpenDataDir: () => {
-      void shell.openPath(workbuddyDir())
+      void shell.openPath(sourceDir(currentSource()))
     },
     onQuit: () => {
       isQuitting = true
       app.quit()
     },
+
+    /* 数据源 */
+    getSource: () => currentSource(),
+    onSetSource: (kind) => patchSettings({ source: kind }),
 
     /* 桌面胶囊 */
     getFloatEnabled: () => settingsStore?.settings.floatEnabled ?? false,
@@ -217,10 +240,15 @@ function bootstrap(): void {
           const metrics = await win.webContents.executeJavaScript(
             `(() => {
                const heat = document.querySelector('.heatmap')
+               const active = document.querySelector('.source-switch .active')
                return {
                  cards: document.querySelectorAll('.card').length,
                  bodyHeight: document.body.scrollHeight,
                  title: document.querySelector('.app-title')?.textContent || '',
+                 source: active ? active.textContent : '',
+                 sessionRows: document.querySelectorAll('.session-row').length,
+                 creditRows: document.querySelectorAll('.session-credits').length,
+                 headline: [...document.querySelectorAll('.headline-value')].map((el) => el.textContent),
                  heatCells: heat ? heat.children.length : 0,
                  heatWidth: heat ? heat.clientWidth : 0,
                  heatScrollWidth: heat ? heat.scrollWidth : 0
@@ -236,6 +264,67 @@ function bootstrap(): void {
           await new Promise((resolve) => setTimeout(resolve, 400))
           const heatShot = await win.webContents.capturePage()
           writeFileSync(join(dir, 'window-heat.png'), heatShot.toPNG())
+
+          // 数据源切换的端到端自检：点按钮 -> IPC -> 重采 -> 重绘。
+          // 只在自检里跑，跑完立刻切回去，免得把用户自己的设置改掉。
+          const sourceBefore = settingsStore?.settings.source ?? 'workbuddy'
+          const switchTarget: SourceKind = sourceBefore === 'kimi' ? 'workbuddy' : 'kimi'
+          await win.webContents.executeJavaScript(
+            `(() => {
+               const el = [...document.querySelectorAll('.source-switch button')].find((b) => !b.classList.contains('active'))
+               if (el) el.click()
+             })()`
+          )
+          await new Promise((resolve) => setTimeout(resolve, 1500))
+          const switched = await win.webContents.executeJavaScript(
+            `(() => {
+               const active = document.querySelector('.source-switch .active')
+               return {
+                 active: active ? active.textContent : '',
+                 subtitle: document.querySelector('.app-subtitle')?.textContent || '',
+                 headline: [...document.querySelectorAll('.headline-value')].map((el) => el.textContent),
+                 sessionRows: document.querySelectorAll('.session-row').length,
+                 creditRows: document.querySelectorAll('.session-credits').length,
+                 modelHints: [...document.querySelectorAll('.bar-value em')].map((el) => el.textContent)
+               }
+             })()`
+          )
+          writeFileSync(join(dir, 'window-switched.png'), (await win.webContents.capturePage()).toPNG())
+          smoke('source-switch', {
+            from: sourceBefore,
+            expected: switchTarget,
+            actual: settingsStore?.settings.source,
+            dom: switched
+          })
+          patchSettings({ source: sourceBefore })
+          await new Promise((resolve) => setTimeout(resolve, 1500))
+
+          // 切回来之后 DOM 里的行数必须和 React 自己的子节点数相等。
+          // 少一行就是残留：会话快照里同一个 sessionId 会出现两次，
+          // 列表 key 撞车时 React 对账会漏删，上一批行留在 DOM 里。
+          const afterSwitchBack = await win.webContents.executeJavaScript(
+            `(() => {
+               const c = document.querySelector('.sessions')
+               const key = c ? Object.keys(c).find((k) => k.startsWith('__reactFiber$')) : null
+               let fiberChildren = -1
+               if (key) {
+                 fiberChildren = 0
+                 for (let ch = c[key].child; ch; ch = ch.sibling) fiberChildren += 1
+               }
+               return {
+                 source: document.querySelector('.source-switch .active')?.textContent || '',
+                 rows: document.querySelectorAll('.session-row').length,
+                 creditRows: document.querySelectorAll('.session-credits').length,
+                 fiberChildren,
+                 containerChildren: c ? c.children.length : -1
+               }
+             })()`
+          )
+          smoke('after-switch-back', {
+            expected: sourceBefore,
+            actual: settingsStore?.settings.source,
+            dom: afterSwitchBack
+          })
         }
 
         // 桌面胶囊单独截一张，并回报 DOM 度量
@@ -292,10 +381,14 @@ function bootstrap(): void {
         settings: settingsStore?.settings ?? null,
         snapshot: snapshot
           ? {
+              kind: snapshot.kind,
+              source: snapshot.source,
               sessions: snapshot.totals.sessions,
               calls: snapshot.totals.calls,
               credits: snapshot.totals.credits,
               inputTokens: snapshot.totals.inputTokens,
+              outputTokens: snapshot.totals.outputTokens,
+              cachedTokens: snapshot.totals.cachedTokens,
               matchedTraces: snapshot.totals.matchedTraces,
               totalTraces: snapshot.totals.traces,
               active: snapshot.active,
@@ -341,7 +434,7 @@ if (!app.requestSingleInstanceLock()) {
 ipcMain.handle('snapshot:get', () => snapshot ?? refresh())
 ipcMain.handle('snapshot:refresh', () => refresh())
 ipcMain.handle('data:open-dir', async () => {
-  const dir = workbuddyDir()
+  const dir = sourceDir(currentSource())
   await shell.openPath(dir)
   return dir
 })

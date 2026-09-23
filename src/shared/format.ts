@@ -1,5 +1,7 @@
 /** 数字与时间格式化 —— 主进程、渲染层、测试脚本共用 */
 
+import type { SourceKind } from './types'
+
 /** 12345678 -> 12.3M；1234 -> 1.23K */
 export function compact(value: number): string {
   if (!Number.isFinite(value)) return '0'
@@ -32,6 +34,20 @@ export function percent(part: number, whole: number): number {
 export function credits(value: number): string {
   if (!Number.isFinite(value)) return '0'
   return value.toFixed(2).replace(/\.?0+$/, '') || '0'
+}
+
+/**
+ * 该数据源是否按积分计量。
+ * Kimi Code 没有积分这一层，所有积分相关的数字、比价、提示都要整块收起来 ——
+ * 显示成 0 分比不显示更糟。
+ */
+export function hasCredits(kind: SourceKind): boolean {
+  return kind === 'workbuddy'
+}
+
+/** 数据源显示名 */
+export function sourceLabel(kind: SourceKind): string {
+  return kind === 'workbuddy' ? 'WorkBuddy' : 'Kimi Code'
 }
 
 /** token 与积分的比价：1 积分约等于多少 token */
