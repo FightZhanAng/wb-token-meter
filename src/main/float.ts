@@ -183,12 +183,26 @@ export class FloatWindow {
     win.setOpacity(clampOpacity(settings.floatOpacity))
   }
 
+  /**
+   * 把胶囊挪到 (x, y)，尺寸按当前设置写死。
+   *
+   * 不能用 setPosition：它内部是「读回当前尺寸再写回」，Win11（150% 缩放）上每调用
+   * 一次窗口就宽高各 +1（复现数据：222x81 连续 100 次后变成 322x181），拖拽时
+   * pointermove 一秒钟几十帧，几秒就把胶囊撑大。显式 setBounds 固定尺寸则完全稳定。
+   */
+  private moveTo(x: number, y: number): void {
+    const win = this.win
+    if (!win || win.isDestroyed()) return
+    const { width, height } = windowSizeOf(this.readSettings().floatSize)
+    win.setBounds({ x: Math.round(x), y: Math.round(y), width, height })
+  }
+
   /** 拖动窗口：由渲染层送来增量位移 */
   moveBy(dx: number, dy: number): void {
     const win = this.win
     if (!win || win.isDestroyed()) return
     const [x, y] = win.getPosition()
-    win.setPosition(Math.round(x + dx), Math.round(y + dy), false)
+    this.moveTo(x + dx, y + dy)
 
     if (this.positionTimer) clearTimeout(this.positionTimer)
     this.positionTimer = setTimeout(() => {
@@ -202,11 +216,10 @@ export class FloatWindow {
   resetPosition(): void {
     const win = this.ensure()
     const { workArea } = screen.getPrimaryDisplay()
-    const { width, height } = win.getBounds()
-    win.setPosition(
-      Math.round(workArea.x + workArea.width - width - MARGIN),
-      Math.round(workArea.y + workArea.height - height - MARGIN),
-      false
+    const { width, height } = windowSizeOf(this.readSettings().floatSize)
+    this.moveTo(
+      workArea.x + workArea.width - width - MARGIN,
+      workArea.y + workArea.height - height - MARGIN
     )
     const [px, py] = win.getPosition()
     this.onMoved({ x: px, y: py })
@@ -252,15 +265,14 @@ export class FloatWindow {
   private place(win: BrowserWindow): void {
     const saved = this.readSettings().floatPosition
     if (saved && this.isReachable(win, saved)) {
-      win.setPosition(saved.x, saved.y, false)
+      this.moveTo(saved.x, saved.y)
       return
     }
     const { workArea } = screen.getPrimaryDisplay()
-    const { width, height } = win.getBounds()
-    win.setPosition(
-      Math.round(workArea.x + workArea.width - width - MARGIN),
-      Math.round(workArea.y + workArea.height - height - MARGIN),
-      false
+    const { width, height } = windowSizeOf(this.readSettings().floatSize)
+    this.moveTo(
+      workArea.x + workArea.width - width - MARGIN,
+      workArea.y + workArea.height - height - MARGIN
     )
   }
 
