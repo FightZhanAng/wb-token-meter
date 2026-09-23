@@ -38,16 +38,41 @@ export function credits(value: number): string {
 
 /**
  * 该数据源是否按积分计量。
- * Kimi Code 没有积分这一层，所有积分相关的数字、比价、提示都要整块收起来 ——
- * 显示成 0 分比不显示更糟。
+ * 只有 WorkBuddy 有积分这一层，Kimi Code 与 ZCode 都没有 —— 所有积分相关的
+ * 数字、比价、提示都要整块收起来，显示成 0 分比不显示更糟。
  */
 export function hasCredits(kind: SourceKind): boolean {
   return kind === 'workbuddy'
 }
 
+/**
+ * 该数据源是否单列思考 token。
+ * WorkBuddy 与 ZCode 都单列；Kimi Code 的 output 里已含思考，没有这一项，
+ * 留着只会永远是一根 0 长度的空条。
+ */
+export function hasReasoning(kind: SourceKind): boolean {
+  return kind === 'workbuddy' || kind === 'zcode'
+}
+
+/** 数据源在界面上的顺序 —— 面板分段按钮与托盘菜单共用同一份，免得两边点错位 */
+export const SOURCE_ORDER: SourceKind[] = ['workbuddy', 'kimi', 'zcode']
+
 /** 数据源显示名 */
 export function sourceLabel(kind: SourceKind): string {
-  return kind === 'workbuddy' ? 'WorkBuddy' : 'Kimi Code'
+  if (kind === 'workbuddy') return 'WorkBuddy'
+  if (kind === 'zcode') return 'ZCode'
+  return 'Kimi Code'
+}
+
+/**
+ * 上下文水位的一句话摘要。
+ * 窗口未知时（size = 0，比如 ZCode 走远程 provider、模型目录不落本地）
+ * 只报已用量，不要凭空编一个百分比出来。
+ */
+export function contextSummary(active: { used: number; size: number } | null): string {
+  if (!active) return '无活跃会话'
+  if (active.size > 0) return `上下文 ${percent(active.used, active.size)}%`
+  return `上下文 ${compact(active.used)} token`
 }
 
 /** token 与积分的比价：1 积分约等于多少 token */

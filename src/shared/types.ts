@@ -79,10 +79,10 @@ export interface Totals extends TokenBundle {
 }
 
 /**
- * 数据源。两边的账本口径完全不同，界面必须知道自己在看哪一本：
- * WorkBuddy 有积分（token 只是副产品），Kimi Code 只有 token。
+ * 数据源。三边的账本口径都不同，界面必须知道自己在看哪一本：
+ * WorkBuddy 有积分（token 只是副产品），Kimi Code 与 ZCode 只有 token。
  */
-export type SourceKind = 'workbuddy' | 'kimi'
+export type SourceKind = 'workbuddy' | 'kimi' | 'zcode'
 
 export interface SnapshotSource {
   /** 数据根目录 */

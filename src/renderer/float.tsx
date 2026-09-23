@@ -151,7 +151,7 @@ function Capsule(): JSX.Element {
           <em>token</em>
         </div>
         <div className={`credits${withCredits ? '' : ' plain'}`}>
-          {active ? `${percent(active.used, active.size)}% · ` : ''}
+          {active && active.size > 0 ? `${percent(active.used, active.size)}% · ` : ''}
           {withCredits ? `${formatCredits(snapshot?.today.credits ?? 0)} 分` : `${snapshot?.today.calls ?? 0} 次`}
         </div>
       </div>

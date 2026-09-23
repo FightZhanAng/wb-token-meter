@@ -1,14 +1,14 @@
 # Token 计量器
 
-**一个本地用量面板，同时看得见 [WorkBuddy](https://www.workbuddy.cn/) 和 Kimi Code 的 token 消耗。**
+**一个本地用量面板，同时看得见 [WorkBuddy](https://www.workbuddy.cn/)、Kimi Code 和 ZCode 的 token 消耗。**
 
 WorkBuddy 采用积分制，界面上只显示积分、看不到 token 消耗。但每次模型调用的
 官方 token 数据其实都写在本地磁盘上 —— 这个工具把它读出来，做成常驻托盘的用量面板。
 
-Kimi Code 没有积分这一层，本地留的正好就是 token 用量本身。面板右上角（或托盘菜单的
-「数据源」）可以随时切换看哪一边，两边的账本各算各的、互不影响。
+Kimi Code 与 ZCode 没有积分这一层，本地留的正好就是 token 用量本身。面板右上角（或托盘菜单的
+「数据源」）可以随时切换看哪一个，几边的账本各算各的、互不影响。
 
-> 非官方第三方工具，与 WorkBuddy、Kimi Code 官方均无关。
+> 非官方第三方工具，与 WorkBuddy、Kimi Code、ZCode 官方均无关。
 > 所有数据都在本地读取和计算：不联网、不上传、不修改任何原始文件。
 
 ## 下载
@@ -55,8 +55,35 @@ Kimi Code 没有积分这一层，本地留的正好就是 token 用量本身。
 子代理（`agents/<id>`，`state.json` 里 `type=sub`）各写各的 `wire.jsonl`，
 与 WorkBuddy 的处理一致：算真实消耗，但归到父会话名下。
 
-两个数据源各扫各的目录、各用各的解析缓存，聚合逻辑也各自独立 ——
-切换数据源不会碰另一边的任何数字。
+### ZCode（只有 token）
+
+| 数据源 | 位置 | 内容 |
+|---|---|---|
+| 用量明细 | `~/.zcode/cli/db/db.sqlite` → `model_usage` | **一次模型请求一行**：`input_tokens` / `output_tokens` / `reasoning_tokens` / `cache_read_input_tokens`，外加 `session_id`、`model_id`、`provider_id`、`started_at`、`duration_ms`、`tool_call_count`、`status` |
+| 会话元数据 | 同库 `session` 表 | 标题、`directory`、`project_id`、创建 / 更新时间、是否归档 |
+| 回合汇总 | 同库 `turn_usage` / `tool_usage` | 回合级的请求数、重试、工具错误、工具耗时 |
+
+ZCode 是三个源里最好取的一份 —— 用量本身就是一张表，不用对账也不用逐行扫日志：
+
+```
+输入 = input_tokens（含缓存读）      缓存命中 = cache_read_input_tokens
+输出 = output_tokens                思考   = reasoning_tokens（单列，界面照常显示）
+```
+
+两种特殊情况的处理：
+
+- **上下文上限拿不到**。模型窗口写在 `~/.zcode/v2/config.json` 的
+  `provider.<id>.models.<模型>.limit.context`，但远程 provider（本机用的
+  `opencode-go-chat`）的模型目录不落本地，那里只有内置的 GLM / LongCat / mimo。
+  所以水位只报「已用多少 token」，不给百分比。那个文件里有明文 apiKey，
+  程序**不读它**。
+- **历史从用量表建起来的那天开始**。更早的会话只存在于
+  `~/.zcode/cli/rollout/model-io-*.jsonl`（每行一整次请求的完整 prompt + 响应，
+  `response.usage` 里有同样的字段），本工具目前不解析它们。
+
+两个只有 token 的数据源各扫各的目录、各用各的缓存，聚合共用
+`src/shared/aggregate.ts`；WorkBuddy 那条链路完全独立 ——
+切换数据源不会碰任何一边的数字。
 
 
 ### 积分口径（仅 WorkBuddy）
@@ -101,6 +128,7 @@ pnpm dist          # 打包 Windows 安装包与免安装版到 release/
 |---|---|
 | `WB_TOKEN_METER_DIR` | 覆盖 WorkBuddy 数据目录，默认 `~/.workbuddy`（便于测试） |
 | `WB_TOKEN_METER_KIMI_DIR` | 覆盖 Kimi Code 数据目录，默认 `~/.kimi-code` |
+| `WB_TOKEN_METER_ZCODE_DIR` | 覆盖 ZCode 数据目录，默认 `~/.zcode` |
 | `WB_TOKEN_METER_SMOKE=1` | 冒烟自检：把启动状态写到 `%TEMP%\wbtm-smoke\` |
 | `WB_TOKEN_METER_SMOKE_EXIT=1` | 自检报告写完后自动退出 |
 
@@ -112,8 +140,8 @@ pnpm dist          # 打包 Windows 安装包与免安装版到 release/
 推一个 `v*` 标签，GitHub Actions 会自动打包并创建 Release：
 
 ```bash
-git tag -a v0.2.0 -m "v0.2.0"
-git push origin v0.2.0
+git tag -a v0.3.0 -m "v0.3.0"
+git push origin v0.3.0
 ```
 
 也可以在仓库的 Actions 页面手动触发 —— 手动跑只把安装包留档成 artifact，不发 Release。
@@ -124,11 +152,11 @@ GitHub Downloads 会卡在证书吊销检查上）。两边都靠 `ELECTRON_MIRR
 
 ## 界面
 
-右上角是**数据源切换**：`WorkBuddy` / `Kimi Code`，选择存在设置文件里，重启后还在。
+右上角是**数据源切换**：`WorkBuddy` / `Kimi Code` / `ZCode`，选择存在设置文件里，重启后还在。
 
-- **今日** —— token 与积分，以及今日的 token/积分比价；Kimi Code 下第二个大数字换成缓存命中率
-- **当前会话上下文** —— 上下文水位进度条，超过 70% 转琥珀、90% 转红
-- **Token 结构** —— 输入 / 缓存命中 / 输出 / 思考 的分布（Kimi Code 不单列思考）
+- **今日** —— token 与积分，以及今日的 token/积分比价；没有积分的两个源把第二个大数字换成缓存命中率
+- **当前会话上下文** —— 上下文水位进度条，超过 70% 转琥珀、90% 转红；模型上限未知时只报已用量
+- **Token 结构** —— 输入 / 缓存命中 / 输出 / 思考 的分布（Kimi Code 不单列思考，ZCode 单列）
 - **近 14 天** —— 每日 token 柱状图（悬停看当日积分）
 - **活跃热力图** —— 近 26 周，GitHub 贡献图那种格子；越深表示当天 token 越多
 - **按模型 / 按项目** —— 用量排行
@@ -153,7 +181,7 @@ GitHub Downloads 会卡在证书吊销检查上）。两边都靠 `ELECTRON_MIRR
 
 | 菜单项 | 能改什么 |
 |---|---|
-| 数据源 | WorkBuddy / Kimi Code |
+| 数据源 | WorkBuddy / Kimi Code / ZCode |
 | 桌面胶囊 | 显示 / 隐藏 |
 | 胶囊尺寸 | 小 / 中 / 大（胶囊本体 152×44、198×56、252×68） |
 | 胶囊不透明度 | 100% ~ 50% |
@@ -186,7 +214,13 @@ GitHub Downloads 会卡在证书吊销检查上）。两边都靠 `ELECTRON_MIRR
 - 会话记录是 JSONL，体量可能到几 MB。首次扫描本机 25 个会话约 0.6 秒，之后靠文件 mtime 缓存增量跳过。
 - `workbuddy.db` 带 `-wal` / `-shm`，且可能被运行中的 WorkBuddy 持有。程序先尝试只读直开，失败就把三件套复制到临时目录再读。
 - Kimi Code 的上下文水位按「会话最后一次用的模型」的 `max_context_size` 算；
-  模型不在 `config.toml` 里（例如内置模型）时窗口未知，水位显示为 0%。
+  模型不在 `config.toml` 里（例如内置模型）时窗口未知，水位只报已用量、不给百分比。
+- ZCode 的上下文上限本机拿不到（远程 provider 的模型目录不落本地），
+  所以它的水位只显示「已用多少 token」，没有百分比和进度条。
+- ZCode 的用量表只覆盖它开始记录之后的请求；更早的会话只留在
+  `~/.zcode/cli/rollout/` 的 `model-io-*.jsonl` 里，本工具不解析。
+- ZCode 的子代理会话（`session.task_type='subagent_child'`）若有用量，
+  会作为独立会话出现在排行里，不像 Kimi Code 那样并入父会话。
 
 ## 许可
 

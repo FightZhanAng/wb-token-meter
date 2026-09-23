@@ -10,6 +10,7 @@
 import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { collectSnapshot, localDate, parseUsageLine } from '../src/shared/collector'
 import {
   collectKimiSnapshot,
@@ -18,6 +19,7 @@ import {
   parseKimiUsageLine,
   parseModelContextSizes
 } from '../src/shared/kimi-collector'
+import { collectZcodeSnapshot } from '../src/shared/zcode-collector'
 import { compact, grouped, percent, tokenPerCredit } from '../src/shared/format'
 import type { CallRecord, Snapshot } from '../src/shared/types'
 
@@ -435,22 +437,138 @@ if (!hasKimi) {
 check('Kimi 目录不存在不崩', collectKimiSnapshot({ kimiDir: join(homedir(), '.kimi-code-nonexistent') }).sessions.length === 0)
 check('路径为空不崩', collectKimiSnapshot({ kimiDir: '' }).sessions.length === 0)
 
-section('两个数据源互不影响')
+/* --------------------------------------------------- 6. ZCode 数据源 */
+
+section('ZCode 目录扫描（临时夹具）')
+
+const zcodeRoot = mkdtempSync(join(tmpdir(), 'wbtm-zcode-'))
+mkdirSync(join(zcodeRoot, 'cli', 'db'), { recursive: true })
+const fixtureDbPath = join(zcodeRoot, 'cli', 'db', 'db.sqlite')
+const fixtureDb = new DatabaseSync(fixtureDbPath)
+fixtureDb.exec(`
+  CREATE TABLE model_usage (
+    id TEXT PRIMARY KEY, session_id TEXT, model_id TEXT, started_at INTEGER,
+    input_tokens INTEGER, output_tokens INTEGER, reasoning_tokens INTEGER,
+    cache_read_input_tokens INTEGER, status TEXT
+  );
+  CREATE TABLE session (
+    id TEXT PRIMARY KEY, title TEXT, directory TEXT, project_id TEXT,
+    time_created INTEGER, time_updated INTEGER, time_archived INTEGER
+  );
+`)
+const insertUsage = fixtureDb.prepare(
+  `INSERT INTO model_usage
+     (id, session_id, model_id, started_at, input_tokens, output_tokens, reasoning_tokens, cache_read_input_tokens, status)
+   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+)
+insertUsage.run('u1', 'sess_a', 'demo-model', FIXED_NOW - 3000, 1000, 100, 40, 900, 'completed')
+insertUsage.run('u2', 'sess_a', 'demo-model', FIXED_NOW - 1000, 1200, 50, 10, 1100, 'completed')
+insertUsage.run('u3', 'sess_b', 'demo-model', FIXED_NOW - 2000, 300, 30, 0, 0, 'completed')
+insertUsage.run('u4', 'sess_b', 'demo-model', FIXED_NOW - 1500, 0, 0, 0, 0, 'completed')
+const insertSession = fixtureDb.prepare(
+  'INSERT INTO session (id, title, directory, project_id, time_created, time_updated, time_archived) VALUES (?, ?, ?, ?, ?, ?, ?)'
+)
+insertSession.run('sess_a', '夹具会话 A', 'D:\\proj\\a', 'proj_a', FIXED_NOW - 9000, FIXED_NOW - 1000, 0)
+insertSession.run('sess_b', '夹具会话 B', 'D:\\proj\\b', 'proj_b', FIXED_NOW - 9000, FIXED_NOW - 2000, FIXED_NOW)
+fixtureDb.close()
+
+const zFixture = collectZcodeSnapshot({ zcodeDir: zcodeRoot, now: FIXED_NOW })
+check('kind 标记为 zcode', zFixture.kind === 'zcode')
+check('扫到 2 个会话', zFixture.totals.sessions === 2, String(zFixture.totals.sessions))
+check('零用量的请求被丢掉', zFixture.totals.calls === 3, String(zFixture.totals.calls))
+check('输入 token 求和', zFixture.totals.inputTokens === 2500, String(zFixture.totals.inputTokens))
+check('输出 token 求和', zFixture.totals.outputTokens === 180, String(zFixture.totals.outputTokens))
+check('缓存命中求和', zFixture.totals.cachedTokens === 2000, String(zFixture.totals.cachedTokens))
+check('思考 token 单列（不像 Kimi 那样恒为 0）', zFixture.totals.reasoningTokens === 50, String(zFixture.totals.reasoningTokens))
+check(
+  '所有粒度的积分都是 0',
+  zFixture.totals.credits === 0 &&
+    zFixture.sessions.every((s) => s.credits === 0) &&
+    zFixture.days.every((d) => d.credits === 0) &&
+    zFixture.models.every((m) => m.credits === 0) &&
+    zFixture.today.credits === 0
+)
+check('上下文水位取最后一次请求的输入', zFixture.sessions.find((s) => s.sessionId === 'sess_a')?.contextUsed === 1200)
+check('模型上限未知时 size 留 0', zFixture.sessions.every((s) => s.contextSize === 0))
+check('已归档会话不参与活跃评选', zFixture.active?.sessionId === 'sess_a', String(zFixture.active?.sessionId))
+check('会话标题来自 session 表', zFixture.sessions[0]?.title === '夹具会话 A', zFixture.sessions[0]?.title)
+check('项目维度用 project_id', zFixture.projects.every((p) => p.projectDir.startsWith('proj_')), zFixture.projects.map((p) => p.projectDir).join('/'))
+check('dbRows 记录有效用量行数（零用量的那行不算）', zFixture.source.dbRows === 3, String(zFixture.source.dbRows))
+
+const zcodeStatBefore = statSync(fixtureDbPath)
+collectZcodeSnapshot({ zcodeDir: zcodeRoot, now: FIXED_NOW })
+const zcodeStatAfter = statSync(fixtureDbPath)
+check(
+  '采集不修改用量库',
+  zcodeStatBefore.mtimeMs === zcodeStatAfter.mtimeMs && zcodeStatBefore.size === zcodeStatAfter.size
+)
+
+rmSync(zcodeRoot, { recursive: true, force: true })
+
+section('ZCode 真实数据')
+
+const zcodeDirPath = join(homedir(), '.zcode')
+const zcodeStarted = Date.now()
+const zcodeReal = collectZcodeSnapshot({ zcodeDir: zcodeDirPath })
+const zcodeElapsed = Date.now() - zcodeStarted
+
+console.log(`  读取耗时 ${zcodeElapsed} ms`)
+console.log(`  会话 ${zcodeReal.totals.sessions} 个 · 调用 ${grouped(zcodeReal.totals.calls)} 次`)
+console.log(
+  `  token 输入 ${compact(zcodeReal.totals.inputTokens)} · 输出 ${compact(zcodeReal.totals.outputTokens)}` +
+    ` · 缓存 ${compact(zcodeReal.totals.cachedTokens)} · 思考 ${compact(zcodeReal.totals.reasoningTokens)}`
+)
+console.log(`  当前上下文 ${grouped(zcodeReal.active?.used ?? 0)} token（上限未知）`)
+
+const hasZcode = zcodeReal.totals.calls > 0
+
+if (!hasZcode) {
+  console.log('  skip 未检测到 ZCode 数据 —— 真实数据相关断言全部跳过（CI 环境属正常）')
+} else {
+  check('读到会话', zcodeReal.totals.sessions > 0)
+  check('读到调用', zcodeReal.totals.calls > 0)
+  check('读取在 15 秒内', zcodeElapsed < 15_000, `${zcodeElapsed} ms`)
+  check('积分恒为 0', zcodeReal.totals.credits === 0)
+  check(
+    '会话 token 之和 == 全局',
+    sum(zcodeReal.sessions.map((s) => s.inputTokens + s.outputTokens)) ===
+      zcodeReal.totals.inputTokens + zcodeReal.totals.outputTokens
+  )
+  check(
+    '模型 token 之和 == 全局',
+    sum(zcodeReal.models.map((m) => m.inputTokens + m.outputTokens)) ===
+      zcodeReal.totals.inputTokens + zcodeReal.totals.outputTokens
+  )
+  check(
+    '日 token 之和 == 全局',
+    sum(zcodeReal.days.map((d) => d.inputTokens + d.outputTokens)) ===
+      zcodeReal.totals.inputTokens + zcodeReal.totals.outputTokens
+  )
+  check('缓存命中不超过输入', zcodeReal.totals.cachedTokens <= zcodeReal.totals.inputTokens)
+  check('有活跃会话', zcodeReal.active !== null)
+  check('每个会话都有标题', zcodeReal.sessions.every((s) => s.title.length > 0))
+}
+
+check('ZCode 目录不存在不崩', collectZcodeSnapshot({ zcodeDir: join(homedir(), '.zcode-nonexistent') }).sessions.length === 0)
+check('路径为空不崩', collectZcodeSnapshot({ zcodeDir: '' }).sessions.length === 0)
+
+section('三个数据源互不影响')
 
 const sharedWbCache = new Map()
 const wbBefore = collectSnapshot({ workbuddyDir, cache: sharedWbCache, now: FIXED_NOW })
 const wbKeysBefore = [...sharedWbCache.keys()]
 const kimiCache = new Map()
 collectKimiSnapshot({ kimiDir, cache: kimiCache, now: FIXED_NOW })
+collectZcodeSnapshot({ zcodeDir: zcodeDirPath, now: FIXED_NOW })
 const wbAfter = collectSnapshot({ workbuddyDir, cache: sharedWbCache, now: FIXED_NOW })
 
-check('采集 Kimi Code 后 WorkBuddy 快照逐字节一致', JSON.stringify(wbBefore) === JSON.stringify(wbAfter))
+check('采集另外两个源之后 WorkBuddy 快照逐字节一致', JSON.stringify(wbBefore) === JSON.stringify(wbAfter))
 check('WorkBuddy 的解析缓存没被动过', JSON.stringify([...sharedWbCache.keys()]) === JSON.stringify(wbKeysBefore))
-check('WorkBuddy 缓存里没有 Kimi 的文件', wbKeysBefore.every((key) => !key.includes('.kimi-code')))
+check('WorkBuddy 缓存里没有别的源的文件', wbKeysBefore.every((key) => !key.includes('.kimi-code') && !key.includes('.zcode')))
 check('Kimi 缓存里没有 WorkBuddy 的文件', [...kimiCache.keys()].every((key) => !key.includes('.workbuddy')))
 check(
-  'WorkBuddy 快照的 kind 没被带偏',
-  wbAfter.kind === 'workbuddy' && kimiReal.kind === 'kimi'
+  '三个源的 kind 各自正确',
+  wbAfter.kind === 'workbuddy' && kimiReal.kind === 'kimi' && zcodeReal.kind === 'zcode'
 )
 
 /* --------------------------------------------------------------- 汇总 */

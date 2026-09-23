@@ -48,6 +48,13 @@ export function kimiDir(): string {
   return join(homedir(), '.kimi-code')
 }
 
+/** ZCode 的本地数据目录（用量库在 <zcodeDir>/cli/db/db.sqlite） */
+export function zcodeDir(): string {
+  const override = process.env['WB_TOKEN_METER_ZCODE_DIR']
+  if (override) return override
+  return join(homedir(), '.zcode')
+}
+
 export type RendererPage = 'index' | 'float'
 
 /** 按页面名加载渲染层；开发走 dev server，生产走打包后的 HTML */

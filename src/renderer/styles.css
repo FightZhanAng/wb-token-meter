@@ -238,6 +238,13 @@ button:disabled {
   font-variant-numeric: tabular-nums;
 }
 
+.meter-unit {
+  font-size: 11px;
+  font-weight: 500;
+  color: #7b8fa5;
+  margin-left: 3px;
+}
+
 .meter-foot {
   display: flex;
   justify-content: space-between;

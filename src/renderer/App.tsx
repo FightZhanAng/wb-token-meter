@@ -7,10 +7,12 @@ import {
   formatClock,
   grouped,
   hasCredits,
+  hasReasoning,
   percent,
   projectLabel,
   relativeTime,
   shiftDays,
+  SOURCE_ORDER,
   sourceLabel,
   startOfToday,
   tokenPerCredit
@@ -161,8 +163,6 @@ function Heatmap({ days, withCredits }: { days: DayStat[]; withCredits: boolean 
 
 /* -------------------------------------------------------- 数据源切换 */
 
-const SOURCES: SourceKind[] = ['workbuddy', 'kimi']
-
 function SourceSwitch({
   value,
   disabled,
@@ -174,7 +174,7 @@ function SourceSwitch({
 }): JSX.Element {
   return (
     <div className="source-switch" role="group" aria-label="数据源">
-      {SOURCES.map((kind) => (
+      {SOURCE_ORDER.map((kind) => (
         <button
           key={kind}
           type="button"
@@ -268,6 +268,7 @@ export default function App(): JSX.Element {
   // 显示口径跟着「正在展示的这份数据」走，而不是跟着开关走 ——
   // 切过去但还没拿到新快照的那一瞬间，不该把 WorkBuddy 的积分画到 Kimi Code 上
   const withCredits = hasCredits(snapshot?.kind ?? 'workbuddy')
+  const withReasoning = hasReasoning(snapshot?.kind ?? 'workbuddy')
 
   const structureRows = useMemo<BarRow[]>(() => {
     if (!totals) return []
@@ -276,11 +277,10 @@ export default function App(): JSX.Element {
       { name: '· 缓存命中', value: totals.cachedTokens, color: '#85B7EB' },
       { name: '输出', value: totals.outputTokens, color: '#1D9E75' }
     ]
-    // WorkBuddy 单列思考 token；Kimi Code 的 output 里已含思考，没有这一项，
-    // 留着只会永远是一根 0 长度的空条
-    if (withCredits) rows.push({ name: '· 思考', value: totals.reasoningTokens, color: '#BA7517' })
+    // 只有 Kimi Code 的 output 里已含思考、没有单独一项；留着只会是根 0 长度的空条
+    if (withReasoning) rows.push({ name: '· 思考', value: totals.reasoningTokens, color: '#BA7517' })
     return rows
-  }, [totals, withCredits])
+  }, [totals, withReasoning])
 
   const dayBars = useMemo(() => {
     const days = (snapshot?.days ?? []).slice(0, 14).reverse()
@@ -349,6 +349,9 @@ export default function App(): JSX.Element {
 
   const activeRatio = snapshot?.active && snapshot.active.size > 0 ? snapshot.active.used / snapshot.active.size : 0
   const activeLevel = levelOf(activeRatio)
+  // 模型上限不落本地时（ZCode 走远程 provider）size 是 0：水位只能报已用量，
+  // 硬算一个百分比出来比不显示更糟
+  const sizeKnown = (snapshot?.active?.size ?? 0) > 0
 
   return (
     <div className="app">
@@ -425,17 +428,28 @@ export default function App(): JSX.Element {
                 <div className="session-title" title={snapshot.active.title}>
                   {snapshot.active.title}
                 </div>
-                <div className="meter-value">{percent(snapshot.active.used, snapshot.active.size)}%</div>
+                {sizeKnown ? (
+                  <div className="meter-value">{percent(snapshot.active.used, snapshot.active.size)}%</div>
+                ) : (
+                  <div className="meter-value">
+                    {compact(snapshot.active.used)}
+                    <span className="meter-unit">token</span>
+                  </div>
+                )}
               </div>
-              <div className="meter">
-                <div
-                  className={`meter-fill ${activeLevel}`}
-                  style={{ width: `${Math.min(100, activeRatio * 100)}%` }}
-                />
-              </div>
+              {sizeKnown ? (
+                <div className="meter">
+                  <div
+                    className={`meter-fill ${activeLevel}`}
+                    style={{ width: `${Math.min(100, activeRatio * 100)}%` }}
+                  />
+                </div>
+              ) : null}
               <div className="meter-foot">
                 <span>
-                  {grouped(snapshot.active.used)} / {grouped(snapshot.active.size)} token
+                  {sizeKnown
+                    ? `${grouped(snapshot.active.used)} / ${grouped(snapshot.active.size)} token`
+                    : '模型上限未知，只报已用量'}
                 </span>
                 <span>{snapshot.active.cwd || '—'}</span>
               </div>

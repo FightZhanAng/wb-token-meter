@@ -3,10 +3,20 @@ import { mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { collectSnapshot, type ParseCache } from '../shared/collector'
+import { SOURCE_ORDER } from '../shared/format'
 import { collectKimiSnapshot, type KimiParseCache } from '../shared/kimi-collector'
+import { collectZcodeSnapshot } from '../shared/zcode-collector'
 import type { FloatState, Settings, Snapshot, SourceKind } from '../shared/types'
 import { FloatWindow } from './float'
-import { appIconPath, hardenWindow, kimiDir, loadRenderer, preloadPath, workbuddyDir } from './paths'
+import {
+  appIconPath,
+  hardenWindow,
+  kimiDir,
+  loadRenderer,
+  preloadPath,
+  workbuddyDir,
+  zcodeDir
+} from './paths'
 import { DEFAULT_SETTINGS, SettingsStore } from './settings'
 import { TrayController } from './tray'
 
@@ -56,7 +66,9 @@ const kimiCache: KimiParseCache = new Map()
 
 /** 当前数据源的数据根目录（「打开数据目录」与采集都认它） */
 function sourceDir(kind: SourceKind): string {
-  return kind === 'kimi' ? kimiDir() : workbuddyDir()
+  if (kind === 'kimi') return kimiDir()
+  if (kind === 'zcode') return zcodeDir()
+  return workbuddyDir()
 }
 
 function currentSource(): SourceKind {
@@ -66,10 +78,13 @@ function currentSource(): SourceKind {
 function refresh(): Snapshot | null {
   const kind = currentSource()
   try {
-    snapshot =
-      kind === 'kimi'
-        ? collectKimiSnapshot({ kimiDir: sourceDir(kind), cache: kimiCache })
-        : collectSnapshot({ workbuddyDir: sourceDir(kind), cache: workbuddyCache })
+    if (kind === 'kimi') {
+      snapshot = collectKimiSnapshot({ kimiDir: sourceDir(kind), cache: kimiCache })
+    } else if (kind === 'zcode') {
+      snapshot = collectZcodeSnapshot({ zcodeDir: sourceDir(kind) })
+    } else {
+      snapshot = collectSnapshot({ workbuddyDir: sourceDir(kind), cache: workbuddyCache })
+    }
     tray?.update(snapshot)
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('snapshot', snapshot)
@@ -265,57 +280,55 @@ function bootstrap(): void {
           const heatShot = await win.webContents.capturePage()
           writeFileSync(join(dir, 'window-heat.png'), heatShot.toPNG())
 
-          // 数据源切换的端到端自检：点按钮 -> IPC -> 重采 -> 重绘。
+          // 数据源切换的端到端自检：逐个点过去 -> IPC -> 重采 -> 重绘，最后切回原样。
           // 只在自检里跑，跑完立刻切回去，免得把用户自己的设置改掉。
           const sourceBefore = settingsStore?.settings.source ?? 'workbuddy'
-          const switchTarget: SourceKind = sourceBefore === 'kimi' ? 'workbuddy' : 'kimi'
-          await win.webContents.executeJavaScript(
-            `(() => {
-               const el = [...document.querySelectorAll('.source-switch button')].find((b) => !b.classList.contains('active'))
-               if (el) el.click()
-             })()`
-          )
-          await new Promise((resolve) => setTimeout(resolve, 1500))
-          const switched = await win.webContents.executeJavaScript(
-            `(() => {
-               const active = document.querySelector('.source-switch .active')
-               return {
-                 active: active ? active.textContent : '',
-                 subtitle: document.querySelector('.app-subtitle')?.textContent || '',
-                 headline: [...document.querySelectorAll('.headline-value')].map((el) => el.textContent),
-                 sessionRows: document.querySelectorAll('.session-row').length,
-                 creditRows: document.querySelectorAll('.session-credits').length,
-                 modelHints: [...document.querySelectorAll('.bar-value em')].map((el) => el.textContent)
-               }
-             })()`
-          )
-          writeFileSync(join(dir, 'window-switched.png'), (await win.webContents.capturePage()).toPNG())
-          smoke('source-switch', {
-            from: sourceBefore,
-            expected: switchTarget,
-            actual: settingsStore?.settings.source,
-            dom: switched
-          })
+          const switches: Array<{ expected: SourceKind; actual: SourceKind | undefined; dom: unknown }> = []
+          for (const [index, target] of SOURCE_ORDER.entries()) {
+            if (target === sourceBefore) continue
+            await win.webContents.executeJavaScript(
+              `(() => {
+                 const el = document.querySelectorAll('.source-switch button')[${index}]
+                 if (el) el.click()
+               })()`
+            )
+            await new Promise((resolve) => setTimeout(resolve, 1500))
+            const switched = await win.webContents.executeJavaScript(
+              `(() => {
+                 const active = document.querySelector('.source-switch .active')
+                 return {
+                   active: active ? active.textContent : '',
+                   subtitle: document.querySelector('.app-subtitle')?.textContent || '',
+                   headline: [...document.querySelectorAll('.headline-value')].map((el) => el.textContent),
+                   sessionRows: document.querySelectorAll('.session-row').length,
+                   creditRows: document.querySelectorAll('.session-credits').length,
+                   contextNote: document.querySelector('.meter-foot')?.textContent || '',
+                   modelHints: [...document.querySelectorAll('.bar-value em')].map((el) => el.textContent)
+                 }
+               })()`
+            )
+            // 截图前先滚回顶部：自检要能一眼看到「今日」与上下文水位这两张卡
+            await win.webContents.executeJavaScript(
+              `(() => { const el = document.querySelector('.app-body'); if (el) el.scrollTop = 0 })()`
+            )
+            await new Promise((resolve) => setTimeout(resolve, 300))
+            writeFileSync(join(dir, `window-${target}.png`), (await win.webContents.capturePage()).toPNG())
+            switches.push({ expected: target, actual: settingsStore?.settings.source, dom: switched })
+          }
+          smoke('source-switch', { from: sourceBefore, switches })
           patchSettings({ source: sourceBefore })
           await new Promise((resolve) => setTimeout(resolve, 1500))
 
-          // 切回来之后 DOM 里的行数必须和 React 自己的子节点数相等。
-          // 少一行就是残留：会话快照里同一个 sessionId 会出现两次，
+          // 切回来之后，DOM 里的会话行数必须等于当前快照的会话数。
+          // 多出来就是残留：会话快照里同一个 sessionId 会出现两次，
           // 列表 key 撞车时 React 对账会漏删，上一批行留在 DOM 里。
           const afterSwitchBack = await win.webContents.executeJavaScript(
             `(() => {
                const c = document.querySelector('.sessions')
-               const key = c ? Object.keys(c).find((k) => k.startsWith('__reactFiber$')) : null
-               let fiberChildren = -1
-               if (key) {
-                 fiberChildren = 0
-                 for (let ch = c[key].child; ch; ch = ch.sibling) fiberChildren += 1
-               }
                return {
                  source: document.querySelector('.source-switch .active')?.textContent || '',
                  rows: document.querySelectorAll('.session-row').length,
                  creditRows: document.querySelectorAll('.session-credits').length,
-                 fiberChildren,
                  containerChildren: c ? c.children.length : -1
                }
              })()`
@@ -323,6 +336,7 @@ function bootstrap(): void {
           smoke('after-switch-back', {
             expected: sourceBefore,
             actual: settingsStore?.settings.source,
+            expectedRows: Math.min((snapshot?.sessions ?? []).length, 40),
             dom: afterSwitchBack
           })
         }

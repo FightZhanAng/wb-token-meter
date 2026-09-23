@@ -1,11 +1,13 @@
 import { Menu, Tray, type MenuItemConstructorOptions } from 'electron'
 import {
   compact,
+  contextSummary,
   credits as formatCredits,
   formatClock,
   hasCredits,
   percent,
   relativeTime,
+  SOURCE_ORDER,
   sourceLabel
 } from '../shared/format'
 import type { FloatSize, Snapshot, SourceKind } from '../shared/types'
@@ -110,7 +112,7 @@ export class TrayController {
       'Token 计量器',
       `${sourceLabel(snapshot.kind)} · 今日 ${compact(todayTokens)} tok`,
       ...(withCredits ? [`${formatCredits(snapshot.today.credits)} 积分`] : []),
-      active && active.size > 0 ? `上下文 ${percent(active.used, active.size)}%` : '无活跃会话'
+      contextSummary(active)
     ].join(' · ')
     this.tray.setToolTip(tooltip)
 
@@ -118,7 +120,9 @@ export class TrayController {
       { label: todayLine, enabled: false },
       {
         label: active
-          ? `上下文 ${compact(active.used)} / ${compact(active.size)}（${percent(active.used, active.size)}%）`
+          ? active.size > 0
+            ? `上下文 ${compact(active.used)} / ${compact(active.size)}（${percent(active.used, active.size)}%）`
+            : `上下文 ${compact(active.used)} token（模型上限未知）`
           : '当前无活跃会话',
         enabled: false
       },
@@ -128,7 +132,7 @@ export class TrayController {
       { type: 'separator' },
       {
         label: `数据源：${sourceLabel(snapshot.kind)}`,
-        submenu: (['workbuddy', 'kimi'] as SourceKind[]).map((kind) => ({
+        submenu: SOURCE_ORDER.map((kind) => ({
           label: sourceLabel(kind),
           type: 'radio' as const,
           checked: source === kind,

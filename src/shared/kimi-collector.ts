@@ -2,9 +2,9 @@
  * Kimi Code 用量采集 —— 与 collector.ts（WorkBuddy）**各走各的链路**。
  *
  * 两边账本口径不同：WorkBuddy 有积分（token 是副产品，还能和积分逐回合对上），
- * Kimi Code 只有 token，没有积分这一层。所以这里是独立模块，只从 collector.ts
- * 借用几个纯函数（emptyBundle / addCall / localDate），聚合流程不共用 ——
- * 动共享代码就有碰坏 WorkBuddy 统计的风险，而那份统计是这个工具存在的理由。
+ * Kimi Code 只有 token，没有积分这一层。所以这里是独立模块，只把结果交给
+ * aggregate.buildSnapshot 汇总 —— 那份聚合是 Kimi 与 ZCode 共用的，
+ * **不含 WorkBuddy**，动它碰不到 WorkBuddy 的统计。
  *
  * 数据形态（本机实测 2026-09，全部在本地，不联网）：
  *
@@ -33,18 +33,8 @@
  */
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
-import { addCall, emptyBundle, localDate, mostFrequentModel } from './collector'
-import type {
-  ActiveContext,
-  CallRecord,
-  DayStat,
-  ModelStat,
-  ProjectStat,
-  SessionStat,
-  Snapshot,
-  TokenBundle,
-  Totals
-} from './types'
+import { buildSnapshot, type SourceSession } from './aggregate'
+import type { CallRecord, Snapshot } from './types'
 
 /* -------------------------------------------------------------- 基础工具 */
 
@@ -408,8 +398,10 @@ export interface KimiCollectOptions {
 }
 
 /**
- * 与 collectSnapshot 同构，但把积分相关的字段一律留 0 ——
- * Kimi Code 没有积分，界面靠 snapshot.kind 决定这些位置显不显示。
+ * 扫描 ~/.kimi-code 并摊成一张 Snapshot。
+ *
+ * 日 / 模型 / 项目 / 活跃会话这些口径交给共用的 aggregate.buildSnapshot，
+ * 这里只负责把 wire.jsonl 的形态翻译成 SourceSession。
  */
 export function collectKimiSnapshot(options: KimiCollectOptions): Snapshot {
   const { kimiDir, cache } = options
@@ -422,143 +414,29 @@ export function collectKimiSnapshot(options: KimiCollectOptions): Snapshot {
   }
   const contextSizes = readModelContextSizes(join(kimiDir, 'config.toml'))
 
-  const sessionStats: SessionStat[] = []
-  const dayMap = new Map<string, DayStat>()
-  const modelMap = new Map<string, ModelStat>()
-  const projectMap = new Map<string, ProjectStat>()
-
-  const totals: Totals = {
-    ...emptyBundle(),
-    credits: 0,
-    attributedCredits: 0,
-    unattributedCredits: 0,
-    sessions: 0,
-    traces: 0,
-    matchedTraces: 0,
-    dbTraces: 0
-  }
-
-  const todayBundle: TokenBundle & { credits: number } = { ...emptyBundle(), credits: 0 }
-  const todayKey = localDate(now)
-
-  // 活跃会话：Kimi Code 没有 WorkBuddy 那种 status 字段，取未归档里最近有动静的
-  let activeSource: SessionStat | null = null
-  let activeAt = -1
-
-  for (const session of scan.sessions) {
-    const bundle = emptyBundle()
-    let lastActivity = session.updatedAt
-    let lastModel = ''
-
-    for (const agent of session.agents) {
-      for (const call of agent.calls) {
-        addCall(bundle, call)
-        if (call.timestamp > lastActivity) lastActivity = call.timestamp
-        lastModel = call.model
-
-        const dayKey = localDate(call.timestamp)
-        let day = dayMap.get(dayKey)
-        if (!day) {
-          day = { ...emptyBundle(), date: dayKey, credits: 0 }
-          dayMap.set(dayKey, day)
-        }
-        addCall(day, call)
-        if (dayKey === todayKey) addCall(todayBundle, call)
-
-        let model = modelMap.get(call.model)
-        if (!model) {
-          model = { ...emptyBundle(), model: call.model, credits: 0, sessions: 0 }
-          modelMap.set(call.model, model)
-        }
-        addCall(model, call)
-      }
-    }
-
-    totals.calls += bundle.calls
-    totals.inputTokens += bundle.inputTokens
-    totals.outputTokens += bundle.outputTokens
-    totals.cachedTokens += bundle.cachedTokens
-    totals.reasoningTokens += bundle.reasoningTokens
-    totals.sessions += 1
-
-    const projectKey = session.workspaceDir
-    let project = projectMap.get(projectKey)
-    if (!project) {
-      project = { ...emptyBundle(), projectDir: projectKey, cwd: session.cwd, sessions: 0 }
-      projectMap.set(projectKey, project)
-    }
-    project.calls += bundle.calls
-    project.inputTokens += bundle.inputTokens
-    project.outputTokens += bundle.outputTokens
-    project.cachedTokens += bundle.cachedTokens
-    project.reasoningTokens += bundle.reasoningTokens
-    project.sessions += 1
-
-    const allCalls = session.agents.flatMap((agent) => agent.calls)
+  const sessions: SourceSession[] = scan.sessions.map((session) => {
+    const calls = session.agents.flatMap((agent) => agent.calls)
     // 上下文窗口按「最后用的模型」算：会话中途换过模型时，水位要对着当前这个
-    const stat: SessionStat = {
+    const lastModel = calls.length ? calls[calls.length - 1].model : ''
+    return {
       sessionId: session.sessionId,
-      title: session.title || '(未命名会话)',
-      cwd: session.cwd,
       projectDir: session.workspaceDir,
-      model: mostFrequentModel(allCalls),
-      status: '',
-      credits: 0,
-      totalTraces: 0,
-      matchedTraces: 0,
+      cwd: session.cwd,
+      title: session.title,
       contextUsed: session.contextTokens,
       contextSize: contextSizes.get(lastModel) ?? 0,
-      lastActivity,
-      ...bundle
+      lastActivity: session.updatedAt,
+      archived: session.archived,
+      calls
     }
-    sessionStats.push(stat)
+  })
 
-    if (!session.archived && lastActivity > activeAt) {
-      activeAt = lastActivity
-      activeSource = stat
-    }
-  }
-
-  for (const [modelName, stat] of modelMap) {
-    let sessions = 0
-    for (const session of scan.sessions) {
-      if (session.agents.some((agent) => agent.calls.some((call) => call.model === modelName))) {
-        sessions += 1
-      }
-    }
-    stat.sessions = sessions
-  }
-
-  const active: ActiveContext | null = activeSource
-    ? {
-        sessionId: activeSource.sessionId,
-        title: activeSource.title,
-        cwd: activeSource.cwd,
-        used: activeSource.contextUsed,
-        size: activeSource.contextSize,
-        updatedAt: activeSource.lastActivity
-      }
-    : null
-
-  return {
+  return buildSnapshot(sessions, {
     kind: 'kimi',
-    generatedAt: now,
-    totals,
-    today: todayBundle,
-    sessions: sessionStats.sort((a, b) => b.lastActivity - a.lastActivity),
-    days: [...dayMap.values()].sort((a, b) => (a.date < b.date ? 1 : -1)),
-    models: [...modelMap.values()].sort(
-      (a, b) => b.inputTokens + b.outputTokens - (a.inputTokens + a.outputTokens)
-    ),
-    projects: [...projectMap.values()].sort(
-      (a, b) => b.inputTokens + b.outputTokens - (a.inputTokens + a.outputTokens)
-    ),
-    active,
-    source: {
-      dir: kimiDir,
-      files: scan.files,
-      dbRows: 0
-    },
+    dir: kimiDir,
+    files: scan.files,
+    dbRows: 0,
+    now,
     warnings
-  }
+  })
 }
