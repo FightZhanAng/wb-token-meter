@@ -1,6 +1,6 @@
 {
   "name": "wb-token-meter",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "description": "Token 计量器 —— 托盘常驻，实时读取 WorkBuddy、Kimi Code 与 ZCode 的本地用量数据",
   "author": "tomcato",
