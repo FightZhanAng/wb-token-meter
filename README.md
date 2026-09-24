@@ -1,14 +1,14 @@
 # Token 计量器
 
-**一个本地用量面板，同时看得见 [WorkBuddy](https://www.workbuddy.cn/)、Kimi Code 和 ZCode 的 token 消耗。**
+**一个本地用量面板，同时看得见 [WorkBuddy](https://www.workbuddy.cn/)、Kimi Code、ZCode 和 Xiaomi MiMo 的 token 消耗。**
 
 WorkBuddy 采用积分制，界面上只显示积分、看不到 token 消耗。但每次模型调用的
 官方 token 数据其实都写在本地磁盘上 —— 这个工具把它读出来，做成常驻托盘的用量面板。
 
-Kimi Code 与 ZCode 没有积分这一层，本地留的正好就是 token 用量本身。面板右上角（或托盘菜单的
-「数据源」）可以随时切换看哪一个，几边的账本各算各的、互不影响。
+Kimi Code、ZCode 与 Xiaomi MiMo 没有积分这一层，本地留的正好就是 token 用量本身。
+面板右上角（或托盘菜单的「数据源」）可以随时切换看哪一个，几边的账本各算各的、互不影响。
 
-> 非官方第三方工具，与 WorkBuddy、Kimi Code、ZCode 官方均无关。
+> 非官方第三方工具，与 WorkBuddy、Kimi Code、ZCode、小米官方均无关。
 > 所有数据都在本地读取和计算：不联网、不上传、不修改任何原始文件。
 
 ## 下载
@@ -85,6 +85,36 @@ ZCode 是三个源里最好取的一份 —— 用量本身就是一张表，不
 `src/shared/aggregate.ts`；WorkBuddy 那条链路完全独立 ——
 切换数据源不会碰任何一边的数字。
 
+### Xiaomi MiMo 桌面端（只有 token）
+
+引擎是内嵌的 **mimocode**，数据根**不是** `~/.mimocode`（那只是插件工作区）：
+
+| 数据源 | 位置 | 内容 |
+|---|---|---|
+| 用量明细 | `~/.local/share/mimocode/mimocode.db` → `message` 表 | 每条助手消息的 `data` JSON 里带 `tokens`：`input` / `output` / `reasoning` / `cache.read` / `cache.write`，外加 `modelID`、`providerID` |
+| 会话元数据 | 同库 `session` 表 | 标题、`directory`、`project_id`、创建 / 更新 / 归档时间 |
+| 上下文窗口 | `~/.cache/mimocode/models.json` | 引擎的模型目录（223 个 provider），每个模型带 `limit.context` |
+
+**它的 token 口径和另外三个源反着来**，映射时要转一道：
+
+```
+total = input + output + reasoning + cache.read + cache.write
+```
+
+也就是说这里的 `input` 是**不含缓存读**的纯新增输入，而 WorkBuddy / Kimi Code /
+ZCode 的 input 都含缓存。所以：
+
+```
+输入 = input + cache.read + cache.write      缓存命中 = cache.read
+输出 = output                                思考 = reasoning（单列）
+```
+
+取 `message` 级而不是 `part` 级：`part` 表里 `step-finish` 那份 tokens 与 message
+**完全同值**（是副本），而 message 级更全（本机实测 84 条 vs 72 条）。
+
+不读 `cost`：引擎按价格表算的那个是**金额不是积分**，货币单位还随 provider 变，
+界面上没有它的位置。
+
 
 ### 积分口径（仅 WorkBuddy）
 
@@ -129,6 +159,8 @@ pnpm dist          # 打包 Windows 安装包与免安装版到 release/
 | `WB_TOKEN_METER_DIR` | 覆盖 WorkBuddy 数据目录，默认 `~/.workbuddy`（便于测试） |
 | `WB_TOKEN_METER_KIMI_DIR` | 覆盖 Kimi Code 数据目录，默认 `~/.kimi-code` |
 | `WB_TOKEN_METER_ZCODE_DIR` | 覆盖 ZCode 数据目录，默认 `~/.zcode` |
+| `WB_TOKEN_METER_MIMO_DIR` | 覆盖 MiMo 数据目录，默认 `~/.local/share/mimocode` |
+| `WB_TOKEN_METER_MIMO_CACHE_DIR` | 覆盖 MiMo 缓存目录（模型目录在里面），默认 `~/.cache/mimocode` |
 | `WB_TOKEN_METER_SMOKE=1` | 冒烟自检：把启动状态写到 `%TEMP%\wbtm-smoke\` |
 | `WB_TOKEN_METER_SMOKE_EXIT=1` | 自检报告写完后自动退出 |
 
@@ -140,8 +172,8 @@ pnpm dist          # 打包 Windows 安装包与免安装版到 release/
 推一个 `v*` 标签，GitHub Actions 会自动打包并创建 Release：
 
 ```bash
-git tag -a v0.3.0 -m "v0.3.0"
-git push origin v0.3.0
+git tag -a v0.4.0 -m "v0.4.0"
+git push origin v0.4.0
 ```
 
 也可以在仓库的 Actions 页面手动触发 —— 手动跑只把安装包留档成 artifact，不发 Release。
@@ -152,11 +184,11 @@ GitHub Downloads 会卡在证书吊销检查上）。两边都靠 `ELECTRON_MIRR
 
 ## 界面
 
-右上角是**数据源切换**：`WorkBuddy` / `Kimi Code` / `ZCode`，选择存在设置文件里，重启后还在。
+右上角是**数据源切换**：`WorkBuddy` / `Kimi Code` / `ZCode` / `MiMo`，选择存在设置文件里，重启后还在。
 
-- **今日** —— token 与积分，以及今日的 token/积分比价；没有积分的两个源把第二个大数字换成缓存命中率
+- **今日** —— token 与积分，以及今日的 token/积分比价；没有积分的三个源把第二个大数字换成缓存命中率
 - **当前会话上下文** —— 上下文水位进度条，超过 70% 转琥珀、90% 转红；模型上限未知时只报已用量
-- **Token 结构** —— 输入 / 缓存命中 / 输出 / 思考 的分布（Kimi Code 不单列思考，ZCode 单列）
+- **Token 结构** —— 输入 / 缓存命中 / 输出 / 思考 的分布（Kimi Code 不单列思考，其余三个单列）
 - **近 14 天** —— 每日 token 柱状图（悬停看当日积分）
 - **活跃热力图** —— 近 26 周，GitHub 贡献图那种格子；越深表示当天 token 越多
 - **按模型 / 按项目** —— 用量排行
@@ -181,7 +213,7 @@ GitHub Downloads 会卡在证书吊销检查上）。两边都靠 `ELECTRON_MIRR
 
 | 菜单项 | 能改什么 |
 |---|---|
-| 数据源 | WorkBuddy / Kimi Code / ZCode |
+| 数据源 | WorkBuddy / Kimi Code / ZCode / MiMo |
 | 桌面胶囊 | 显示 / 隐藏 |
 | 胶囊尺寸 | 小 / 中 / 大（胶囊本体 152×44、198×56、252×68） |
 | 胶囊不透明度 | 100% ~ 50% |
@@ -221,6 +253,10 @@ GitHub Downloads 会卡在证书吊销检查上）。两边都靠 `ELECTRON_MIRR
   `~/.zcode/cli/rollout/` 的 `model-io-*.jsonl` 里，本工具不解析。
 - ZCode 的子代理会话（`session.task_type='subagent_child'`）若有用量，
   会作为独立会话出现在排行里，不像 Kimi Code 那样并入父会话。
+- MiMo 的上下文窗口来自引擎自己的模型目录 `~/.cache/mimocode/models.json`；
+  文件缺失、或模型不在目录里（自建 provider 的私有模型）时，水位只报已用量、不给百分比。
+- MiMo 的用量只覆盖 `message` 表里记着 tokens 的那些请求；
+  引擎按价格表算的 `cost` 是金额不是积分，本工具不读它。
 
 ## 许可
 

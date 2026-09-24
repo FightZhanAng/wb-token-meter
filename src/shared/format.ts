@@ -47,20 +47,21 @@ export function hasCredits(kind: SourceKind): boolean {
 
 /**
  * 该数据源是否单列思考 token。
- * WorkBuddy 与 ZCode 都单列；Kimi Code 的 output 里已含思考，没有这一项，
+ * WorkBuddy、ZCode 与 MiMo 都单列；Kimi Code 的 output 里已含思考，没有这一项，
  * 留着只会永远是一根 0 长度的空条。
  */
 export function hasReasoning(kind: SourceKind): boolean {
-  return kind === 'workbuddy' || kind === 'zcode'
+  return kind === 'workbuddy' || kind === 'zcode' || kind === 'mimo'
 }
 
 /** 数据源在界面上的顺序 —— 面板分段按钮与托盘菜单共用同一份，免得两边点错位 */
-export const SOURCE_ORDER: SourceKind[] = ['workbuddy', 'kimi', 'zcode']
+export const SOURCE_ORDER: SourceKind[] = ['workbuddy', 'kimi', 'zcode', 'mimo']
 
 /** 数据源显示名 */
 export function sourceLabel(kind: SourceKind): string {
   if (kind === 'workbuddy') return 'WorkBuddy'
   if (kind === 'zcode') return 'ZCode'
+  if (kind === 'mimo') return 'MiMo'
   return 'Kimi Code'
 }
 

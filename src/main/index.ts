@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { collectSnapshot, type ParseCache } from '../shared/collector'
 import { SOURCE_ORDER } from '../shared/format'
 import { collectKimiSnapshot, type KimiParseCache } from '../shared/kimi-collector'
+import { collectMimoSnapshot } from '../shared/mimo-collector'
 import { collectZcodeSnapshot } from '../shared/zcode-collector'
 import type { FloatState, Settings, Snapshot, SourceKind } from '../shared/types'
 import { FloatWindow } from './float'
@@ -13,6 +14,8 @@ import {
   hardenWindow,
   kimiDir,
   loadRenderer,
+  mimoCacheDir,
+  mimoDataDir,
   preloadPath,
   workbuddyDir,
   zcodeDir
@@ -68,6 +71,7 @@ const kimiCache: KimiParseCache = new Map()
 function sourceDir(kind: SourceKind): string {
   if (kind === 'kimi') return kimiDir()
   if (kind === 'zcode') return zcodeDir()
+  if (kind === 'mimo') return mimoDataDir()
   return workbuddyDir()
 }
 
@@ -82,6 +86,8 @@ function refresh(): Snapshot | null {
       snapshot = collectKimiSnapshot({ kimiDir: sourceDir(kind), cache: kimiCache })
     } else if (kind === 'zcode') {
       snapshot = collectZcodeSnapshot({ zcodeDir: sourceDir(kind) })
+    } else if (kind === 'mimo') {
+      snapshot = collectMimoSnapshot({ mimoDir: sourceDir(kind), cacheDir: mimoCacheDir() })
     } else {
       snapshot = collectSnapshot({ workbuddyDir: sourceDir(kind), cache: workbuddyCache })
     }
@@ -339,6 +345,28 @@ function bootstrap(): void {
             expectedRows: Math.min((snapshot?.sessions ?? []).length, 40),
             dom: afterSwitchBack
           })
+
+          // 顶栏在最小宽度下不能被撑破：四个数据源按钮 + 刷新挤在一行，
+          // scrollWidth 超过 clientWidth 就是溢出了（窗口默认 560，最小 460）
+          const originalBounds = win.getBounds()
+          win.setSize(460, originalBounds.height)
+          await new Promise((resolve) => setTimeout(resolve, 400))
+          const narrow = await win.webContents.executeJavaScript(
+            `(() => {
+               const header = document.querySelector('.app-header')
+               const actions = document.querySelector('.header-actions')
+               return {
+                 viewportWidth: window.innerWidth,
+                 headerClientWidth: header ? header.clientWidth : -1,
+                 headerScrollWidth: header ? header.scrollWidth : -1,
+                 actionsWidth: actions ? Math.round(actions.getBoundingClientRect().width) : -1,
+                 subtitle: document.querySelector('.app-subtitle')?.textContent || ''
+               }
+             })()`
+          )
+          smoke('narrow-header', narrow)
+          win.setSize(originalBounds.width, originalBounds.height)
+          await new Promise((resolve) => setTimeout(resolve, 300))
         }
 
         // 桌面胶囊单独截一张，并回报 DOM 度量

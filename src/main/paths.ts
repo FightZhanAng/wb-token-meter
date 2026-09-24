@@ -55,6 +55,23 @@ export function zcodeDir(): string {
   return join(homedir(), '.zcode')
 }
 
+/**
+ * MiMo（mimocode 引擎）的数据目录。
+ * 注意不是 ~/.mimocode —— 那是插件工作区，用量库在 ~/.local/share/mimocode。
+ */
+export function mimoDataDir(): string {
+  const override = process.env['WB_TOKEN_METER_MIMO_DIR']
+  if (override) return override
+  return join(homedir(), '.local', 'share', 'mimocode')
+}
+
+/** MiMo 引擎的缓存目录，模型目录 models.json 在这里 */
+export function mimoCacheDir(): string {
+  const override = process.env['WB_TOKEN_METER_MIMO_CACHE_DIR']
+  if (override) return override
+  return join(homedir(), '.cache', 'mimocode')
+}
+
 export type RendererPage = 'index' | 'float'
 
 /** 按页面名加载渲染层；开发走 dev server，生产走打包后的 HTML */

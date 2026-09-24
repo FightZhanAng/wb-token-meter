@@ -356,11 +356,11 @@ export default function App(): JSX.Element {
   return (
     <div className="app">
       <header className="app-header">
-        <div>
+        <div className="app-header-main">
           <div className="app-title">Token 计量器</div>
           <div className="app-subtitle">
             {snapshot
-              ? `${sourceLabel(snapshot.kind)} · 更新于 ${formatClock(snapshot.generatedAt)} · ${relativeTime(snapshot.generatedAt, now)}`
+              ? `更新于 ${formatClock(snapshot.generatedAt)} · ${relativeTime(snapshot.generatedAt, now)}`
               : '正在读取…'}
           </div>
         </div>

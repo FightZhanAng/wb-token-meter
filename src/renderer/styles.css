@@ -43,16 +43,29 @@ body {
   letter-spacing: 0.02em;
 }
 
+/*
+ * 四个数据源的按钮 + 刷新已经占了半行，左侧这块必须能收缩：
+ * 不给 min-width: 0，flex 子项不会小于内容宽度，窗口收到最小尺寸时
+ * 顶栏就会被撑破。副标题同理，超长就省略号。
+ */
+.app-header-main {
+  min-width: 0;
+}
+
 .app-subtitle {
   font-size: 12px;
   color: #7b8fa5;
   font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .header-actions {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex: none;
 }
 
 button {

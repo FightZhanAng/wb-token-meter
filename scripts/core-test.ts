@@ -20,6 +20,7 @@ import {
   parseModelContextSizes
 } from '../src/shared/kimi-collector'
 import { collectZcodeSnapshot } from '../src/shared/zcode-collector'
+import { collectMimoSnapshot } from '../src/shared/mimo-collector'
 import { compact, grouped, percent, tokenPerCredit } from '../src/shared/format'
 import type { CallRecord, Snapshot } from '../src/shared/types'
 
@@ -552,7 +553,176 @@ if (!hasZcode) {
 check('ZCode 目录不存在不崩', collectZcodeSnapshot({ zcodeDir: join(homedir(), '.zcode-nonexistent') }).sessions.length === 0)
 check('路径为空不崩', collectZcodeSnapshot({ zcodeDir: '' }).sessions.length === 0)
 
-section('三个数据源互不影响')
+/* --------------------------------------------------- 7. MiMo 数据源 */
+
+section('MiMo 目录扫描（临时夹具）')
+
+const mimoRoot = mkdtempSync(join(tmpdir(), 'wbtm-mimo-'))
+const mimoCacheRoot = mkdtempSync(join(tmpdir(), 'wbtm-mimo-cache-'))
+const mimoDbPath = join(mimoRoot, 'mimocode.db')
+const mimoDb = new DatabaseSync(mimoDbPath)
+mimoDb.exec(`
+  CREATE TABLE message (
+    id TEXT PRIMARY KEY, session_id TEXT, agent_id TEXT,
+    time_created INTEGER, time_updated INTEGER, data TEXT
+  );
+  CREATE TABLE session (
+    id TEXT PRIMARY KEY, title TEXT, directory TEXT, project_id TEXT,
+    time_created INTEGER, time_updated INTEGER, time_archived INTEGER
+  );
+`)
+const insertMimoMessage = mimoDb.prepare(
+  'INSERT INTO message (id, session_id, agent_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?, ?)'
+)
+const mimoTokens = (
+  input: number,
+  output: number,
+  reasoning: number,
+  cacheRead: number,
+  cacheWrite: number,
+  modelId = 'demo-model'
+): string =>
+  JSON.stringify({
+    role: 'assistant',
+    modelID: modelId,
+    providerID: 'demo-provider',
+    tokens: {
+      total: input + output + reasoning + cacheRead + cacheWrite,
+      input,
+      output,
+      reasoning,
+      cache: { read: cacheRead, write: cacheWrite }
+    },
+    cost: 0
+  })
+insertMimoMessage.run('m1', 'sess_a', 'main', FIXED_NOW - 3000, FIXED_NOW - 3000, mimoTokens(1000, 100, 40, 500, 100))
+insertMimoMessage.run('m2', 'sess_a', 'main', FIXED_NOW - 1000, FIXED_NOW - 1000, mimoTokens(200, 50, 10, 1800, 0))
+insertMimoMessage.run(
+  'm3',
+  'sess_b',
+  'main',
+  FIXED_NOW - 2000,
+  FIXED_NOW - 2000,
+  mimoTokens(300, 30, 0, 0, 0, 'unknown-model')
+)
+/* 零用量（引擎会给 <synthetic> 模型写这种）与坏 JSON，都不该被算进去 */
+insertMimoMessage.run('m4', 'sess_b', 'main', FIXED_NOW - 1500, FIXED_NOW - 1500, mimoTokens(0, 0, 0, 0, 0))
+insertMimoMessage.run('m5', 'sess_a', 'main', FIXED_NOW - 1200, FIXED_NOW - 1200, '{ broken json')
+const insertMimoSession = mimoDb.prepare(
+  'INSERT INTO session (id, title, directory, project_id, time_created, time_updated, time_archived) VALUES (?, ?, ?, ?, ?, ?, ?)'
+)
+insertMimoSession.run('sess_a', '夹具会话 A', 'D:\\proj\\a', 'global', FIXED_NOW - 9000, FIXED_NOW - 1000, 0)
+insertMimoSession.run('sess_b', '夹具会话 B', 'D:\\proj\\b', 'proj_b', FIXED_NOW - 9000, FIXED_NOW - 2000, FIXED_NOW)
+mimoDb.close()
+/* 模型目录：demo-provider/demo-model 有窗口，别的模型查不到 */
+writeFileSync(
+  join(mimoCacheRoot, 'models.json'),
+  JSON.stringify({
+    'demo-provider': { models: { 'demo-model': { limit: { context: 1048576, output: 131072 } } } },
+    'other-provider': { models: { 'other-model': { limit: { context: 200000 } } } }
+  })
+)
+
+const mimoFixture = collectMimoSnapshot({ mimoDir: mimoRoot, cacheDir: mimoCacheRoot, now: FIXED_NOW })
+check('kind 标记为 mimo', mimoFixture.kind === 'mimo')
+check('扫到 2 个会话', mimoFixture.totals.sessions === 2, String(mimoFixture.totals.sessions))
+check('零用量与坏 JSON 的行被丢掉', mimoFixture.totals.calls === 3, String(mimoFixture.totals.calls))
+check(
+  '输入 = input + 缓存读 + 缓存写（与其它三个源相反的口径）',
+  mimoFixture.totals.inputTokens === 1000 + 500 + 100 + 200 + 1800 + 300,
+  String(mimoFixture.totals.inputTokens)
+)
+check('缓存命中只算 cache.read', mimoFixture.totals.cachedTokens === 2300, String(mimoFixture.totals.cachedTokens))
+check('输出求和', mimoFixture.totals.outputTokens === 180, String(mimoFixture.totals.outputTokens))
+check('思考 token 单列', mimoFixture.totals.reasoningTokens === 50, String(mimoFixture.totals.reasoningTokens))
+check(
+  '所有粒度的积分都是 0',
+  mimoFixture.totals.credits === 0 &&
+    mimoFixture.sessions.every((s) => s.credits === 0) &&
+    mimoFixture.days.every((d) => d.credits === 0) &&
+    mimoFixture.models.every((m) => m.credits === 0)
+)
+check(
+  '上下文水位取最后一次请求的 prompt',
+  mimoFixture.sessions.find((s) => s.sessionId === 'sess_a')?.contextUsed === 2000,
+  String(mimoFixture.sessions.find((s) => s.sessionId === 'sess_a')?.contextUsed)
+)
+check(
+  '上下文窗口来自 models.json',
+  mimoFixture.sessions.find((s) => s.sessionId === 'sess_a')?.contextSize === 1048576,
+  String(mimoFixture.sessions.find((s) => s.sessionId === 'sess_a')?.contextSize)
+)
+check('模型不在目录里时窗口留 0', mimoFixture.sessions.find((s) => s.sessionId === 'sess_b')?.contextSize === 0)
+check('已归档会话不参与活跃评选', mimoFixture.active?.sessionId === 'sess_a', String(mimoFixture.active?.sessionId))
+check('会话标题来自 session 表', mimoFixture.sessions[0]?.title === '夹具会话 A', mimoFixture.sessions[0]?.title)
+check('按会话所在目录分组', mimoFixture.projects.map((p) => p.projectDir).sort().join('/') === 'D:\\proj\\a/D:\\proj\\b')
+
+const mimoStatBefore = statSync(mimoDbPath)
+collectMimoSnapshot({ mimoDir: mimoRoot, cacheDir: mimoCacheRoot, now: FIXED_NOW })
+const mimoStatAfter = statSync(mimoDbPath)
+check(
+  '采集不修改用量库',
+  mimoStatBefore.mtimeMs === mimoStatAfter.mtimeMs && mimoStatBefore.size === mimoStatAfter.size
+)
+
+rmSync(mimoRoot, { recursive: true, force: true })
+rmSync(mimoCacheRoot, { recursive: true, force: true })
+
+section('MiMo 真实数据')
+
+const mimoDataPath = join(homedir(), '.local', 'share', 'mimocode')
+const mimoCachePath = join(homedir(), '.cache', 'mimocode')
+const mimoStarted = Date.now()
+const mimoReal = collectMimoSnapshot({ mimoDir: mimoDataPath, cacheDir: mimoCachePath })
+const mimoElapsed = Date.now() - mimoStarted
+
+console.log(`  读取耗时 ${mimoElapsed} ms`)
+console.log(`  会话 ${mimoReal.totals.sessions} 个 · 调用 ${grouped(mimoReal.totals.calls)} 次`)
+console.log(
+  `  token 输入 ${compact(mimoReal.totals.inputTokens)} · 输出 ${compact(mimoReal.totals.outputTokens)}` +
+    ` · 缓存 ${compact(mimoReal.totals.cachedTokens)} · 思考 ${compact(mimoReal.totals.reasoningTokens)}`
+)
+console.log(
+  `  当前上下文 ${grouped(mimoReal.active?.used ?? 0)} / ${grouped(mimoReal.active?.size ?? 0)} token`
+)
+
+const hasMimo = mimoReal.totals.calls > 0
+
+if (!hasMimo) {
+  console.log('  skip 未检测到 MiMo 数据 —— 真实数据相关断言全部跳过（CI 环境属正常）')
+} else {
+  check('读到会话', mimoReal.totals.sessions > 0)
+  check('读到调用', mimoReal.totals.calls > 0)
+  check('读取在 15 秒内', mimoElapsed < 15_000, `${mimoElapsed} ms`)
+  check('积分恒为 0', mimoReal.totals.credits === 0)
+  check(
+    '会话 token 之和 == 全局',
+    sum(mimoReal.sessions.map((s) => s.inputTokens + s.outputTokens)) ===
+      mimoReal.totals.inputTokens + mimoReal.totals.outputTokens
+  )
+  check(
+    '模型 token 之和 == 全局',
+    sum(mimoReal.models.map((m) => m.inputTokens + m.outputTokens)) ===
+      mimoReal.totals.inputTokens + mimoReal.totals.outputTokens
+  )
+  check(
+    '日 token 之和 == 全局',
+    sum(mimoReal.days.map((d) => d.inputTokens + d.outputTokens)) ===
+      mimoReal.totals.inputTokens + mimoReal.totals.outputTokens
+  )
+  check('缓存命中不超过输入', mimoReal.totals.cachedTokens <= mimoReal.totals.inputTokens)
+  check('有活跃会话', mimoReal.active !== null)
+  check('每个会话都有标题', mimoReal.sessions.every((s) => s.title.length > 0))
+  check('至少有一个会话能算出上下文窗口', mimoReal.sessions.some((s) => s.contextSize > 0))
+}
+
+check(
+  'MiMo 目录不存在不崩',
+  collectMimoSnapshot({ mimoDir: join(homedir(), '.mimo-nonexistent'), cacheDir: mimoCachePath }).sessions.length === 0
+)
+check('路径为空不崩', collectMimoSnapshot({ mimoDir: '', cacheDir: '' }).sessions.length === 0)
+
+section('四个数据源互不影响')
 
 const sharedWbCache = new Map()
 const wbBefore = collectSnapshot({ workbuddyDir, cache: sharedWbCache, now: FIXED_NOW })
@@ -560,15 +730,22 @@ const wbKeysBefore = [...sharedWbCache.keys()]
 const kimiCache = new Map()
 collectKimiSnapshot({ kimiDir, cache: kimiCache, now: FIXED_NOW })
 collectZcodeSnapshot({ zcodeDir: zcodeDirPath, now: FIXED_NOW })
+collectMimoSnapshot({ mimoDir: mimoDataPath, cacheDir: mimoCachePath, now: FIXED_NOW })
 const wbAfter = collectSnapshot({ workbuddyDir, cache: sharedWbCache, now: FIXED_NOW })
 
-check('采集另外两个源之后 WorkBuddy 快照逐字节一致', JSON.stringify(wbBefore) === JSON.stringify(wbAfter))
+check('采集另外三个源之后 WorkBuddy 快照逐字节一致', JSON.stringify(wbBefore) === JSON.stringify(wbAfter))
 check('WorkBuddy 的解析缓存没被动过', JSON.stringify([...sharedWbCache.keys()]) === JSON.stringify(wbKeysBefore))
-check('WorkBuddy 缓存里没有别的源的文件', wbKeysBefore.every((key) => !key.includes('.kimi-code') && !key.includes('.zcode')))
+check(
+  'WorkBuddy 缓存里没有别的源的文件',
+  wbKeysBefore.every((key) => !key.includes('.kimi-code') && !key.includes('.zcode') && !key.includes('mimocode'))
+)
 check('Kimi 缓存里没有 WorkBuddy 的文件', [...kimiCache.keys()].every((key) => !key.includes('.workbuddy')))
 check(
-  '三个源的 kind 各自正确',
-  wbAfter.kind === 'workbuddy' && kimiReal.kind === 'kimi' && zcodeReal.kind === 'zcode'
+  '四个源的 kind 各自正确',
+  wbAfter.kind === 'workbuddy' &&
+    kimiReal.kind === 'kimi' &&
+    zcodeReal.kind === 'zcode' &&
+    mimoReal.kind === 'mimo'
 )
 
 /* --------------------------------------------------------------- 汇总 */
