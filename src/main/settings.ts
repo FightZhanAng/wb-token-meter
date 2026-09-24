@@ -10,7 +10,8 @@ import {
   writeFileSync
 } from 'node:fs'
 import { dirname, join } from 'node:path'
-import type { FloatPosition, Settings } from '../shared/types'
+import { SOURCE_ORDER } from '../shared/format'
+import type { FloatPosition, Settings, SourceKind } from '../shared/types'
 
 export const DEFAULT_SETTINGS: Settings = {
   source: 'workbuddy',
@@ -38,13 +39,18 @@ function parsePosition(value: unknown): FloatPosition | null {
   return { x: Math.round(point.x), y: Math.round(point.y) }
 }
 
+/** 数据源白名单跟着 SOURCE_ORDER 走 —— 加新源不用改这里，也不会再漏一个就静默回退 */
+function isSourceKind(value: unknown): value is SourceKind {
+  return typeof value === 'string' && (SOURCE_ORDER as readonly string[]).includes(value)
+}
+
 /** 逐字段校验：配置文件被手改坏时只回退那一个字段，不要整体重置 */
 function parseSettings(raw: unknown): Settings {
   const input = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
   const size = input.floatSize
   const source = input.source
   return {
-    source: source === 'kimi' || source === 'workbuddy' ? source : DEFAULT_SETTINGS.source,
+    source: isSourceKind(source) ? source : DEFAULT_SETTINGS.source,
     floatEnabled:
       typeof input.floatEnabled === 'boolean' ? input.floatEnabled : DEFAULT_SETTINGS.floatEnabled,
     floatOpacity: clampNumber(input.floatOpacity, 0.3, 1, DEFAULT_SETTINGS.floatOpacity),

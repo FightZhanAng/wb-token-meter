@@ -1,7 +1,8 @@
 import { StrictMode, useEffect, useRef, useState, type JSX } from 'react'
 import { createRoot } from 'react-dom/client'
-import { compact, credits as formatCredits, hasCredits, percent } from '@shared/format'
-import type { Settings, Snapshot } from '@shared/types'
+import { compact, credits as formatCredits, hasCredits, hasQuota, percent } from '@shared/format'
+import { describeReset, quotaWindowLabel, windowOf } from '@shared/opencode-quota'
+import type { QuotaInfo, QuotaWindow, Settings, Snapshot } from '@shared/types'
 import './float.css'
 
 /** 上下文水位圆环：颜色随水位从蓝转琥珀再转红 */
@@ -27,6 +28,13 @@ function WaterRing({ ratio }: { ratio: number }): JSX.Element {
       />
     </svg>
   )
+}
+
+/** 额度源的第二行：陈旧值先声明自己是旧的，没数据就直说 */
+function quotaFoot(quota: QuotaInfo, rolling: QuotaWindow | null, now: number): string {
+  if (!rolling) return '未取到额度'
+  if (quota.stale) return '旧数据'
+  return describeReset(rolling.resetsAt, now)
 }
 
 function Capsule(): JSX.Element {
@@ -128,11 +136,19 @@ function Capsule(): JSX.Element {
     }
   }, [])
 
+  const kind = snapshot?.kind ?? 'workbuddy'
   const todayTokens = (snapshot?.today.inputTokens ?? 0) + (snapshot?.today.outputTokens ?? 0)
   const active = snapshot?.active
-  const ratio = active && active.size > 0 ? active.used / active.size : 0
   // Kimi Code 没有积分，第二行换成今日调用次数
-  const withCredits = hasCredits(snapshot?.kind ?? 'workbuddy')
+  const withCredits = hasCredits(kind)
+
+  // 额度源没有 token 也没有会话，圆环改报 5 小时窗口的占用；
+  // 圆环自带的 0.9 / 0.7 配色阈值正好和 quotaLevel 的分档一致，直接复用
+  const quota = hasQuota(kind) ? snapshot?.quota : undefined
+  const rolling = quota ? (windowOf(quota.windows, 'rolling') ?? quota.windows[0] ?? null) : null
+  const ratio = quota ? (rolling?.percent ?? 0) / 100 : active && active.size > 0 ? active.used / active.size : 0
+  // 快照每 20 秒推一次，重置文案跟着这一次渲染的时间算就够了，不必再挂个计时器
+  const now = Date.now()
 
   const className = [
     'capsule',
@@ -146,14 +162,26 @@ function Capsule(): JSX.Element {
     <div ref={capsuleRef} className={className} title="拖动移动 · 单击打开面板">
       <WaterRing ratio={ratio} />
       <div className="readout">
-        <div className="tokens">
-          {compact(todayTokens)}
-          <em>token</em>
-        </div>
-        <div className={`credits${withCredits ? '' : ' plain'}`}>
-          {active && active.size > 0 ? `${percent(active.used, active.size)}% · ` : ''}
-          {withCredits ? `${formatCredits(snapshot?.today.credits ?? 0)} 分` : `${snapshot?.today.calls ?? 0} 次`}
-        </div>
+        {quota ? (
+          <>
+            <div className="tokens">
+              {rolling ? `${rolling.percent}%` : '—'}
+              <em>{quotaWindowLabel(rolling?.key ?? 'rolling')}</em>
+            </div>
+            <div className="credits plain">{quotaFoot(quota, rolling, now)}</div>
+          </>
+        ) : (
+          <>
+            <div className="tokens">
+              {compact(todayTokens)}
+              <em>token</em>
+            </div>
+            <div className={`credits${withCredits ? '' : ' plain'}`}>
+              {active && active.size > 0 ? `${percent(active.used, active.size)}% · ` : ''}
+              {withCredits ? `${formatCredits(snapshot?.today.credits ?? 0)} 分` : `${snapshot?.today.calls ?? 0} 次`}
+            </div>
+          </>
+        )}
       </div>
     </div>
   )

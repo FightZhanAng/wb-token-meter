@@ -5,11 +5,13 @@ import {
   credits as formatCredits,
   formatClock,
   hasCredits,
+  hasQuota,
   percent,
   relativeTime,
   SOURCE_ORDER,
   sourceLabel
 } from '../shared/format'
+import { describeReset, quotaSummary, quotaWindowLabel, windowOf } from '../shared/opencode-quota'
 import type { FloatSize, Snapshot, SourceKind } from '../shared/types'
 import { trayIconImage } from './paths'
 
@@ -69,11 +71,22 @@ export class TrayController {
   update(snapshot: Snapshot): void {
     if (!this.tray) return
 
+    const now = Date.now()
     const withCredits = hasCredits(snapshot.kind)
+    const withQuota = hasQuota(snapshot.kind)
+    const quota = withQuota ? snapshot.quota : undefined
     const todayTokens = snapshot.today.inputTokens + snapshot.today.outputTokens
     const active = snapshot.active
-    // 进度环表示当前活跃会话的上下文水位 —— 这是唯一有明确上限的实时指标
-    const ratio = active && active.size > 0 ? Math.min(1, active.used / active.size) : 0
+    // 进度环报「占了上限的多少」：额度源用 5 小时窗口，
+    // 其余源用活跃会话的上下文水位 —— 那是唯一有明确上限的本地实时指标
+    const rolling = quota ? (windowOf(quota.windows, 'rolling') ?? quota.windows[0] ?? null) : null
+    const ratio = withQuota
+      ? rolling
+        ? Math.min(1, rolling.percent / 100)
+        : 0
+      : active && active.size > 0
+        ? Math.min(1, active.used / active.size)
+        : 0
 
     const source = this.cb.getSource()
     const floatEnabled = this.cb.getFloatEnabled()
@@ -81,6 +94,13 @@ export class TrayController {
     const floatOpacity = this.cb.getFloatOpacity()
     const floatOnTop = this.cb.getFloatAlwaysOnTop()
     const floatSolid = this.cb.getFloatSolid()
+
+    // 额度只有三个百分比，值没变就不该重建菜单，所以整套窗口值都得进签名
+    const quotaSignature = quota
+      ? `${quota.fetchedAt}|${quota.stale ? 1 : 0}|${quota.error ?? ''}|${quota.windows
+          .map((win) => `${win.key}:${win.percent}:${win.resetsAt}`)
+          .join(',')}`
+      : ''
 
     // 只在可见内容真的变了时才重建菜单，免得每 20 秒白干一次
     const signature = [
@@ -91,6 +111,7 @@ export class TrayController {
       Math.round(ratio * 100),
       active?.sessionId ?? '',
       snapshot.generatedAt,
+      quotaSignature,
       source,
       floatEnabled,
       floatSize,
@@ -108,27 +129,60 @@ export class TrayController {
       ? `今日 ${compact(todayTokens)} token · ${formatCredits(snapshot.today.credits)} 积分`
       : `今日 ${compact(todayTokens)} token · ${snapshot.today.calls} 次调用`
 
-    const tooltip = [
-      'Token 计量器',
-      `${sourceLabel(snapshot.kind)} · 今日 ${compact(todayTokens)} tok`,
-      ...(withCredits ? [`${formatCredits(snapshot.today.credits)} 积分`] : []),
-      contextSummary(active)
-    ].join(' · ')
+    const quotaText = `${quotaSummary(quota?.windows ?? [], 'short')}${quota?.stale ? '（旧数据）' : ''}`
+
+    const tooltip = withQuota
+      ? ['Token 计量器', sourceLabel(snapshot.kind), quotaText].join(' · ')
+      : [
+          'Token 计量器',
+          `${sourceLabel(snapshot.kind)} · 今日 ${compact(todayTokens)} tok`,
+          ...(withCredits ? [`${formatCredits(snapshot.today.credits)} 积分`] : []),
+          contextSummary(active)
+        ].join(' · ')
     this.tray.setToolTip(tooltip)
 
+    // 额度源没有 token 明细也没有上下文，顶部那两行换成额度水位与重置时间
+    const headLines: MenuItemConstructorOptions[] = withQuota
+      ? [
+          { label: `额度 ${quotaSummary(quota?.windows ?? [], 'short')}`, enabled: false },
+          {
+            label:
+              rolling && rolling.resetsAt
+                ? `重置：${resetBrief(rolling.resetsAt, now)}（${quotaWindowLabel(rolling.key)}）`
+                : '重置时间未知',
+            enabled: false
+          },
+          ...(quota?.error
+            ? [
+                {
+                  label: `${quota.fetchedAt ? '上次刷新失败' : '额度获取失败'}：${quota.error}`,
+                  enabled: false
+                } as MenuItemConstructorOptions
+              ]
+            : [])
+        ]
+      : [
+          { label: todayLine, enabled: false },
+          {
+            label: active
+              ? active.size > 0
+                ? `上下文 ${compact(active.used)} / ${compact(active.size)}（${percent(active.used, active.size)}%）`
+                : `上下文 ${compact(active.used)} token（模型上限未知）`
+              : '当前无活跃会话',
+            enabled: false
+          },
+          ...(withCredits
+            ? [
+                {
+                  label: `比价 1 积分 ≈ ${compact(safeRate(snapshot))} token`,
+                  enabled: false
+                } as MenuItemConstructorOptions
+              ]
+            : [])
+        ]
+
     const template: MenuItemConstructorOptions[] = [
-      { label: todayLine, enabled: false },
-      {
-        label: active
-          ? active.size > 0
-            ? `上下文 ${compact(active.used)} / ${compact(active.size)}（${percent(active.used, active.size)}%）`
-            : `上下文 ${compact(active.used)} token（模型上限未知）`
-          : '当前无活跃会话',
-        enabled: false
-      },
-      ...(withCredits
-        ? [{ label: `比价 1 积分 ≈ ${compact(safeRate(snapshot))} token`, enabled: false } as MenuItemConstructorOptions]
-        : []),
+      ...headLines,
       { type: 'separator' },
       {
         label: `数据源：${sourceLabel(snapshot.kind)}`,
@@ -143,7 +197,7 @@ export class TrayController {
       { label: '打开面板', click: () => this.cb.onOpenMain() },
       { label: '立即刷新', click: () => this.cb.onRefresh() },
       {
-        label: `更新于 ${formatClock(snapshot.generatedAt)}（${relativeTime(snapshot.generatedAt, Date.now())}）`,
+        label: `更新于 ${formatClock(snapshot.generatedAt)}（${relativeTime(snapshot.generatedAt, now)}）`,
         enabled: false
       },
       { type: 'separator' },
@@ -204,6 +258,11 @@ export class TrayController {
     this.tray?.destroy()
     this.tray = null
   }
+}
+
+/** 菜单行前面已经写了「重置：」，而 describeReset 的文案自带「重置」二字，去掉尾缀免得读重 */
+function resetBrief(resetsAt: number, now: number): string {
+  return describeReset(resetsAt, now).replace(/重置$/, '')
 }
 
 /** 全局 token/积分比价；积分太小或无数据时退回 0 */

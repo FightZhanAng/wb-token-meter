@@ -1,15 +1,19 @@
 # Token 计量器
 
-**一个本地用量面板，同时看得见 [WorkBuddy](https://www.workbuddy.cn/)、Kimi Code、ZCode 和 Xiaomi MiMo 的 token 消耗。**
+**一个用量面板，同时看得见 [WorkBuddy](https://www.workbuddy.cn/)、Kimi Code、ZCode、
+Xiaomi MiMo 与 OpenCode Go 的消耗。**
 
 WorkBuddy 采用积分制，界面上只显示积分、看不到 token 消耗。但每次模型调用的
 官方 token 数据其实都写在本地磁盘上 —— 这个工具把它读出来，做成常驻托盘的用量面板。
 
 Kimi Code、ZCode 与 Xiaomi MiMo 没有积分这一层，本地留的正好就是 token 用量本身。
+OpenCode Go 更特别：它连 token 都不给看，只有订阅额度的占用比例，得联网去问。
 面板右上角（或托盘菜单的「数据源」）可以随时切换看哪一个，几边的账本各算各的、互不影响。
 
-> 非官方第三方工具，与 WorkBuddy、Kimi Code、ZCode、小米官方均无关。
-> 所有数据都在本地读取和计算：不联网、不上传、不修改任何原始文件。
+> 非官方第三方工具，与 WorkBuddy、Kimi Code、ZCode、小米、opencode 官方均无关。
+> 除 OpenCode Go 的额度查询外，所有数据都在本地读取和计算，不修改任何原始文件。
+> 唯一的出站请求是 `GET https://opencode.ai/zen/go/v1/usage`（带本机凭证读来的 key），
+> 只为了拿那三个百分比 —— 不发送任何本地数据。
 
 ## 下载
 
@@ -22,8 +26,8 @@ Kimi Code、ZCode 与 Xiaomi MiMo 没有积分这一层，本地留的正好就�
 
 ## 数据从哪来
 
-**不需要估算，也不需要调接口。** 两边都把精确的 token 用量写在本地磁盘上，
-只是没在界面上展示。
+**不需要估算。** 四个源把精确的 token 用量写在本地磁盘上，只是没在界面上展示；
+OpenCode Go 的额度比例则来自它的在线接口。
 
 ### WorkBuddy（带积分）
 
@@ -116,6 +120,28 @@ ZCode 的 input 都含缓存。所以：
 界面上没有它的位置。
 
 
+### OpenCode Go（只有额度，联网查询）
+
+**它是唯一一个不读本地文件的源** —— 用量不在磁盘上，得去问接口：
+
+| 数据源 | 位置 | 内容 |
+|---|---|---|
+| 额度占用 | `https://opencode.ai/zen/go/v1/usage`（GET，`Authorization: Bearer <key>`） | `usage.rolling` / `usage.weekly` / `usage.monthly` 三个窗口，各带 `percent`（0-100 的整数）与 `resetsAt` |
+| 凭证 | `~/.local/share/opencode/auth.json` → `opencode-go.key` | 只读，不复制、不落盘、不进日志；每次请求前重读，重新连接后立刻生效 |
+
+Go 是 $10/月的订阅，限额按**美元金额**算（5 小时 = 月限额的 20%、周 = 50%、月 = 100%），
+而接口只回**已用比例**，所以这个源：
+
+- 没有 token、没有会话、没有模型明细 —— 界面走的是「额度水位 / 数据来源 / 额度消耗趋势」三张卡
+- 拿不到剩余金额，也无法拆到单个模型（服务端已经折算成一个百分比）
+- **趋势曲线是本地记的**：每次成功拉取时往设置目录下的 `opencode-usage-history.jsonl`
+  记一条采样（值没变也每半小时留一条心跳，保留 30 天），接口本身不提供历史
+
+请求节流：自动刷新最小间隔 60 秒（轮询本身是 20 秒一次），失败按 60s → 120s → 300s
+退避；托盘与面板上的手动刷新会强制绕过节流。整块逻辑在 `src/main/opencode-usage.ts`，
+与另外四个源完全隔离 —— 网络失败不影响它们的统计。
+
+
 ### 积分口径（仅 WorkBuddy）
 
 积分以数据库记录为**权威口径**，不是用 token 反推的：
@@ -161,6 +187,9 @@ pnpm dist          # 打包 Windows 安装包与免安装版到 release/
 | `WB_TOKEN_METER_ZCODE_DIR` | 覆盖 ZCode 数据目录，默认 `~/.zcode` |
 | `WB_TOKEN_METER_MIMO_DIR` | 覆盖 MiMo 数据目录，默认 `~/.local/share/mimocode` |
 | `WB_TOKEN_METER_MIMO_CACHE_DIR` | 覆盖 MiMo 缓存目录（模型目录在里面），默认 `~/.cache/mimocode` |
+| `WB_TOKEN_METER_OPENCODE_DIR` | 覆盖 OpenCode 数据目录（`auth.json` 在里面），默认 `~/.local/share/opencode` |
+| `WB_TOKEN_METER_OPENCODE_URL` | 覆盖额度查询端点（测试用），默认官方地址 |
+| `WB_TOKEN_METER_OPENCODE_KEY` | 直接指定额度查询用的 key（测试用），给了就不读 `auth.json` |
 | `WB_TOKEN_METER_SMOKE=1` | 冒烟自检：把启动状态写到 `%TEMP%\wbtm-smoke\` |
 | `WB_TOKEN_METER_SMOKE_EXIT=1` | 自检报告写完后自动退出 |
 
@@ -172,8 +201,8 @@ pnpm dist          # 打包 Windows 安装包与免安装版到 release/
 推一个 `v*` 标签，GitHub Actions 会自动打包并创建 Release：
 
 ```bash
-git tag -a v0.4.0 -m "v0.4.0"
-git push origin v0.4.0
+git tag -a v0.5.0 -m "v0.5.0"
+git push origin v0.5.0
 ```
 
 也可以在仓库的 Actions 页面手动触发 —— 手动跑只把安装包留档成 artifact，不发 Release。
@@ -184,7 +213,9 @@ GitHub Downloads 会卡在证书吊销检查上）。两边都靠 `ELECTRON_MIRR
 
 ## 界面
 
-右上角是**数据源切换**：`WorkBuddy` / `Kimi Code` / `ZCode` / `MiMo`，选择存在设置文件里，重启后还在。
+右上角是**数据源切换**：直接摆三个（`WorkBuddy` / `Kimi Code` / `ZCode`），
+其余收在「更多」下拉里 —— 五个按钮并排会把标题挤没。当前源落在下拉里时，
+那个按钮会显示它的名字。选择存在设置文件里，重启后还在。
 
 - **今日** —— token 与积分，以及今日的 token/积分比价；没有积分的三个源把第二个大数字换成缓存命中率
 - **当前会话上下文** —— 上下文水位进度条，超过 70% 转琥珀、90% 转红；模型上限未知时只报已用量
@@ -196,15 +227,20 @@ GitHub Downloads 会卡在证书吊销检查上）。两边都靠 `ELECTRON_MIRR
 
 ![热力图](docs/preview-heat.png)
 
-托盘图标是一圈进度环，表示当前活跃会话的上下文水位，颜色随水位变化；
-悬停显示今日 token（WorkBuddy 下还有积分）；右键菜单可以切换数据源、刷新、
-控制桌面胶囊、打开数据目录、退出。
+**OpenCode Go 是另一套界面** —— 它没有 token 明细，上面这些卡片会整块换成三张：
+额度水位（5 小时 / 本周 / 本月三条进度条，各带重置时间）、数据来源（接口、凭证、
+上次更新，以及取不到时的提示）、额度消耗趋势（本地采样的折线图）。
+
+托盘图标是一圈进度环：四个本地源显示当前活跃会话的上下文水位，OpenCode Go 显示
+5 小时额度的占用比例，颜色随水位变化；悬停显示今日 token（WorkBuddy 下还有积分）
+或三个额度百分比；右键菜单可以切换数据源、刷新、控制桌面胶囊、打开数据目录、退出。
 
 关窗即隐藏到托盘，只有菜单里的「退出」才会真正结束进程。
 
 ## 桌面胶囊
 
-常驻桌面的小胶囊，显示今日 token、上下文水位环与积分（Kimi Code 下换成今日调用次数）。
+常驻桌面的小胶囊，显示今日 token、上下文水位环与积分（Kimi Code 下换成今日调用次数）；
+切到 OpenCode Go 时换成 5 小时额度环、百分比与重置时间。
 拖动移动并自动记住位置，单击打开主面板。
 
 ![胶囊](docs/preview-float.png)
@@ -213,7 +249,7 @@ GitHub Downloads 会卡在证书吊销检查上）。两边都靠 `ELECTRON_MIRR
 
 | 菜单项 | 能改什么 |
 |---|---|
-| 数据源 | WorkBuddy / Kimi Code / ZCode / MiMo |
+| 数据源 | WorkBuddy / Kimi Code / ZCode / MiMo / OpenCode Go |
 | 桌面胶囊 | 显示 / 隐藏 |
 | 胶囊尺寸 | 小 / 中 / 大（胶囊本体 152×44、198×56、252×68） |
 | 胶囊不透明度 | 100% ~ 50% |
@@ -257,6 +293,11 @@ GitHub Downloads 会卡在证书吊销检查上）。两边都靠 `ELECTRON_MIRR
   文件缺失、或模型不在目录里（自建 provider 的私有模型）时，水位只报已用量、不给百分比。
 - MiMo 的用量只覆盖 `message` 表里记着 tokens 的那些请求；
   引擎按价格表算的 `cost` 是金额不是积分，本工具不读它。
+- OpenCode Go 的额度只有三个百分比：接口不回 token 数、不回剩余金额，也拆不到单个模型
+  （官方文档里的 $15/$30/$60 是按模型的月限额，服务端已经折算成一个比例）。
+- OpenCode Go 的趋势曲线是**本地采样**：应用没在跑时没有数据，断档期间的变化看不到。
+- OpenCode Go 是唯一会发网络请求的源：断网或凭证失效时界面保留上一次成功的值并标注
+  「旧数据」，同时按 60s → 120s → 300s 退避重试，不会反复打接口。
 
 ## 许可
 

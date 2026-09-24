@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useMemo, useState, type JSX } from 'react'
-import type { DayStat, Snapshot, SourceKind } from '@shared/types'
+import type {
+  DayStat,
+  QuotaInfo,
+  QuotaWindow,
+  QuotaWindowKey,
+  Snapshot,
+  SourceKind,
+  UsageSample
+} from '@shared/types'
 import {
   compact,
   credits as formatCredits,
@@ -7,6 +15,7 @@ import {
   formatClock,
   grouped,
   hasCredits,
+  hasQuota,
   hasReasoning,
   percent,
   projectLabel,
@@ -17,6 +26,7 @@ import {
   startOfToday,
   tokenPerCredit
 } from '@shared/format'
+import { describeReset, quotaLevel, quotaWindowLabel } from '@shared/opencode-quota'
 
 /* ------------------------------------------------------------ 小工具 */
 
@@ -161,7 +171,231 @@ function Heatmap({ days, withCredits }: { days: DayStat[]; withCredits: boolean 
   )
 }
 
+/* ------------------------------------------------- OpenCode Go 额度 */
+
+/** 折线颜色与粗细：窗口越长画得越重，5 小时窗口最轻，短线才不会压住长线 */
+const TREND_SERIES: { key: QuotaWindowKey; color: string; width: number; opacity: number }[] = [
+  { key: 'monthly', color: '#378add', width: 2.4, opacity: 1 },
+  { key: 'weekly', color: '#ba7517', width: 1.8, opacity: 1 },
+  { key: 'rolling', color: '#9db8d6', width: 1.4, opacity: 0.85 }
+]
+
+/**
+ * 折线画布。宽度只是个基准值 —— 配合 preserveAspectRatio="none" 横向拉满卡片，
+ * 所以图里不能放文字（会被拉变形），刻度得用 HTML 摆在右边。
+ */
+const PLOT_W = 320
+const PLOT_H = 120
+
+/**
+ * 纵轴按数据自适应。额度常年是个位数百分比，固定 0-100 会让曲线永远贴着底边、
+ * 看不出走势；档位取 10 / 25 / 50 / 100 四档，五等分后刻度正好都落在整数上。
+ */
+function trendScale(history: UsageSample[]): { top: number; ticks: number[] } {
+  let peak = 0
+  for (const sample of history) {
+    peak = Math.max(peak, sample.rolling, sample.weekly, sample.monthly)
+  }
+  const top = peak <= 10 ? 10 : peak <= 25 ? 25 : peak <= 50 ? 50 : 100
+  const step = top / 5
+  return { top, ticks: [0, step, step * 2, step * 3, step * 4, top] }
+}
+
+function QuotaRow({ win, now }: { win: QuotaWindow; now: number }): JSX.Element {
+  const near = win.percent >= 90
+  return (
+    <div className={`quota-row${near ? ' danger' : ''}`}>
+      <div className="quota-label">{quotaWindowLabel(win.key)}</div>
+      <div className="quota-track">
+        <div
+          className={`quota-fill ${quotaLevel(win.percent)}`}
+          style={{ width: `${Math.min(100, Math.max(0, win.percent))}%` }}
+        />
+      </div>
+      <div className="quota-percent">{win.percent}%</div>
+      <div className="quota-reset">
+        <span>{describeReset(win.resetsAt, now)}</span>
+        {near ? <em>接近上限</em> : null}
+      </div>
+    </div>
+  )
+}
+
+function QuotaMeter({ quota, now }: { quota: QuotaInfo; now: number }): JSX.Element {
+  if (!quota.windows.length) {
+    // 没数据也没报错，那就是第一次请求还在路上 —— 别让用户以为接口坏了
+    const pending = quota.fetchedAt === 0 && !quota.error
+    return <div className="empty">{pending ? '正在查询额度…' : '还没有取到额度数据'}</div>
+  }
+  return (
+    <div className="quota-rows">
+      {quota.windows.map((win) => (
+        <QuotaRow key={win.key} win={win} now={now} />
+      ))}
+    </div>
+  )
+}
+
+function QuotaSource({ quota, now }: { quota: QuotaInfo; now: number }): JSX.Element {
+  const never = quota.fetchedAt === 0
+  return (
+    <>
+      <div className="quota-meta">
+        <span>接口</span>
+        <code>{quota.endpoint}</code>
+      </div>
+      <div className="quota-meta">
+        <span>凭证</span>
+        <code>{quota.credential}</code>
+      </div>
+      <div className="quota-meta">
+        <span>更新</span>
+        <span>
+          {never
+            ? quota.error
+              ? '还没成功取到过'
+              : '正在查询…'
+            : `${formatClock(quota.fetchedAt)}（${relativeTime(quota.fetchedAt, now)}）`}
+        </span>
+      </div>
+      <div className="quota-note">额度来自 opencode.ai 的在线接口，不读取本地用量文件。</div>
+      {quota.stale ? (
+        <div className="quota-notice">
+          上次刷新失败：{quota.error}；显示的是 {formatClock(quota.fetchedAt)} 的数据。
+        </div>
+      ) : null}
+      {never && quota.error ? (
+        <div className="quota-notice">
+          取不到额度：{quota.error}
+          <br />
+          在 opencode 里执行 <code>/connect</code> 连一次 OpenCode Go，凭证会写到 <code>{quota.credential}</code>。
+        </div>
+      ) : null}
+    </>
+  )
+}
+
+function QuotaTrend({ history }: { history: UsageSample[] }): JSX.Element {
+  const { series, top, ticks } = useMemo(() => {
+    const scale = trendScale(history)
+    if (history.length < 2) return { series: [], ...scale }
+    const first = history[0].t
+    // 两条采样挤在同一毫秒时横轴会退化成一个点，兜个 1 毫秒
+    const span = Math.max(1, history[history.length - 1].t - first)
+    const series = TREND_SERIES.map((line) => ({
+      ...line,
+      points: history
+        .map((sample) => {
+          const x = ((sample.t - first) / span) * PLOT_W
+          const y = PLOT_H - (Math.min(scale.top, Math.max(0, sample[line.key])) / scale.top) * PLOT_H
+          return `${x.toFixed(1)},${y.toFixed(1)}`
+        })
+        .join(' ')
+    }))
+    return { series, ...scale }
+  }, [history])
+
+  if (history.length < 2) return <div className="empty">还在积累数据，多刷新几次就能看到趋势</div>
+
+  return (
+    <>
+      <div className="quota-trend">
+        <svg
+          className="trend-plot"
+          viewBox={`0 0 ${PLOT_W} ${PLOT_H}`}
+          preserveAspectRatio="none"
+          role="img"
+          aria-label="额度占用趋势"
+        >
+          {ticks.map((tick) => (
+            <line
+              key={tick}
+              x1="0"
+              x2={PLOT_W}
+              y1={PLOT_H - (tick / top) * PLOT_H}
+              y2={PLOT_H - (tick / top) * PLOT_H}
+              stroke="#eef2f7"
+              strokeWidth="1"
+              vectorEffect="non-scaling-stroke"
+            />
+          ))}
+          {series.map((line) => (
+            <polyline
+              key={line.key}
+              points={line.points}
+              fill="none"
+              stroke={line.color}
+              strokeWidth={line.width}
+              strokeOpacity={line.opacity}
+              strokeLinejoin="round"
+              strokeLinecap="round"
+              vectorEffect="non-scaling-stroke"
+            />
+          ))}
+        </svg>
+        <div className="trend-axis" aria-hidden="true">
+          {ticks.map((tick) => (
+            <span key={tick} style={{ top: `${100 - (tick / top) * 100}%` }}>
+              {Math.round(tick)}
+            </span>
+          ))}
+        </div>
+      </div>
+      <div className="trend-legend">
+        {TREND_SERIES.map((line) => (
+          <span key={line.key}>
+            <i style={{ background: line.color, height: `${line.width}px` }} />
+            {quotaWindowLabel(line.key)}
+          </span>
+        ))}
+      </div>
+      <div className="trend-note">折线是应用运行期间在本地记的采样（额度没变也每半小时留一条），接口本身不提供历史。</div>
+    </>
+  )
+}
+
+function QuotaView({ quota, now }: { quota: QuotaInfo; now: number }): JSX.Element {
+  return (
+    <>
+      <section className="card">
+        <div className="card-head">
+          <div className="card-title">额度水位</div>
+          <div className="card-note">
+            {quota.stale
+              ? '旧数据'
+              : quota.fetchedAt
+                ? `更新于 ${relativeTime(quota.fetchedAt, now)}`
+                : quota.error
+                  ? '未取到数据'
+                  : '查询中'}
+          </div>
+        </div>
+        <QuotaMeter quota={quota} now={now} />
+      </section>
+
+      <section className="card">
+        <div className="card-head">
+          <div className="card-title">数据来源</div>
+          <div className="card-note">联网查询</div>
+        </div>
+        <QuotaSource quota={quota} now={now} />
+      </section>
+
+      <section className="card">
+        <div className="card-head">
+          <div className="card-title">额度消耗趋势</div>
+          <div className="card-note">最近 7 天 · {quota.history.length} 个采样点</div>
+        </div>
+        <QuotaTrend history={quota.history} />
+      </section>
+    </>
+  )
+}
+
 /* -------------------------------------------------------- 数据源切换 */
+
+/** 直接摆出来的源数量，其余收进「更多」—— 五个按钮会把顶栏标题挤成一个省略号 */
+const VISIBLE_SOURCES = 3
 
 function SourceSwitch({
   value,
@@ -172,21 +406,59 @@ function SourceSwitch({
   disabled: boolean
   onChange: (kind: SourceKind) => void
 }): JSX.Element {
+  const [open, setOpen] = useState(false)
+  const head = SOURCE_ORDER.slice(0, VISIBLE_SOURCES)
+  const tail = SOURCE_ORDER.slice(VISIBLE_SOURCES)
+  // 当前源落在「更多」里时，那个按钮直接显示它的名字 —— 否则顶栏看不出在看哪一本账
+  const inTail = tail.includes(value)
+
+  const pick = (kind: SourceKind): void => {
+    setOpen(false)
+    if (kind !== value) onChange(kind)
+  }
+
   return (
     <div className="source-switch" role="group" aria-label="数据源">
-      {SOURCE_ORDER.map((kind) => (
+      {head.map((kind) => (
         <button
           key={kind}
           type="button"
           className={kind === value ? 'active' : ''}
           disabled={disabled}
-          onClick={() => {
-            if (kind !== value) onChange(kind)
-          }}
+          onClick={() => pick(kind)}
         >
           {sourceLabel(kind)}
         </button>
       ))}
+      <button
+        type="button"
+        className={`source-more${inTail ? ' active' : ''}`}
+        disabled={disabled}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen(!open)}
+      >
+        {inTail ? sourceLabel(value) : '更多'}
+        <i className="caret" aria-hidden="true" />
+      </button>
+      {open ? (
+        <>
+          <div className="source-backdrop" onClick={() => setOpen(false)} />
+          <div className="source-menu" role="menu">
+            {tail.map((kind) => (
+              <button
+                key={kind}
+                type="button"
+                role="menuitem"
+                className={kind === value ? 'active' : ''}
+                onClick={() => pick(kind)}
+              >
+                {sourceLabel(kind)}
+              </button>
+            ))}
+          </div>
+        </>
+      ) : null}
     </div>
   )
 }
@@ -269,6 +541,11 @@ export default function App(): JSX.Element {
   // 切过去但还没拿到新快照的那一瞬间，不该把 WorkBuddy 的积分画到 Kimi Code 上
   const withCredits = hasCredits(snapshot?.kind ?? 'workbuddy')
   const withReasoning = hasReasoning(snapshot?.kind ?? 'workbuddy')
+  // 额度源拿不到 token 明细，面板整块换成额度视图
+  const quotaView = hasQuota(snapshot?.kind ?? 'workbuddy')
+  const quota = quotaView ? snapshot?.quota : undefined
+  // 积分与未归因警告对额度源没有意义，留着只会让人以为漏看了数据
+  const warnings = (snapshot?.warnings ?? []).filter((warning) => !quotaView || !warning.includes('积分'))
 
   const structureRows = useMemo<BarRow[]>(() => {
     if (!totals) return []
@@ -373,205 +650,221 @@ export default function App(): JSX.Element {
       </header>
 
       <div className="app-body">
-        {/* 今日 */}
-        <section className="card">
-          <div className="card-head">
-            <div className="card-title">今日</div>
-            <div className="card-note">{today?.calls ?? 0} 次调用</div>
-          </div>
-          <div className="headline">
-            <div className="headline-item">
-              <div className="headline-value accent-token">
-                {compact((today?.inputTokens ?? 0) + (today?.outputTokens ?? 0))}
-                <span className="headline-unit">token</span>
+        {/* 额度源拿不到 token 明细，整块换成额度视图；原来的卡片在这里只会是一片 0 和空态 */}
+        {quotaView ? (
+          quota ? (
+            <QuotaView quota={quota} now={now} />
+          ) : (
+            <section className="card">
+              <div className="card-head">
+                <div className="card-title">额度水位</div>
               </div>
-              <div className="headline-label">
-                输入 {compact(today?.inputTokens ?? 0)} · 输出 {compact(today?.outputTokens ?? 0)}
+              <div className="empty">还没有取到额度数据</div>
+            </section>
+          )
+        ) : (
+          <>
+            {/* 今日 */}
+            <section className="card">
+              <div className="card-head">
+                <div className="card-title">今日</div>
+                <div className="card-note">{today?.calls ?? 0} 次调用</div>
               </div>
-            </div>
-            {withCredits ? (
-              <div className="headline-item">
-                <div className="headline-value accent-credit">
-                  {formatCredits(today?.credits ?? 0)}
-                  <span className="headline-unit">积分</span>
+              <div className="headline">
+                <div className="headline-item">
+                  <div className="headline-value accent-token">
+                    {compact((today?.inputTokens ?? 0) + (today?.outputTokens ?? 0))}
+                    <span className="headline-unit">token</span>
+                  </div>
+                  <div className="headline-label">
+                    输入 {compact(today?.inputTokens ?? 0)} · 输出 {compact(today?.outputTokens ?? 0)}
+                  </div>
                 </div>
-                <div className="headline-label">
-                  今日比价 1 积分 ≈ {tokenPerCredit((today?.inputTokens ?? 0) + (today?.outputTokens ?? 0), today?.credits ?? 0)} token
-                </div>
-              </div>
-            ) : (
-              <div className="headline-item">
-                <div className="headline-value accent-cache">
-                  {percent(today?.cachedTokens ?? 0, today?.inputTokens ?? 0)}
-                  <span className="headline-unit">% 缓存命中</span>
-                </div>
-                <div className="headline-label">
-                  命中 {compact(today?.cachedTokens ?? 0)} · 新增{' '}
-                  {compact(Math.max(0, (today?.inputTokens ?? 0) - (today?.cachedTokens ?? 0)))} token
-                </div>
-              </div>
-            )}
-          </div>
-        </section>
-
-        {/* 上下文水位 */}
-        <section className="card">
-          <div className="card-head">
-            <div className="card-title">当前会话上下文</div>
-            <div className="card-note">
-              {snapshot?.active ? relativeTime(snapshot.active.updatedAt, now) : '无活跃会话'}
-            </div>
-          </div>
-          {snapshot?.active ? (
-            <>
-              <div className="meter-head">
-                <div className="session-title" title={snapshot.active.title}>
-                  {snapshot.active.title}
-                </div>
-                {sizeKnown ? (
-                  <div className="meter-value">{percent(snapshot.active.used, snapshot.active.size)}%</div>
+                {withCredits ? (
+                  <div className="headline-item">
+                    <div className="headline-value accent-credit">
+                      {formatCredits(today?.credits ?? 0)}
+                      <span className="headline-unit">积分</span>
+                    </div>
+                    <div className="headline-label">
+                      今日比价 1 积分 ≈ {tokenPerCredit((today?.inputTokens ?? 0) + (today?.outputTokens ?? 0), today?.credits ?? 0)} token
+                    </div>
+                  </div>
                 ) : (
-                  <div className="meter-value">
-                    {compact(snapshot.active.used)}
-                    <span className="meter-unit">token</span>
+                  <div className="headline-item">
+                    <div className="headline-value accent-cache">
+                      {percent(today?.cachedTokens ?? 0, today?.inputTokens ?? 0)}
+                      <span className="headline-unit">% 缓存命中</span>
+                    </div>
+                    <div className="headline-label">
+                      命中 {compact(today?.cachedTokens ?? 0)} · 新增{' '}
+                      {compact(Math.max(0, (today?.inputTokens ?? 0) - (today?.cachedTokens ?? 0)))} token
+                    </div>
                   </div>
                 )}
               </div>
-              {sizeKnown ? (
-                <div className="meter">
-                  <div
-                    className={`meter-fill ${activeLevel}`}
-                    style={{ width: `${Math.min(100, activeRatio * 100)}%` }}
-                  />
+            </section>
+
+            {/* 上下文水位 */}
+            <section className="card">
+              <div className="card-head">
+                <div className="card-title">当前会话上下文</div>
+                <div className="card-note">
+                  {snapshot?.active ? relativeTime(snapshot.active.updatedAt, now) : '无活跃会话'}
                 </div>
-              ) : null}
-              <div className="meter-foot">
-                <span>
-                  {sizeKnown
-                    ? `${grouped(snapshot.active.used)} / ${grouped(snapshot.active.size)} token`
-                    : '模型上限未知，只报已用量'}
-                </span>
-                <span>{snapshot.active.cwd || '—'}</span>
               </div>
-            </>
-          ) : (
-            <div className="empty">没有正在进行的会话</div>
-          )}
-        </section>
+              {snapshot?.active ? (
+                <>
+                  <div className="meter-head">
+                    <div className="session-title" title={snapshot.active.title}>
+                      {snapshot.active.title}
+                    </div>
+                    {sizeKnown ? (
+                      <div className="meter-value">{percent(snapshot.active.used, snapshot.active.size)}%</div>
+                    ) : (
+                      <div className="meter-value">
+                        {compact(snapshot.active.used)}
+                        <span className="meter-unit">token</span>
+                      </div>
+                    )}
+                  </div>
+                  {sizeKnown ? (
+                    <div className="meter">
+                      <div
+                        className={`meter-fill ${activeLevel}`}
+                        style={{ width: `${Math.min(100, activeRatio * 100)}%` }}
+                      />
+                    </div>
+                  ) : null}
+                  <div className="meter-foot">
+                    <span>
+                      {sizeKnown
+                        ? `${grouped(snapshot.active.used)} / ${grouped(snapshot.active.size)} token`
+                        : '模型上限未知，只报已用量'}
+                    </span>
+                    <span>{snapshot.active.cwd || '—'}</span>
+                  </div>
+                </>
+              ) : (
+                <div className="empty">没有正在进行的会话</div>
+              )}
+            </section>
 
-        {/* Token 结构 */}
-        <section className="card">
-          <div className="card-head">
-            <div className="card-title">Token 结构（累计）</div>
-            <div className="card-note">缓存命中占输入 {percent(totals?.cachedTokens ?? 0, totals?.inputTokens ?? 0)}%</div>
-          </div>
-          <Bars rows={structureRows} />
-        </section>
+            {/* Token 结构 */}
+            <section className="card">
+              <div className="card-head">
+                <div className="card-title">Token 结构（累计）</div>
+                <div className="card-note">缓存命中占输入 {percent(totals?.cachedTokens ?? 0, totals?.inputTokens ?? 0)}%</div>
+              </div>
+              <Bars rows={structureRows} />
+            </section>
 
-        {/* 近 14 天 */}
-        <section className="card">
-          <div className="card-head">
-            <div className="card-title">近 14 天</div>
-            <div className="card-note">
-              累计 {compact((totals?.inputTokens ?? 0) + (totals?.outputTokens ?? 0))} token
-              {withCredits ? ` · ${formatCredits(totals?.credits ?? 0)} 积分` : ''}
-            </div>
-          </div>
-          {dayBars.length ? (
-            <div className="days">
-              {dayBars.map((day) => (
-                <div
-                  className="day-col"
-                  key={day.date}
-                  title={`${day.date} · ${compact(day.value)} token${withCredits ? ` · ${formatCredits(day.credits)} 积分` : ''}`}
-                >
-                  <div
-                    className={`day-bar${day.isToday ? ' today' : ''}`}
-                    style={{ height: `${Math.max(3, day.ratio * 100)}%` }}
-                  />
-                  <div className="day-label">{day.label}</div>
+            {/* 近 14 天 */}
+            <section className="card">
+              <div className="card-head">
+                <div className="card-title">近 14 天</div>
+                <div className="card-note">
+                  累计 {compact((totals?.inputTokens ?? 0) + (totals?.outputTokens ?? 0))} token
+                  {withCredits ? ` · ${formatCredits(totals?.credits ?? 0)} 积分` : ''}
                 </div>
-              ))}
-            </div>
-          ) : (
-            <div className="empty">暂无数据</div>
-          )}
-        </section>
+              </div>
+              {dayBars.length ? (
+                <div className="days">
+                  {dayBars.map((day) => (
+                    <div
+                      className="day-col"
+                      key={day.date}
+                      title={`${day.date} · ${compact(day.value)} token${withCredits ? ` · ${formatCredits(day.credits)} 积分` : ''}`}
+                    >
+                      <div
+                        className={`day-bar${day.isToday ? ' today' : ''}`}
+                        style={{ height: `${Math.max(3, day.ratio * 100)}%` }}
+                      />
+                      <div className="day-label">{day.label}</div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="empty">暂无数据</div>
+              )}
+            </section>
 
-        {/* 活跃热力图 */}
-        <section className="card">
-          <div className="card-head">
-            <div className="card-title">活跃热力图</div>
-            <div className="card-note">近 26 周 · 按 token 深浅</div>
-          </div>
-          {(snapshot?.days.length ?? 0) > 0 ? (
-            <Heatmap days={snapshot?.days ?? []} withCredits={withCredits} />
-          ) : (
-            <div className="empty">暂无数据</div>
-          )}
-        </section>
+            {/* 活跃热力图 */}
+            <section className="card">
+              <div className="card-head">
+                <div className="card-title">活跃热力图</div>
+                <div className="card-note">近 26 周 · 按 token 深浅</div>
+              </div>
+              {(snapshot?.days.length ?? 0) > 0 ? (
+                <Heatmap days={snapshot?.days ?? []} withCredits={withCredits} />
+              ) : (
+                <div className="empty">暂无数据</div>
+              )}
+            </section>
 
-        {/* 模型分布 */}
-        <section className="card">
-          <div className="card-head">
-            <div className="card-title">按模型</div>
-            <div className="card-note">
-              {withCredits
-                ? `1 积分 ≈ ${tokenPerCredit((totals?.inputTokens ?? 0) + (totals?.outputTokens ?? 0), totals?.credits ?? 0)} token`
-                : `${snapshot?.models.length ?? 0} 个模型`}
-            </div>
-          </div>
-          {snapshot?.models.length ? (
-            <Bars
-              rows={snapshot.models.slice(0, 5).map((model) => ({
-                name: model.model,
-                value: model.inputTokens + model.outputTokens,
-                color: '#534AB7',
-                hint: withCredits ? `${Math.round(model.credits)}分` : `${model.calls} 次`
-              }))}
-            />
-          ) : (
-            <div className="empty">暂无数据</div>
-          )}
-        </section>
+            {/* 模型分布 */}
+            <section className="card">
+              <div className="card-head">
+                <div className="card-title">按模型</div>
+                <div className="card-note">
+                  {withCredits
+                    ? `1 积分 ≈ ${tokenPerCredit((totals?.inputTokens ?? 0) + (totals?.outputTokens ?? 0), totals?.credits ?? 0)} token`
+                    : `${snapshot?.models.length ?? 0} 个模型`}
+                </div>
+              </div>
+              {snapshot?.models.length ? (
+                <Bars
+                  rows={snapshot.models.slice(0, 5).map((model) => ({
+                    name: model.model,
+                    value: model.inputTokens + model.outputTokens,
+                    color: '#534AB7',
+                    hint: withCredits ? `${Math.round(model.credits)}分` : `${model.calls} 次`
+                  }))}
+                />
+              ) : (
+                <div className="empty">暂无数据</div>
+              )}
+            </section>
 
-        {/* 项目分布 */}
-        <section className="card">
-          <div className="card-head">
-            <div className="card-title">按项目</div>
-            <div className="card-note">{snapshot?.projects.length ?? 0} 个</div>
-          </div>
-          {snapshot?.projects.length ? (
-            <Bars
-              rows={snapshot.projects.slice(0, 5).map((project) => ({
-                name: projectLabel(project.projectDir, project.cwd),
-                value: project.inputTokens + project.outputTokens,
-                color: '#1D9E75',
-                hint: `${project.sessions}会话`
-              }))}
-            />
-          ) : (
-            <div className="empty">暂无数据</div>
-          )}
-        </section>
+            {/* 项目分布 */}
+            <section className="card">
+              <div className="card-head">
+                <div className="card-title">按项目</div>
+                <div className="card-note">{snapshot?.projects.length ?? 0} 个</div>
+              </div>
+              {snapshot?.projects.length ? (
+                <Bars
+                  rows={snapshot.projects.slice(0, 5).map((project) => ({
+                    name: projectLabel(project.projectDir, project.cwd),
+                    value: project.inputTokens + project.outputTokens,
+                    color: '#1D9E75',
+                    hint: `${project.sessions}会话`
+                  }))}
+                />
+              ) : (
+                <div className="empty">暂无数据</div>
+              )}
+            </section>
 
-        {/* 会话排行 */}
-        <section className="card">
-          <div className="card-head">
-            <div className="card-title">会话排行</div>
-            <div className="card-note">
-              {snapshot?.totals.sessions ?? 0} 个会话 ·{' '}
-              {withCredits
-                ? `${snapshot?.totals.dbTraces ?? 0} 个计费回合`
-                : `${snapshot?.totals.calls ?? 0} 次调用`}
-            </div>
-          </div>
-          <div className="sessions">{sessionRows ?? <div className="empty">暂无会话</div>}</div>
-        </section>
+            {/* 会话排行 */}
+            <section className="card">
+              <div className="card-head">
+                <div className="card-title">会话排行</div>
+                <div className="card-note">
+                  {snapshot?.totals.sessions ?? 0} 个会话 ·{' '}
+                  {withCredits
+                    ? `${snapshot?.totals.dbTraces ?? 0} 个计费回合`
+                    : `${snapshot?.totals.calls ?? 0} 次调用`}
+                </div>
+              </div>
+              <div className="sessions">{sessionRows ?? <div className="empty">暂无会话</div>}</div>
+            </section>
+          </>
+        )}
 
-        {snapshot?.warnings.length ? (
+        {warnings.length ? (
           <div className="notice">
-            {snapshot.warnings.map((warning) => (
+            {warnings.map((warning) => (
               <div key={warning}>{warning}</div>
             ))}
           </div>

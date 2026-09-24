@@ -3,12 +3,13 @@ import { mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { collectSnapshot, type ParseCache } from '../shared/collector'
-import { SOURCE_ORDER } from '../shared/format'
+import { SOURCE_ORDER, sourceLabel } from '../shared/format'
 import { collectKimiSnapshot, type KimiParseCache } from '../shared/kimi-collector'
 import { collectMimoSnapshot } from '../shared/mimo-collector'
 import { collectZcodeSnapshot } from '../shared/zcode-collector'
 import type { FloatState, Settings, Snapshot, SourceKind } from '../shared/types'
 import { FloatWindow } from './float'
+import { OpencodeUsage } from './opencode-usage'
 import {
   appIconPath,
   hardenWindow,
@@ -16,6 +17,7 @@ import {
   loadRenderer,
   mimoCacheDir,
   mimoDataDir,
+  opencodeDir,
   preloadPath,
   workbuddyDir,
   zcodeDir
@@ -67,11 +69,15 @@ const kimiCache: KimiParseCache = new Map()
 
 /* ------------------------------------------------------------ 采集 */
 
+/** OpenCode Go 的额度客户端。懒创建：只有真的切到那个源才会实例化、才会去读 auth.json */
+let opencodeUsage: OpencodeUsage | null = null
+
 /** 当前数据源的数据根目录（「打开数据目录」与采集都认它） */
 function sourceDir(kind: SourceKind): string {
   if (kind === 'kimi') return kimiDir()
   if (kind === 'zcode') return zcodeDir()
   if (kind === 'mimo') return mimoDataDir()
+  if (kind === 'opencode') return opencodeDir()
   return workbuddyDir()
 }
 
@@ -79,7 +85,60 @@ function currentSource(): SourceKind {
   return settingsStore?.settings.source ?? DEFAULT_SETTINGS.source
 }
 
-function refresh(): Snapshot | null {
+function ensureOpencodeUsage(): OpencodeUsage {
+  if (!opencodeUsage) {
+    opencodeUsage = new OpencodeUsage({
+      dir: opencodeDir(),
+      historyFile: join(app.getPath('userData'), 'opencode-usage-history.jsonl'),
+      endpoint: process.env['WB_TOKEN_METER_OPENCODE_URL'],
+      keyOverride: process.env['WB_TOKEN_METER_OPENCODE_KEY']
+    })
+  }
+  return opencodeUsage
+}
+
+/**
+ * 额度源的快照：token 维度全部留空，只带 quota。
+ * 界面认 kind === 'opencode' 就整块换成额度视图，这些 0 不会被当成「没数据」。
+ */
+function buildOpencodeSnapshot(): Snapshot {
+  const usage = ensureOpencodeUsage()
+  const state = usage.current()
+  const empty = { calls: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0, reasoningTokens: 0 }
+  return {
+    kind: 'opencode',
+    generatedAt: Date.now(),
+    totals: {
+      ...empty,
+      credits: 0,
+      attributedCredits: 0,
+      unattributedCredits: 0,
+      sessions: 0,
+      traces: 0,
+      matchedTraces: 0,
+      dbTraces: 0
+    },
+    today: { ...empty, credits: 0 },
+    sessions: [],
+    days: [],
+    models: [],
+    projects: [],
+    active: null,
+    source: { dir: opencodeDir(), files: 0, dbRows: 0 },
+    warnings: [],
+    quota: {
+      windows: state.windows,
+      fetchedAt: state.fetchedAt,
+      stale: state.stale,
+      error: state.error,
+      endpoint: usage.endpoint,
+      credential: usage.credentialLabel(),
+      history: usage.history()
+    }
+  }
+}
+
+function refresh(force = false): Snapshot | null {
   const kind = currentSource()
   try {
     if (kind === 'kimi') {
@@ -88,6 +147,16 @@ function refresh(): Snapshot | null {
       snapshot = collectZcodeSnapshot({ zcodeDir: sourceDir(kind) })
     } else if (kind === 'mimo') {
       snapshot = collectMimoSnapshot({ mimoDir: sourceDir(kind), cacheDir: mimoCacheDir() })
+    } else if (kind === 'opencode') {
+      snapshot = buildOpencodeSnapshot()
+      // 网络请求绝不能挡住 20 秒一次的同步轮询：先把缓存画出来，真拉到了再走一遍广播。
+      // pull 自带去重与节流，重入到这里只会拿到 false，不会绕成死循环。
+      void ensureOpencodeUsage()
+        .pull(force)
+        .then((pulled) => {
+          if (pulled && currentSource() === 'opencode') refresh()
+        })
+        .catch(() => undefined)
     } else {
       snapshot = collectSnapshot({ workbuddyDir: sourceDir(kind), cache: workbuddyCache })
     }
@@ -148,8 +217,9 @@ function ensureMainWindow(): BrowserWindow {
   if (mainWindow && !mainWindow.isDestroyed()) return mainWindow
 
   const win = new BrowserWindow({
+    // 高度按 1080p 一屏（减任务栏）能放下定，再高会被系统截断；宽度只给到 560
     width: 560,
-    height: 760,
+    height: 900,
     minWidth: 460,
     minHeight: 520,
     show: false,
@@ -204,7 +274,7 @@ function bootstrap(): void {
   tray = new TrayController({
     onOpenMain: () => showMainWindow(),
     onRefresh: () => {
-      refresh()
+      refresh(true)
       tray?.notifyRefreshed()
     },
     onOpenDataDir: () => {
@@ -290,12 +360,24 @@ function bootstrap(): void {
           // 只在自检里跑，跑完立刻切回去，免得把用户自己的设置改掉。
           const sourceBefore = settingsStore?.settings.source ?? 'workbuddy'
           const switches: Array<{ expected: SourceKind; actual: SourceKind | undefined; dom: unknown }> = []
-          for (const [index, target] of SOURCE_ORDER.entries()) {
+          for (const target of SOURCE_ORDER) {
             if (target === sourceBefore) continue
+            // 前三个源就是按钮本身，其余收在「更多」下拉里 —— 两条路径都要真的点一遍
+            const label = JSON.stringify(sourceLabel(target))
             await win.webContents.executeJavaScript(
               `(() => {
-                 const el = document.querySelectorAll('.source-switch button')[${index}]
-                 if (el) el.click()
+                 const root = document.querySelector('.source-switch')
+                 if (!root) return
+                 const direct = [...root.querySelectorAll('button')].find((el) => el.textContent.trim() === ${label})
+                 if (direct) direct.click()
+                 else root.querySelector('.source-more')?.click()
+               })()`
+            )
+            await new Promise((resolve) => setTimeout(resolve, 250))
+            await win.webContents.executeJavaScript(
+              `(() => {
+                 const item = [...document.querySelectorAll('.source-menu button')].find((el) => el.textContent.trim() === ${label})
+                 if (item) item.click()
                })()`
             )
             await new Promise((resolve) => setTimeout(resolve, 1500))
@@ -474,7 +556,7 @@ if (!app.requestSingleInstanceLock()) {
 /* ------------------------------------------------------------ IPC */
 
 ipcMain.handle('snapshot:get', () => snapshot ?? refresh())
-ipcMain.handle('snapshot:refresh', () => refresh())
+ipcMain.handle('snapshot:refresh', () => refresh(true))
 ipcMain.handle('data:open-dir', async () => {
   const dir = sourceDir(currentSource())
   await shell.openPath(dir)

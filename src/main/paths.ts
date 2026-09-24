@@ -72,6 +72,16 @@ export function mimoCacheDir(): string {
   return join(homedir(), '.cache', 'mimocode')
 }
 
+/**
+ * OpenCode 的数据目录。auth.json 就在这里，OpenCode Go 的额度查询从里面取凭证。
+ * 注意它是 mimocode 在 ~/.local/share 下的兄弟目录，别混。
+ */
+export function opencodeDir(): string {
+  const override = process.env['WB_TOKEN_METER_OPENCODE_DIR']
+  if (override) return override
+  return join(homedir(), '.local', 'share', 'opencode')
+}
+
 export type RendererPage = 'index' | 'float'
 
 /** 按页面名加载渲染层；开发走 dev server，生产走打包后的 HTML */

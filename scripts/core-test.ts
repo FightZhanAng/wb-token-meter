@@ -2,15 +2,20 @@
  * 无头验证脚本 —— 不依赖 Electron，直接跑在 Node 上。
  *   npm run test:core
  *
- * 重点验证三件事：
+ * 重点验证四件事：
  *   1. 单行解析在真实数据上不掉字段、在脏数据上不崩
  *   2. 各维度聚合能交叉对上（会话/日/模型/项目 求和 == 全局）
  *   3. traceId 与积分明细的对齐率
+ *   4. OpenCode Go 的额度接口：除「真实数据」一段外全部打在本地 mock 服务上
  */
-import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { createServer } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+import { OpencodeUsage } from '../src/main/opencode-usage'
+import type { OpencodeUsageOptions } from '../src/main/opencode-usage'
 import { collectSnapshot, localDate, parseUsageLine } from '../src/shared/collector'
 import {
   collectKimiSnapshot,
@@ -19,10 +24,23 @@ import {
   parseKimiUsageLine,
   parseModelContextSizes
 } from '../src/shared/kimi-collector'
+import {
+  DEFAULT_USAGE_ENDPOINT,
+  describeReset,
+  parseTime,
+  parseUsageResponse,
+  quotaLevel,
+  quotaSummary,
+  quotaWindowLabel,
+  quotaWindowShort,
+  QUOTA_WINDOW_ORDER,
+  recentSamples,
+  windowOf
+} from '../src/shared/opencode-quota'
 import { collectZcodeSnapshot } from '../src/shared/zcode-collector'
 import { collectMimoSnapshot } from '../src/shared/mimo-collector'
-import { compact, grouped, percent, tokenPerCredit } from '../src/shared/format'
-import type { CallRecord, Snapshot } from '../src/shared/types'
+import { compact, grouped, percent, sourceLabel, SOURCE_ORDER, tokenPerCredit } from '../src/shared/format'
+import type { CallRecord, Snapshot, UsageSample } from '../src/shared/types'
 
 let passed = 0
 let failed = 0
@@ -722,36 +740,790 @@ check(
 )
 check('路径为空不崩', collectMimoSnapshot({ mimoDir: '', cacheDir: '' }).sessions.length === 0)
 
-section('四个数据源互不影响')
+/* ---------------------------------------------- 8. OpenCode Go 数据源 */
 
-const sharedWbCache = new Map()
-const wbBefore = collectSnapshot({ workbuddyDir, cache: sharedWbCache, now: FIXED_NOW })
-const wbKeysBefore = [...sharedWbCache.keys()]
-const kimiCache = new Map()
-collectKimiSnapshot({ kimiDir, cache: kimiCache, now: FIXED_NOW })
-collectZcodeSnapshot({ zcodeDir: zcodeDirPath, now: FIXED_NOW })
-collectMimoSnapshot({ mimoDir: mimoDataPath, cacheDir: mimoCachePath, now: FIXED_NOW })
-const wbAfter = collectSnapshot({ workbuddyDir, cache: sharedWbCache, now: FIXED_NOW })
+/** 实测响应（HTTP 200，239 字节）—— 纯解析与 mock 服务共用这份基准 */
+const USAGE_BODY = JSON.stringify({
+  usage: {
+    rolling: { status: 'ok', percent: 5, resetsAt: '2026-09-24T11:12:55.339Z' },
+    weekly: { status: 'ok', percent: 15, resetsAt: '2026-09-28T00:00:00.000Z' },
+    monthly: { status: 'ok', percent: 7, resetsAt: '2026-10-22T04:35:26.000Z' }
+  }
+})
 
-check('采集另外三个源之后 WorkBuddy 快照逐字节一致', JSON.stringify(wbBefore) === JSON.stringify(wbAfter))
-check('WorkBuddy 的解析缓存没被动过', JSON.stringify([...sharedWbCache.keys()]) === JSON.stringify(wbKeysBefore))
-check(
-  'WorkBuddy 缓存里没有别的源的文件',
-  wbKeysBefore.every((key) => !key.includes('.kimi-code') && !key.includes('.zcode') && !key.includes('mimocode'))
-)
-check('Kimi 缓存里没有 WorkBuddy 的文件', [...kimiCache.keys()].every((key) => !key.includes('.workbuddy')))
-check(
-  '四个源的 kind 各自正确',
-  wbAfter.kind === 'workbuddy' &&
-    kimiReal.kind === 'kimi' &&
-    zcodeReal.kind === 'zcode' &&
-    mimoReal.kind === 'mimo'
-)
+/** 无 key 时实测的 401 体 */
+const AUTH_ERROR_BODY = JSON.stringify({
+  type: 'error',
+  error: { type: 'AuthError', message: 'Missing API key.' }
+})
 
-/* --------------------------------------------------------------- 汇总 */
+/** 只用在本地 mock 上的假密钥 */
+const MOCK_KEY = 'oc_test_key_not_a_secret'
 
-console.log(`\n${passed} 通过 / ${failed} 失败`)
-if (failed > 0) process.exitCode = 1
+/** 没人监听的本地端口：制造网络层失败，不碰外网 */
+const DEAD_ENDPOINT = 'http://127.0.0.1:1/zen/go/v1/usage'
+
+interface MockReply {
+  status?: number
+  body?: string
+  /** 延迟回包，用来制造「请求在飞」的窗口 */
+  delayMs?: number
+}
+
+interface MockServer {
+  endpoint: string
+  /** 收到的请求，按先后顺序 */
+  hits: { authorization: string; path: string }[]
+  setReply: (next: MockReply) => void
+  close: () => Promise<void>
+}
+
+/** 本地额度接口：listen(0) 让系统分配随机端口，除「真实数据」一段外测试不碰网络 */
+function startMockServer(initial: MockReply): Promise<MockServer> {
+  return new Promise((resolve) => {
+    let reply = initial
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const hits: { authorization: string; path: string }[] = []
+    const server = createServer((req, res) => {
+      hits.push({ authorization: req.headers.authorization ?? '', path: req.url ?? '' })
+      res.on('error', () => {
+        // 客户端超时提前断开时，别让 error 事件掀翻进程
+      })
+      const send = (): void => {
+        try {
+          res.writeHead(reply.status ?? 200, { 'content-type': 'application/json' })
+          res.end(reply.body ?? '')
+        } catch {
+          // 同上：连接已经没了，写不进去就算了
+        }
+      }
+      if (reply.delayMs) {
+        timer = setTimeout(send, reply.delayMs)
+        timer.unref()
+      } else {
+        send()
+      }
+    })
+    server.listen(0, '127.0.0.1', () => {
+      const port = (server.address() as AddressInfo).port
+      resolve({
+        endpoint: `http://127.0.0.1:${port}/zen/go/v1/usage`,
+        hits,
+        setReply: (next) => {
+          reply = next
+        },
+        close: () =>
+          new Promise<void>((done) => {
+            if (timer) clearTimeout(timer)
+            // keep-alive 连接会把 close 卡住，先全断掉
+            server.closeAllConnections()
+            server.close(() => done())
+          })
+      })
+    })
+  })
+}
+
+/** 每个用例自带 server 开关，用完一定关掉，别让 Node 进程挂住 */
+async function withMockServer(reply: MockReply, run: (server: MockServer) => Promise<void>): Promise<void> {
+  const server = await startMockServer(reply)
+  try {
+    await run(server)
+  } finally {
+    await server.close()
+  }
+}
+
+/** 读 jsonl 采样文件；不存在当空文件 */
+function jsonlLines(path: string): UsageSample[] {
+  if (!existsSync(path)) return []
+  return readFileSync(path, 'utf-8')
+    .split('\n')
+    .filter((line) => line.trim())
+    .map((line) => JSON.parse(line) as UsageSample)
+}
+
+/**
+ * OpenCode Go 的用例整段收在 main 里：它是唯一会发请求的源，必须 await，
+ * 汇总也只能等它跑完 —— 所以整段进 async 函数，汇总挂在 main() 的 finally 上。
+ */
+async function main(): Promise<void> {
+  /* 临时目录：mock 夹具与真实数据那次的采样文件都放这儿，结束时统一删 */
+  const opencodeRoot = mkdtempSync(join(tmpdir(), 'wbtm-opencode-'))
+  const realHistoryRoot = mkdtempSync(join(tmpdir(), 'wbtm-opencode-real-'))
+  const historyPath = (name: string): string => join(opencodeRoot, name)
+  /* 注入时钟：节流 60 秒、退避 60→300 秒、心跳 30 分钟都靠它推进，测试里不真等 */
+  let clock = Date.parse('2026-09-24T12:00:00.000Z')
+  const tick = (ms: number): void => {
+    clock += ms
+  }
+  const makeUsage = (
+    endpoint: string,
+    historyName: string,
+    extra: Partial<OpencodeUsageOptions> = {}
+  ): OpencodeUsage =>
+    new OpencodeUsage({
+      dir: opencodeRoot,
+      historyFile: historyPath(historyName),
+      endpoint,
+      keyOverride: MOCK_KEY,
+      now: () => clock,
+      ...extra
+    })
+
+  try {
+    /* ------------------------------------------------- 纯解析 */
+
+    section('OpenCode Go 解析（纯函数）')
+
+    const parsedUsage = parseUsageResponse(JSON.parse(USAGE_BODY))
+    check(
+      '三个窗口按固定顺序解析',
+      parsedUsage.map((w) => w.key).join('/') === QUOTA_WINDOW_ORDER.join('/'),
+      parsedUsage.map((w) => w.key).join('/')
+    )
+    check(
+      'rolling 百分比',
+      windowOf(parsedUsage, 'rolling')?.percent === 5,
+      String(windowOf(parsedUsage, 'rolling')?.percent)
+    )
+    check(
+      'weekly 百分比',
+      windowOf(parsedUsage, 'weekly')?.percent === 15,
+      String(windowOf(parsedUsage, 'weekly')?.percent)
+    )
+    check(
+      'monthly 百分比',
+      windowOf(parsedUsage, 'monthly')?.percent === 7,
+      String(windowOf(parsedUsage, 'monthly')?.percent)
+    )
+    check('百分比是数字不是字符串', parsedUsage.every((w) => typeof w.percent === 'number'))
+    check('status 原样带出', parsedUsage.every((w) => w.status === 'ok'))
+    check(
+      'resetsAt 解析成毫秒时间戳',
+      windowOf(parsedUsage, 'rolling')?.resetsAt === Date.parse('2026-09-24T11:12:55.339Z'),
+      String(windowOf(parsedUsage, 'rolling')?.resetsAt)
+    )
+
+    const missingWeekly = parseUsageResponse({
+      usage: {
+        rolling: { status: 'ok', percent: 5, resetsAt: '2026-09-24T11:12:55.339Z' },
+        monthly: { status: 'ok', percent: 7, resetsAt: '2026-10-22T04:35:26.000Z' }
+      }
+    })
+    check(
+      '缺 weekly 只回两个窗口',
+      missingWeekly.length === 2 && missingWeekly.map((w) => w.key).join('/') === 'rolling/monthly',
+      missingWeekly.map((w) => w.key).join('/')
+    )
+    check('缺的窗口查不到', windowOf(missingWeekly, 'weekly') === null)
+
+    const oddPercents = parseUsageResponse({
+      usage: {
+        rolling: { status: 'ok', percent: '5' },
+        weekly: { status: 'ok', percent: -20 },
+        monthly: { status: 'ok', percent: 180 }
+      }
+    })
+    check('percent 是字符串的窗口被丢掉', windowOf(oddPercents, 'rolling') === null)
+    check(
+      'percent 为负收到 0',
+      windowOf(oddPercents, 'weekly')?.percent === 0,
+      String(windowOf(oddPercents, 'weekly')?.percent)
+    )
+    check(
+      'percent 超过 100 收到 100',
+      windowOf(oddPercents, 'monthly')?.percent === 100,
+      String(windowOf(oddPercents, 'monthly')?.percent)
+    )
+    check('percent 是 NaN 的窗口被丢掉', parseUsageResponse({ usage: { rolling: { percent: Number.NaN } } }).length === 0)
+    check('percent 小数四舍五入', parseUsageResponse({ usage: { rolling: { percent: 12.6 } } })[0]?.percent === 13)
+
+    const fallbackUsage = parseUsageResponse({ usage: { rolling: { percent: 5 } } })
+    check('status 缺失时回退 ok', fallbackUsage[0]?.status === 'ok', String(fallbackUsage[0]?.status))
+    check('status 非字符串时回退 ok', parseUsageResponse({ usage: { rolling: { percent: 5, status: 7 } } })[0]?.status === 'ok')
+    check('resetsAt 缺失时是 0', fallbackUsage[0]?.resetsAt === 0)
+
+    const badResets = parseUsageResponse({
+      usage: {
+        rolling: { percent: 5, resetsAt: '不是时间' },
+        weekly: { percent: 5, resetsAt: 12345 },
+        monthly: { percent: 5, resetsAt: null }
+      }
+    })
+    check('resetsAt 非法时是 0', badResets.length === 3 && badResets.every((w) => w.resetsAt === 0))
+    check('parseTime 非字符串给 0', parseTime(12345) === 0 && parseTime(null) === 0 && parseTime('乱码') === 0)
+    check('parseTime 认 ISO 串', parseTime('2026-09-24T11:12:55.339Z') === Date.parse('2026-09-24T11:12:55.339Z'))
+
+    check('usage 整个缺失返回空', parseUsageResponse({}).length === 0)
+    check('usage 为 null 返回空', parseUsageResponse({ usage: null }).length === 0)
+    check('usage 不是对象返回空', parseUsageResponse({ usage: 'x' }).length === 0)
+    check('响应本身为 null / undefined 不崩', parseUsageResponse(null).length === 0 && parseUsageResponse(undefined).length === 0)
+    check('窗口项不是对象时跳过', parseUsageResponse({ usage: { rolling: 'x', weekly: null, monthly: 5 } }).length === 0)
+
+    check(
+      '窗口短名',
+      quotaWindowShort('rolling') === '5h' && quotaWindowShort('weekly') === '周' && quotaWindowShort('monthly') === '月'
+    )
+    check(
+      '窗口长名',
+      quotaWindowLabel('rolling') === '5 小时' &&
+        quotaWindowLabel('weekly') === '本周' &&
+        quotaWindowLabel('monthly') === '本月'
+    )
+    check('摘要（短）', quotaSummary(parsedUsage) === '5h 5% · 周 15% · 月 7%', quotaSummary(parsedUsage))
+    check('摘要（长）', quotaSummary(parsedUsage, 'long') === '5 小时 5% · 本周 15% · 本月 7%', quotaSummary(parsedUsage, 'long'))
+    check('没有窗口时摘要说额度未知', quotaSummary([]) === '额度未知')
+    check(
+      '占用等级 70 起 warn、90 起 danger',
+      quotaLevel(0) === 'ok' &&
+        quotaLevel(69) === 'ok' &&
+        quotaLevel(70) === 'warn' &&
+        quotaLevel(89) === 'warn' &&
+        quotaLevel(90) === 'danger' &&
+        quotaLevel(100) === 'danger'
+    )
+    check('windowOf 找不到给 null', windowOf([], 'rolling') === null)
+
+    section('OpenCode Go 文案与采样（纯函数）')
+
+    /* 用本地时间构造，断言文案就与时区无关 */
+    const resetNow = new Date(2026, 8, 24, 12, 0, 0).getTime()
+    check('剩余 30 分钟', describeReset(resetNow + 30 * 60_000, resetNow) === '30 分钟后重置', describeReset(resetNow + 30 * 60_000, resetNow))
+    check('剩余不足 1 分钟也给 1 分钟', describeReset(resetNow + 20_000, resetNow) === '1 分钟后重置', describeReset(resetNow + 20_000, resetNow))
+    check('剩余 3 小时', describeReset(resetNow + 3 * 3_600_000, resetNow) === '3 小时后重置', describeReset(resetNow + 3 * 3_600_000, resetNow))
+    check('剩余 90 分钟按小时四舍五入', describeReset(resetNow + 90 * 60_000, resetNow) === '2 小时后重置', describeReset(resetNow + 90 * 60_000, resetNow))
+    check(
+      '超过 24 小时显示 月-日 时:分',
+      describeReset(new Date(2026, 8, 28, 0, 0, 0).getTime(), resetNow) === '9-28 00:00 重置',
+      describeReset(new Date(2026, 8, 28, 0, 0, 0).getTime(), resetNow)
+    )
+    check(
+      '时间已过显示即将重置',
+      describeReset(resetNow - 1, resetNow) === '即将重置' && describeReset(resetNow, resetNow) === '即将重置'
+    )
+    check('时间为 0 显示重置时间未知', describeReset(0, resetNow) === '重置时间未知')
+
+    const day = 24 * 60 * 60_000
+    const sampleNow = Date.parse('2026-09-24T12:00:00.000Z')
+    const sample = (t: number, rolling = 1, weekly = 2, monthly = 3): UsageSample => ({ t, rolling, weekly, monthly })
+
+    const filtered = recentSamples(
+      [sample(sampleNow - 8 * day), sample(sampleNow - 2 * day), sample(sampleNow - 60_000)],
+      sampleNow,
+      7,
+      400
+    )
+    check(
+      '按天过滤掉过期点',
+      filtered.length === 2 && filtered[0].t === sampleNow - 2 * day,
+      `${filtered.length} 个点`
+    )
+    check('刚好卡在保留期边界上的点留着', recentSamples([sample(sampleNow - 7 * day)], sampleNow, 7, 400).length === 1)
+
+    const many = Array.from({ length: 10 }, (_, index) => sample(sampleNow - (10 - index) * 60_000))
+    const thinned = recentSamples(many, sampleNow, 7, 3)
+    check('点数超上限时抽稀', thinned.length < many.length, `${thinned.length} / ${many.length}`)
+    check(
+      '抽稀后末点一定保留',
+      thinned[thinned.length - 1].t === many[many.length - 1].t,
+      String(thinned[thinned.length - 1].t)
+    )
+    check('抽稀后首点仍在', thinned[0].t === many[0].t)
+    check('抽稀后仍是升序', thinned.every((s, index) => index === 0 || thinned[index - 1].t < s.t))
+    check('上限 <= 0 时不抽稀', recentSamples(many, sampleNow, 7, 0).length === many.length)
+    check('点数没超上限时原样返回', recentSamples(many, sampleNow, 7, 400).length === many.length)
+
+    /* ------------------------------------------- 本地 mock 服务集成 */
+
+    section('OpenCode Go 本地 mock 服务集成')
+
+    /* 三个凭证目录：无 auth.json / 合法 auth.json / 坏 auth.json */
+    const authDir = join(opencodeRoot, 'with-auth')
+    const badAuthDir = join(opencodeRoot, 'bad-auth')
+    const noKeyFieldDir = join(opencodeRoot, 'no-key-field')
+    mkdirSync(authDir, { recursive: true })
+    mkdirSync(badAuthDir, { recursive: true })
+    mkdirSync(noKeyFieldDir, { recursive: true })
+    writeFileSync(join(authDir, 'auth.json'), JSON.stringify({ 'opencode-go': { type: 'api', key: 'oc_from_file' } }))
+    writeFileSync(join(badAuthDir, 'auth.json'), '{"opencode-go":{ broken')
+    writeFileSync(join(noKeyFieldDir, 'auth.json'), JSON.stringify({ 'opencode-go': { type: 'api' } }))
+
+    /* 正常路径：请求头、状态、采样落盘 */
+    await withMockServer({ body: USAGE_BODY }, async (server) => {
+      const usage = makeUsage(server.endpoint, 'ok.jsonl')
+      const ok = await usage.pull(true)
+      const state = usage.current()
+      check('pull 返回 true（真发了请求并成功）', ok === true)
+      check('解析出三个窗口', state.windows.length === 3, String(state.windows.length))
+      check(
+        '百分比与响应一致',
+        state.windows.map((w) => w.percent).join('/') === '5/15/7',
+        state.windows.map((w) => w.percent).join('/')
+      )
+      check('窗口顺序固定', state.windows.map((w) => w.key).join('/') === 'rolling/weekly/monthly')
+      check('resetsAt 也带过来了', windowOf(state.windows, 'weekly')?.resetsAt === Date.parse('2026-09-28T00:00:00.000Z'))
+      check('error 为空', state.error === null, String(state.error))
+      check('stale 为 false', state.stale === false)
+      check('fetchedAt 就是注入的当前时刻', state.fetchedAt === clock, String(state.fetchedAt))
+      check('请求头是 Bearer + 密钥', server.hits[0]?.authorization === `Bearer ${MOCK_KEY}`, server.hits[0]?.authorization ?? '(空)')
+      check('请求打到 /zen/go/v1/usage', server.hits[0]?.path === '/zen/go/v1/usage', server.hits[0]?.path ?? '(空)')
+      check('只发了一次请求', server.hits.length === 1, String(server.hits.length))
+      check('history 有 1 个采样点', usage.history().length === 1, String(usage.history().length))
+      check(
+        '采样值取自三个窗口',
+        usage.history()[0]?.rolling === 5 && usage.history()[0]?.weekly === 15 && usage.history()[0]?.monthly === 7
+      )
+      const written = jsonlLines(historyPath('ok.jsonl'))
+      check('historyFile 落盘一行', written.length === 1, `${written.length} 行`)
+      check('落盘内容与采样一致', written[0]?.t === clock && written[0]?.weekly === 15)
+      check(
+        '凭证描述只说来源、不含密钥',
+        usage.credentialLabel() === '环境变量 WB_TOKEN_METER_OPENCODE_KEY' && !usage.credentialLabel().includes(MOCK_KEY)
+      )
+    })
+
+    /* 节流：最小间隔 60 秒，force 能顶开 */
+    await withMockServer({ body: USAGE_BODY }, async (server) => {
+      const usage = makeUsage(server.endpoint, 'throttle.jsonl')
+      check('第一次 pull(true) 发请求', (await usage.pull(true)) === true && server.hits.length === 1, String(server.hits.length))
+      check('同一时刻 pull(false) 被节流', (await usage.pull(false)) === false && server.hits.length === 1, String(server.hits.length))
+      tick(61_000)
+      check('过 60 秒 pull(false) 重新发请求', (await usage.pull(false)) === true && server.hits.length === 2, String(server.hits.length))
+      check('pull(true) 无视节流强制再发', (await usage.pull(true)) === true && server.hits.length === 3, String(server.hits.length))
+    })
+
+    /* 退避：失败后 60 秒起，翻倍到 300 秒封顶；force 同样能顶开 */
+    await withMockServer({ status: 500, body: '{"type":"error"}' }, async (server) => {
+      const usage = makeUsage(server.endpoint, 'backoff.jsonl')
+      check('HTTP 500 时 pull 返回 false', (await usage.pull(true)) === false)
+      check('HTTP 500 的错误文案带状态码', (usage.current().error ?? '').includes('500'), String(usage.current().error))
+      tick(30_000)
+      check('失败后 30 秒内不重试', (await usage.pull(false)) === false && server.hits.length === 1, String(server.hits.length))
+      tick(30_000)
+      check('满 60 秒重试一次', (await usage.pull(false)) === false && server.hits.length === 2, String(server.hits.length))
+      tick(90_000)
+      check('第二次失败后退避翻倍到 120 秒', (await usage.pull(false)) === false && server.hits.length === 2, String(server.hits.length))
+      tick(30_000)
+      check('满 120 秒再重试', (await usage.pull(false)) === false && server.hits.length === 3, String(server.hits.length))
+      check('pull(true) 无视退避', (await usage.pull(true)) === false && server.hits.length === 4, String(server.hits.length))
+    })
+
+    /* 并发去重：同一时刻两次 pull，只该有一个请求在飞 */
+    await withMockServer({ body: USAGE_BODY, delayMs: 80 }, async (server) => {
+      const usage = makeUsage(server.endpoint, 'inflight.jsonl')
+      const [first, second] = await Promise.all([usage.pull(true), usage.pull(true)])
+      check('并发两次 pull 只发一个请求', server.hits.length === 1, String(server.hits.length))
+      check('两个调用拿到同一个结果', first === true && second === true)
+      check(
+        '请求结束后 in-flight 清空，还能再拉',
+        (await usage.pull(true)) === true && server.hits.length === 2,
+        String(server.hits.length)
+      )
+    })
+
+    /* 401：从未成功过 vs 成功后失败，两种陈旧值语义 */
+    await withMockServer({ status: 401, body: AUTH_ERROR_BODY }, async (server) => {
+      const never = makeUsage(server.endpoint, 'never-ok.jsonl')
+      check('401 时 pull 返回 false', (await never.pull(true)) === false)
+      check('401 的错误文案提到凭证', (never.current().error ?? '').includes('凭证'), String(never.current().error))
+      check('从未成功过时 stale 为 false', never.current().stale === false)
+      check('从未成功过时 fetchedAt 为 0', never.current().fetchedAt === 0)
+      check('失败不留下窗口、不写采样', never.current().windows.length === 0 && never.history().length === 0)
+
+      const staleUsage = makeUsage(server.endpoint, 'stale.jsonl')
+      server.setReply({ body: USAGE_BODY })
+      check('先成功一次', (await staleUsage.pull(true)) === true)
+      const goodAt = staleUsage.current().fetchedAt
+      server.setReply({ status: 401, body: AUTH_ERROR_BODY })
+      check('再失败一次', (await staleUsage.pull(true)) === false)
+      const afterFail = staleUsage.current()
+      check('成功后失败：stale 变 true', afterFail.stale === true)
+      check(
+        '成功后失败：旧窗口还留着',
+        afterFail.windows.length === 3 && windowOf(afterFail.windows, 'weekly')?.percent === 15,
+        String(afterFail.windows.length)
+      )
+      check('成功后失败：fetchedAt 还是上次成功时刻', afterFail.fetchedAt === goodAt, `${afterFail.fetchedAt} / ${goodAt}`)
+      check('成功后失败：error 有值', (afterFail.error ?? '').length > 0, String(afterFail.error))
+      check('成功后失败：已落盘的采样不受影响', staleUsage.history().length === 1, String(staleUsage.history().length))
+    })
+
+    /* 坏响应体：坏 JSON / 非 JSON / 空体 / 没有窗口，都不许抛 */
+    await withMockServer({ body: '{ broken json' }, async (server) => {
+      const usage = makeUsage(server.endpoint, 'bad-body.jsonl')
+      const bodies = ['{ broken json', '<html>不是 JSON</html>', '', '{"usage":{}}', '{"usage":{"rolling":{"percent":"x"}}}']
+      const results: boolean[] = []
+      const errors: string[] = []
+      let threw = false
+      for (const body of bodies) {
+        server.setReply({ body })
+        try {
+          results.push(await usage.pull(true))
+        } catch {
+          threw = true
+          results.push(true)
+        }
+        errors.push(usage.current().error ?? '')
+      }
+      check('坏响应体不抛异常', !threw)
+      check('坏响应体一律 pull=false', results.every((r) => r === false), results.join(','))
+      check('每次都有 error 文案', errors.every((e) => e.length > 0), errors.join(' | '))
+      check(
+        '响应里没有窗口时文案说清楚',
+        errors[3].includes('没有可用') && errors[4].includes('没有可用'),
+        `${errors[3]} / ${errors[4]}`
+      )
+      check('坏响应不留下窗口', usage.current().windows.length === 0)
+      check('坏响应不写采样', usage.history().length === 0)
+    })
+
+    /* 采样去重：值不变不重复记点，但每 30 分钟补一条心跳 */
+    await withMockServer({ body: USAGE_BODY }, async (server) => {
+      const usage = makeUsage(server.endpoint, 'dedup.jsonl')
+      check('首次拉取记 1 个点', (await usage.pull(true)) === true && jsonlLines(historyPath('dedup.jsonl')).length === 1)
+      tick(61_000)
+      check(
+        '值没变时再拉不重复记点',
+        (await usage.pull(false)) === true && usage.history().length === 1,
+        `${jsonlLines(historyPath('dedup.jsonl')).length} 行`
+      )
+      tick(31 * 60_000)
+      check(
+        '值没变但满 30 分钟，补一条心跳',
+        (await usage.pull(false)) === true && usage.history().length === 2,
+        `${jsonlLines(historyPath('dedup.jsonl')).length} 行`
+      )
+      server.setReply({
+        body: JSON.stringify({ usage: { rolling: { percent: 40 }, weekly: { percent: 60 }, monthly: { percent: 80 } } })
+      })
+      tick(61_000)
+      check(
+        '值变了立刻记点',
+        (await usage.pull(false)) === true && usage.history().length === 3,
+        `${jsonlLines(historyPath('dedup.jsonl')).length} 行`
+      )
+      check('最新采样是变化后的值', usage.history()[2]?.rolling === 40 && usage.history()[2]?.monthly === 80)
+    })
+
+    /* 凭证：没有 auth.json / 坏 JSON / 缺 key 字段 / 合法 */
+    await withMockServer({ body: USAGE_BODY }, async (server) => {
+      const noKey = new OpencodeUsage({
+        dir: opencodeRoot,
+        historyFile: historyPath('no-key.jsonl'),
+        endpoint: server.endpoint,
+        now: () => clock
+      })
+      check('没有 auth.json 时 pull=false', (await noKey.pull(true)) === false)
+      check('没有凭证的错误文案提到未找到', (noKey.current().error ?? '').includes('未找到'), String(noKey.current().error))
+      check('没有凭证时一个请求都没发', server.hits.length === 0, String(server.hits.length))
+      check(
+        '没有凭证时凭证描述指向 auth.json',
+        noKey.credentialLabel() === noKey.credentialFile && noKey.credentialFile.endsWith('auth.json')
+      )
+
+      const badAuth = new OpencodeUsage({
+        dir: badAuthDir,
+        historyFile: historyPath('bad-auth.jsonl'),
+        endpoint: server.endpoint,
+        now: () => clock
+      })
+      check('auth.json 是坏 JSON 时 pull=false', (await badAuth.pull(true)) === false)
+      check('auth.json 是坏 JSON 时按「未找到」处理', (badAuth.current().error ?? '').includes('未找到'), String(badAuth.current().error))
+
+      const noField = new OpencodeUsage({
+        dir: noKeyFieldDir,
+        historyFile: historyPath('no-field.jsonl'),
+        endpoint: server.endpoint,
+        now: () => clock
+      })
+      check('auth.json 缺 key 字段时 pull=false', (await noField.pull(true)) === false)
+
+      const fromFile = new OpencodeUsage({
+        dir: authDir,
+        historyFile: historyPath('file-key.jsonl'),
+        endpoint: server.endpoint,
+        now: () => clock
+      })
+      check('auth.json 里的密钥被用上', (await fromFile.pull(true)) === true, String(fromFile.current().error))
+      check('请求头用 auth.json 的密钥', server.hits[0]?.authorization === 'Bearer oc_from_file', server.hits[0]?.authorization ?? '(空)')
+      check('只有合法凭证那次发了请求', server.hits.length === 1, String(server.hits.length))
+    })
+
+    /* 超时（毫秒级模拟）：产品给每次请求挂了 8 秒的 AbortSignal.timeout，
+       这里注入的 fetch 按 undici 的方式立刻抛 TimeoutError，验证错误收口与退避；
+       真等满 8 秒的那条在「健壮性」段里。 */
+    {
+      const seen: { url: string; signal: AbortSignal | null; gotSignal: boolean } = {
+        url: '',
+        signal: null,
+        gotSignal: false
+      }
+      const instantTimeoutFetch: typeof fetch = (input, init) => {
+        seen.url = String(input)
+        seen.signal = init?.signal ?? null
+        seen.gotSignal = init?.signal instanceof AbortSignal
+        const error = new Error('The operation was aborted due to timeout')
+        error.name = 'TimeoutError'
+        return Promise.reject(error)
+      }
+      const usage = makeUsage(DEAD_ENDPOINT, 'timeout-injected.jsonl', { fetchImpl: instantTimeoutFetch })
+      let threw = false
+      let ok = true
+      try {
+        ok = await usage.pull(true)
+      } catch {
+        threw = true
+      }
+      check('超时：pull 不抛异常', !threw)
+      check('超时：返回 false', ok === false)
+      check('超时：请求打的是配置的端点', seen.url === DEAD_ENDPOINT, seen.url)
+      check('超时：产品传了 abort 信号', seen.gotSignal && seen.signal !== null)
+      check('超时：错误文案收口成「请求超时」', usage.current().error === '请求超时', String(usage.current().error))
+      check('超时：不留下窗口', usage.current().windows.length === 0)
+    }
+
+    /* ----------------------------------------------- 真实数据模式 */
+
+    section('OpenCode Go 真实数据')
+
+    const opencodeDirPath = process.env['WB_TOKEN_METER_OPENCODE_DIR'] || join(homedir(), '.local', 'share', 'opencode')
+    const opencodeAuthPath = join(opencodeDirPath, 'auth.json')
+    console.log(`  凭证文件 ${opencodeAuthPath}`)
+
+    if (!existsSync(opencodeAuthPath)) {
+      console.log('  skip 未找到 OpenCode Go 凭证 —— 真实额度断言全部跳过（CI 环境属正常）')
+    } else {
+      /* 采样写到临时目录，别动应用自己的历史文件 */
+      const realUsage = new OpencodeUsage({ dir: opencodeDirPath, historyFile: join(realHistoryRoot, 'usage.jsonl') })
+      const realStarted = Date.now()
+      const realOk = await realUsage.pull(true)
+      const realElapsed = Date.now() - realStarted
+      const realState = realUsage.current()
+      if (!realOk) {
+        console.log(`  skip 真实额度请求没成功（${realState.error}）—— 真实额度断言全部跳过（CI 环境属正常）`)
+      } else {
+        check('用默认端点', realUsage.endpoint === DEFAULT_USAGE_ENDPOINT, realUsage.endpoint)
+        check('读到三个窗口', realState.windows.length === 3, String(realState.windows.length))
+        check(
+          '三个百分比都在 0..100',
+          realState.windows.every((w) => w.percent >= 0 && w.percent <= 100),
+          realState.windows.map((w) => w.percent).join('/')
+        )
+        check('fetchedAt > 0', realState.fetchedAt > 0, String(realState.fetchedAt))
+        check('error 为空', realState.error === null, String(realState.error))
+        check('请求在 15 秒内完成', realElapsed < 15_000, `${realElapsed} ms`)
+        console.log(`  请求耗时 ${realElapsed} ms · ${quotaSummary(realState.windows, 'long')}`)
+        check('采样落盘', jsonlLines(join(realHistoryRoot, 'usage.jsonl')).length === 1)
+      }
+    }
+
+    /* --------------------------------------------------- 健壮性 */
+
+    section('OpenCode Go 健壮性')
+
+    const goneDir = join(opencodeRoot, 'does-not-exist', 'deeper')
+    const goneUsage = new OpencodeUsage({
+      dir: goneDir,
+      historyFile: historyPath('gone.jsonl'),
+      endpoint: DEAD_ENDPOINT,
+      now: () => clock
+    })
+    let goneThrew = false
+    let goneOk = true
+    try {
+      goneOk = await goneUsage.pull(true)
+    } catch {
+      goneThrew = true
+    }
+    check('dir 不存在时不抛异常', !goneThrew)
+    check('dir 不存在时 pull=false', goneOk === false)
+    check('dir 不存在时按「未找到凭证」处理', (goneUsage.current().error ?? '').includes('未找到'), String(goneUsage.current().error))
+
+    /* historyFile 的父路径是个文件 —— 落盘必失败，但额度显示不能跟着挂 */
+    const blocker = join(opencodeRoot, 'blocker.txt')
+    writeFileSync(blocker, 'not a directory')
+    await withMockServer({ body: USAGE_BODY }, async (server) => {
+      const usage = new OpencodeUsage({
+        dir: opencodeRoot,
+        historyFile: join(blocker, 'quota.jsonl'),
+        endpoint: server.endpoint,
+        keyOverride: MOCK_KEY,
+        now: () => clock
+      })
+      let threw = false
+      let ok = true
+      try {
+        ok = await usage.pull(true)
+      } catch {
+        threw = true
+      }
+      check('采样写不进去时不抛异常', !threw)
+      check('采样写不进去时额度照常更新', ok === true && usage.current().windows.length === 3)
+      check('采样写不进去时内存里仍留着点', usage.history().length === 1, String(usage.history().length))
+      check('采样写不进去时不会误建文件', !existsSync(join(blocker, 'quota.jsonl')))
+    })
+
+    /* 端点不可达（网络层失败）：不抛，也不能把进程拖死 */
+    const unreachable = new OpencodeUsage({
+      dir: opencodeRoot,
+      historyFile: historyPath('unreachable.jsonl'),
+      endpoint: DEAD_ENDPOINT,
+      keyOverride: MOCK_KEY,
+      now: () => clock
+    })
+    let unreachableThrew = false
+    let unreachableOk = true
+    try {
+      unreachableOk = await unreachable.pull(true)
+    } catch {
+      unreachableThrew = true
+    }
+    check('端点不可达时不抛异常', !unreachableThrew)
+    check('端点不可达时 pull=false', unreachableOk === false)
+    check('端点不可达时 error 有值', (unreachable.current().error ?? '').length > 0, String(unreachable.current().error))
+
+    /* 注入的 fetch 抛非 Error 值也要收口 */
+    const weirdFetch: typeof fetch = () => Promise.reject('boom')
+    const weird = new OpencodeUsage({
+      dir: opencodeRoot,
+      historyFile: historyPath('weird.jsonl'),
+      endpoint: DEAD_ENDPOINT,
+      keyOverride: MOCK_KEY,
+      now: () => clock,
+      fetchImpl: weirdFetch
+    })
+    check(
+      'fetch 抛非 Error 值时 pull=false 且 error 有值',
+      (await weird.pull(true)) === false && (weird.current().error ?? '').length > 0,
+      String(weird.current().error)
+    )
+
+    /* 真等满 8 秒的超时：mock 服务停住不回包，产品自带的 AbortSignal.timeout 必须自己收口。
+       这条会真的花掉 8 秒（产品常量），不为了跑得快去改产品代码。 */
+    await withMockServer({ body: USAGE_BODY, delayMs: 12_000 }, async (server) => {
+      const usage = makeUsage(server.endpoint, 'timeout-real.jsonl')
+      const started = Date.now()
+      let threw = false
+      let ok = true
+      try {
+        ok = await usage.pull(true)
+      } catch {
+        threw = true
+      }
+      const elapsed = Date.now() - started
+      check('真实超时：pull 不抛异常', !threw)
+      check('真实超时：返回 false', ok === false)
+      check('真实超时：8 秒左右自己收口', elapsed >= 7_000 && elapsed < 30_000, `${elapsed} ms`)
+      check('真实超时：错误文案是「请求超时」', usage.current().error === '请求超时', String(usage.current().error))
+      check('真实超时：mock 确实收到了请求', server.hits.length === 1, String(server.hits.length))
+      check('真实超时：不留下窗口', usage.current().windows.length === 0)
+    })
+
+    /* historyFile 里混着坏行：只取合法的，不崩 */
+    const dirtyHistory = historyPath('dirty.jsonl')
+    writeFileSync(
+      dirtyHistory,
+      [
+        JSON.stringify({ t: clock - 60_000, rolling: 1, weekly: 2, monthly: 3 }),
+        'not json at all',
+        '{"t":"x"}',
+        JSON.stringify({ t: clock - 30_000, rolling: 4 }),
+        ''
+      ].join('\n')
+    )
+    const dirty = new OpencodeUsage({
+      dir: opencodeRoot,
+      historyFile: dirtyHistory,
+      endpoint: DEAD_ENDPOINT,
+      keyOverride: MOCK_KEY,
+      now: () => clock
+    })
+    check('historyFile 里的坏行被丢掉', dirty.history().length === 2, String(dirty.history().length))
+    check(
+      '缺字段的采样按 0 补齐',
+      dirty.history()[1]?.rolling === 4 && dirty.history()[1]?.weekly === 0,
+      JSON.stringify(dirty.history()[1])
+    )
+
+    /* --------------------------------------------- 多源隔离 */
+
+    section('五个数据源互不影响')
+
+    const sharedWbCache = new Map()
+    const wbBefore = collectSnapshot({ workbuddyDir, cache: sharedWbCache, now: FIXED_NOW })
+    const wbKeysBefore = [...sharedWbCache.keys()]
+    const kimiCache = new Map()
+    collectKimiSnapshot({ kimiDir, cache: kimiCache, now: FIXED_NOW })
+    collectZcodeSnapshot({ zcodeDir: zcodeDirPath, now: FIXED_NOW })
+    collectMimoSnapshot({ mimoDir: mimoDataPath, cacheDir: mimoCachePath, now: FIXED_NOW })
+
+    /* OpenCode Go 是唯一会发请求的源，这里让它连失败两次：一次压根没有凭证（不发请求），
+       一次打到没人监听的本地端口（网络层失败）。两次都不该动到另外四个源的缓存与快照。 */
+    const isolatedNoKey = new OpencodeUsage({
+      dir: opencodeRoot,
+      historyFile: historyPath('isolated-no-key.jsonl'),
+      endpoint: DEAD_ENDPOINT,
+      now: () => clock
+    })
+    check('隔离用例：没有凭证时拉取失败', (await isolatedNoKey.pull(true)) === false)
+    check(
+      '隔离用例：失败原因指向凭证文件',
+      (isolatedNoKey.current().error ?? '').includes('未找到'),
+      String(isolatedNoKey.current().error)
+    )
+    const isolatedUnreachable = new OpencodeUsage({
+      dir: opencodeRoot,
+      historyFile: historyPath('isolated-unreachable.jsonl'),
+      endpoint: DEAD_ENDPOINT,
+      keyOverride: MOCK_KEY,
+      now: () => clock
+    })
+    check('隔离用例：端点不可达时拉取失败', (await isolatedUnreachable.pull(true)) === false)
+    check(
+      '隔离用例：失败后没有窗口、error 有值',
+      isolatedUnreachable.current().windows.length === 0 && (isolatedUnreachable.current().error ?? '').length > 0
+    )
+
+    const wbAfter = collectSnapshot({ workbuddyDir, cache: sharedWbCache, now: FIXED_NOW })
+
+    check('采集另外三个源之后 WorkBuddy 快照逐字节一致', JSON.stringify(wbBefore) === JSON.stringify(wbAfter))
+    check('WorkBuddy 的解析缓存没被动过', JSON.stringify([...sharedWbCache.keys()]) === JSON.stringify(wbKeysBefore))
+    check(
+      'WorkBuddy 缓存里没有别的源的文件',
+      wbKeysBefore.every(
+        (key) =>
+          !key.includes('.kimi-code') && !key.includes('.zcode') && !key.includes('mimocode') && !key.includes('opencode')
+      )
+    )
+    check('Kimi 缓存里没有 WorkBuddy 的文件', [...kimiCache.keys()].every((key) => !key.includes('.workbuddy')))
+    check(
+      '五个源的 kind 各自正确',
+      wbAfter.kind === 'workbuddy' &&
+        kimiReal.kind === 'kimi' &&
+        zcodeReal.kind === 'zcode' &&
+        mimoReal.kind === 'mimo' &&
+        sourceLabel('opencode') === 'OpenCode Go' &&
+        SOURCE_ORDER.length === 5,
+      SOURCE_ORDER.join('/')
+    )
+  } finally {
+    rmSync(opencodeRoot, { recursive: true, force: true })
+    rmSync(realHistoryRoot, { recursive: true, force: true })
+  }
+}
+
+main()
+  .catch((error: unknown) => {
+    failed += 1
+    console.error('  FAIL 测试脚本自身抛异常', error)
+  })
+  .finally(() => {
+    /* --------------------------------------------------------------- 汇总 */
+
+    console.log(`\n${passed} 通过 / ${failed} 失败`)
+    if (failed > 0) process.exitCode = 1
+  })
 
 /* 需要类型引用，避免 CallRecord 被误判为未使用 */
 export type { CallRecord }

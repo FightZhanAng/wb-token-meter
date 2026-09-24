@@ -38,8 +38,8 @@ export function credits(value: number): string {
 
 /**
  * 该数据源是否按积分计量。
- * 只有 WorkBuddy 有积分这一层，Kimi Code 与 ZCode 都没有 —— 所有积分相关的
- * 数字、比价、提示都要整块收起来，显示成 0 分比不显示更糟。
+ * 只有 WorkBuddy 有积分这一层，Kimi Code / ZCode / MiMo / OpenCode Go 都没有 ——
+ * 所有积分相关的数字、比价、提示都要整块收起来，显示成 0 分比不显示更糟。
  */
 export function hasCredits(kind: SourceKind): boolean {
   return kind === 'workbuddy'
@@ -54,14 +54,24 @@ export function hasReasoning(kind: SourceKind): boolean {
   return kind === 'workbuddy' || kind === 'zcode' || kind === 'mimo'
 }
 
+/**
+ * 该数据源是否走联网额度查询。
+ * 只有 OpenCode Go：它的账本不在本地，接口只回三个占用百分比，
+ * 没有 token、没有会话 —— 面板与胶囊都得换成另一套卡片。
+ */
+export function hasQuota(kind: SourceKind): boolean {
+  return kind === 'opencode'
+}
+
 /** 数据源在界面上的顺序 —— 面板分段按钮与托盘菜单共用同一份，免得两边点错位 */
-export const SOURCE_ORDER: SourceKind[] = ['workbuddy', 'kimi', 'zcode', 'mimo']
+export const SOURCE_ORDER: SourceKind[] = ['workbuddy', 'kimi', 'zcode', 'mimo', 'opencode']
 
 /** 数据源显示名 */
 export function sourceLabel(kind: SourceKind): string {
   if (kind === 'workbuddy') return 'WorkBuddy'
   if (kind === 'zcode') return 'ZCode'
   if (kind === 'mimo') return 'MiMo'
+  if (kind === 'opencode') return 'OpenCode Go'
   return 'Kimi Code'
 }
 

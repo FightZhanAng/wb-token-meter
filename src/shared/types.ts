@@ -79,10 +79,11 @@ export interface Totals extends TokenBundle {
 }
 
 /**
- * 数据源。四边的账本口径都不同，界面必须知道自己在看哪一本：
- * WorkBuddy 有积分（token 只是副产品），Kimi Code / ZCode / MiMo 只有 token。
+ * 数据源。各边的账本口径都不同，界面必须知道自己在看哪一本：
+ * WorkBuddy 有积分（token 只是副产品），Kimi Code / ZCode / MiMo 只有 token，
+ * OpenCode Go 连 token 都没有 —— 只有订阅额度的占用比例，而且还是联网查的。
  */
-export type SourceKind = 'workbuddy' | 'kimi' | 'zcode' | 'mimo'
+export type SourceKind = 'workbuddy' | 'kimi' | 'zcode' | 'mimo' | 'opencode'
 
 export interface SnapshotSource {
   /** 数据根目录 */
@@ -105,6 +106,52 @@ export interface Snapshot {
   active: ActiveContext | null
   source: SnapshotSource
   warnings: string[]
+  /** 只有 OpenCode Go 会填：订阅额度水位，其它源没有这一层 */
+  quota?: QuotaInfo
+}
+
+/* ------------------------------------------------ OpenCode Go 订阅额度 */
+
+export type QuotaWindowKey = 'rolling' | 'weekly' | 'monthly'
+
+/** 一个额度窗口的占用情况 */
+export interface QuotaWindow {
+  key: QuotaWindowKey
+  /** 已用比例，0..100（服务端给整数） */
+  percent: number
+  /** 服务端状态串，目前只观测到 'ok' */
+  status: string
+  /** 窗口重置时刻（毫秒时间戳），0 表示服务端没给 */
+  resetsAt: number
+}
+
+/** 一次额度采样（本地记的，用来画消耗趋势） */
+export interface UsageSample {
+  /** 采样时刻（毫秒时间戳） */
+  t: number
+  rolling: number
+  weekly: number
+  monthly: number
+}
+
+/**
+ * OpenCode Go 的额度水位。
+ * 这个源拿不到 token 明细 —— 接口只回三个百分比，整块界面靠它撑起来。
+ */
+export interface QuotaInfo {
+  windows: QuotaWindow[]
+  /** 最近一次成功拉取的时刻；从未成功过为 0 */
+  fetchedAt: number
+  /** 上次拉取失败，当前显示的是旧值 */
+  stale: boolean
+  /** 上次失败原因；成功时为 null */
+  error: string | null
+  /** 查询端点（展示用） */
+  endpoint: string
+  /** 凭证来源描述，绝不含密钥内容 */
+  credential: string
+  /** 最近的采样点，按时间升序 */
+  history: UsageSample[]
 }
 
 /* ------------------------------------------------------------ 桌面胶囊 */
