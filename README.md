@@ -225,10 +225,17 @@ pnpm install
 pnpm gen:icons     # 生成应用图标与 11 帧托盘进度环（纯 Node，无原生依赖）
 pnpm dev           # 开发模式
 pnpm typecheck
-pnpm test:core     # 无头验证解析与聚合逻辑，不依赖 Electron
+pnpm test:core     # 无头验证解析与聚合逻辑，不依赖 Electron（跑本机的真实数据）
+pnpm test:ci       # 同上，但把家目录指到空目录 —— 复现 CI 的条件
 pnpm build         # 产物到 out/
 pnpm dist          # 打包 Windows 安装包与免安装版到 release/
 ```
+
+> **`test:core` 与 `test:ci` 都要跑。** 带真实数据的断言只在数据目录存在时才执行，
+> 所以本机有 `~/.workbuddy`、`~/.dsh` 这些目录时，一部分代码路径在 `test:core` 里
+> 根本走不到 —— `test:ci` 把家目录指到空目录、清掉所有 `WB_TOKEN_METER_*` 覆盖变量，
+> 走的就是 CI 那条路。v0.6.0 第一次打标签挂在这儿：两条断言顺手写成了「缓存非空」，
+> 本机永远是绿的，CI 上目录不存在，必然判死。
 
 > 如果 `node_modules/electron/` 下缺 `dist/` 和 `path.txt`（pnpm 有时会静默跳过
 > postinstall），从同机另一个 Electron 项目复制这两样即可，两边版本要一致 ——

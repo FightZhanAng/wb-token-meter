@@ -12,6 +12,7 @@
     "preview": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "test:core": "tsc -p tsconfig.test.json && node .tmp-test/scripts/core-test.js",
+    "test:ci": "tsc -p tsconfig.test.json && node scripts/test-ci.mjs",
     "dist": "electron-vite build && node scripts/dist.mjs --win --publish never"
   },
   "devDependencies": {

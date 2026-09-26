@@ -41,9 +41,11 @@ jobs:
       - name: 类型检查
         run: pnpm typecheck
 
-      # 这台 runner 上没有 ~/.workbuddy，脚本会自动跳过真实数据断言
+      # 用 test:ci 而不是 test:core：它显式把家目录指到空目录、并清掉所有
+      # WB_TOKEN_METER_* 覆盖变量，所以「runner 上恰好没有那些数据目录」从
+      # 一个巧合变成一条保证。本机跑同一个命令就能复现 CI 的结果。
       - name: 核心逻辑自检
-        run: pnpm test:core
+        run: pnpm test:ci
 
       # package.json 的 dist 脚本里已经带了 --publish never。
       # 少了它，electron-builder 在 CI + tag 环境下会「隐式发布」，
