@@ -2152,11 +2152,17 @@ async function main(): Promise<void> {
       )
     )
     check('Kimi 缓存里没有 WorkBuddy 的文件', [...kimiCache.keys()].every((key) => !key.includes('.workbuddy')))
-    check(
-      'Reasonix 缓存里只有 Reasonix 的文件',
-      reasonixCache.size > 0 && [...reasonixCache.keys()].every((key) => key.includes('.reasonix'))
-    )
-    check('DSH 缓存里只有 DSH 的文件', dshCache.size > 0 && [...dshCache.keys()].every((key) => key.includes('.dsh')))
+    /*
+     * 缓存隔离：每个源只认自己目录下的文件。
+     *
+     * 空缓存也算通过 —— CI 上 ~/.reasonix 与 ~/.dsh 根本不存在，此时
+     * 「没混进别的源的文件」是唯一还能成立、也唯一还有意义的断言。
+     * 硬要求 size > 0 会把 CI 判死（v0.6.0 第一次打标签就是这么挂的）。
+     */
+    check('Reasonix 缓存里没有别的源的文件', [...reasonixCache.keys()].every((key) => key.includes('.reasonix')))
+    check('DSH 缓存里没有别的源的文件', [...dshCache.keys()].every((key) => key.includes('.dsh')))
+    check('读到 Reasonix 数据时缓存确实用上了', !hasReasonix || reasonixCache.size > 0, `${reasonixCache.size} 项`)
+    check('读到 DSH 数据时缓存确实用上了', !hasDsh || dshCache.size > 0, `${dshCache.size} 项`)
     check(
       '七个源的 kind 各自正确',
       wbAfter.kind === 'workbuddy' &&
