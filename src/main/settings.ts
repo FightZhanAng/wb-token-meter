@@ -10,11 +10,12 @@ import {
   writeFileSync
 } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { SOURCE_ORDER } from '../shared/format'
-import type { FloatPosition, Settings, SourceKind } from '../shared/types'
+import { SOURCE_ORDER, THEME_ORDER } from '../shared/format'
+import type { FloatPosition, Settings, SourceKind, ThemeMode } from '../shared/types'
 
 export const DEFAULT_SETTINGS: Settings = {
   source: 'workbuddy',
+  theme: 'system',
   floatEnabled: true,
   floatOpacity: 0.94,
   floatSize: 'medium',
@@ -44,13 +45,20 @@ function isSourceKind(value: unknown): value is SourceKind {
   return typeof value === 'string' && (SOURCE_ORDER as readonly string[]).includes(value)
 }
 
+/** 外观白名单同理，跟着 THEME_ORDER 走 */
+function isThemeMode(value: unknown): value is ThemeMode {
+  return typeof value === 'string' && (THEME_ORDER as readonly string[]).includes(value)
+}
+
 /** 逐字段校验：配置文件被手改坏时只回退那一个字段，不要整体重置 */
 function parseSettings(raw: unknown): Settings {
   const input = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
   const size = input.floatSize
   const source = input.source
+  const theme = input.theme
   return {
     source: isSourceKind(source) ? source : DEFAULT_SETTINGS.source,
+    theme: isThemeMode(theme) ? theme : DEFAULT_SETTINGS.theme,
     floatEnabled:
       typeof input.floatEnabled === 'boolean' ? input.floatEnabled : DEFAULT_SETTINGS.floatEnabled,
     floatOpacity: clampNumber(input.floatOpacity, 0.3, 1, DEFAULT_SETTINGS.floatOpacity),

@@ -53,7 +53,7 @@ export interface AggregateOptions {
 /**
  * 把会话列表摊成一张 Snapshot。
  *
- * 这两个源都没有积分，所以积分相关的字段一律留 0 —— 界面靠 snapshot.kind
+ * 这些源都没有积分，所以积分相关的字段一律留 0 —— 界面靠 snapshot.kind
  * 决定这些位置显不显示，显示成 0 分比不显示更糟。
  */
 export function buildSnapshot(sessions: SourceSession[], options: AggregateOptions): Snapshot {

@@ -2,7 +2,14 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
+    <meta name="color-scheme" content="light dark" />
     <title>Token 计量器</title>
+    <script>
+      /* 与 index.html 同一套：外观必须在样式表之前落定，否则深色下会闪一帧白 */
+      document.documentElement.dataset.theme = matchMedia('(prefers-color-scheme: dark)').matches
+        ? 'dark'
+        : 'light'
+    </script>
   </head>
   <body>
     <!--
@@ -11,19 +18,7 @@
       屏幕上什么都看不到 —— 留着这行字才能区分「没渲染」和「没显示」。
     -->
     <div id="root">
-      <div
-        style="
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          height: 100%;
-          font-family: system-ui, 'Microsoft YaHei UI', sans-serif;
-          font-size: 12px;
-          color: #6b8299;
-        "
-      >
-        计量中…
-      </div>
+      <div class="boot">计量中…</div>
     </div>
     <script type="module" src="./float.tsx"></script>
   </body>

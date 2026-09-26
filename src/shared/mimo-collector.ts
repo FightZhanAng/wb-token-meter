@@ -9,12 +9,12 @@
  *   ~/.cache/mimocode/models.json
  *     引擎的模型目录（223 个 provider），含每个模型的 limit.context
  *
- * 口径 —— 这一家和另外三个源**反着来**，映射时必须转一道：
+ * 口径 —— 这一家和 DeepSeek Harness 是**反着来**的那两个，映射时必须转一道：
  *
  *   total = input + output + reasoning + cache.read + cache.write
  *
  * 也就是说 `input` 是**不含缓存读**的纯新增输入（本机 84 条消息残差恒为 0），
- * 而 WorkBuddy / Kimi Code / ZCode 的 input 都含缓存。所以：
+ * 而 WorkBuddy / Kimi Code / ZCode / Reasonix 的 input 都含缓存。所以：
  *
  *   输入 = input + cache.read + cache.write
  *   缓存命中 = cache.read

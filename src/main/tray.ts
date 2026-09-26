@@ -9,10 +9,12 @@ import {
   percent,
   relativeTime,
   SOURCE_ORDER,
-  sourceLabel
+  sourceLabel,
+  THEME_ORDER,
+  themeLabel
 } from '../shared/format'
 import { describeReset, quotaSummary, quotaWindowLabel, windowOf } from '../shared/opencode-quota'
-import type { FloatSize, Snapshot, SourceKind } from '../shared/types'
+import type { FloatSize, Snapshot, SourceKind, ThemeMode } from '../shared/types'
 import { trayIconImage } from './paths'
 
 export interface TrayCallbacks {
@@ -24,6 +26,10 @@ export interface TrayCallbacks {
   /* 数据源 */
   getSource(): SourceKind
   onSetSource(kind: SourceKind): void
+
+  /* 外观 */
+  getTheme(): ThemeMode
+  onSetTheme(mode: ThemeMode): void
 
   /* 桌面胶囊 */
   getFloatEnabled(): boolean
@@ -89,6 +95,7 @@ export class TrayController {
         : 0
 
     const source = this.cb.getSource()
+    const theme = this.cb.getTheme()
     const floatEnabled = this.cb.getFloatEnabled()
     const floatSize = this.cb.getFloatSize()
     const floatOpacity = this.cb.getFloatOpacity()
@@ -113,6 +120,7 @@ export class TrayController {
       snapshot.generatedAt,
       quotaSignature,
       source,
+      theme,
       floatEnabled,
       floatSize,
       floatOpacity.toFixed(2),
@@ -191,6 +199,15 @@ export class TrayController {
           type: 'radio' as const,
           checked: source === kind,
           click: () => this.cb.onSetSource(kind)
+        }))
+      },
+      {
+        label: `外观：${themeLabel(theme)}`,
+        submenu: THEME_ORDER.map((mode) => ({
+          label: themeLabel(mode),
+          type: 'radio' as const,
+          checked: theme === mode,
+          click: () => this.cb.onSetTheme(mode)
         }))
       },
       { type: 'separator' },

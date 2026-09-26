@@ -1,4 +1,4 @@
-import { BrowserWindow, screen } from 'electron'
+import { BrowserWindow, nativeTheme, screen } from 'electron'
 import { windowSizeOf } from '../shared/layout'
 import type { FloatPosition, FloatState, Settings } from '../shared/types'
 import { hardenWindow, loadRenderer } from './paths'
@@ -9,6 +9,17 @@ const MARGIN = 28
 const VISIBLE_FALLBACK_MS = 700
 /** 拖动结束后隔多久落盘一次位置，别让每帧移动都写磁盘 */
 const POSITION_FLUSH_MS = 400
+
+/**
+ * 「实心底色」模式下窗口自己的底色。透明模式用全透明。
+ * 必须和 float.css 的 --sheet 对上（深色 #131E21 / 浅色 #F6F8F5）——
+ * 这两个值只在主进程用得到（窗口底色是创建参数，CSS 管不着），
+ * 对不上的表现是胶囊四周多出一圈异色。
+ */
+function capsuleBackground(solid: boolean): string {
+  if (!solid) return '#00000000'
+  return nativeTheme.shouldUseDarkColors ? '#131E21' : '#F6F8F5'
+}
 
 /**
  * 桌面常驻胶囊。
@@ -73,7 +84,7 @@ export class FloatWindow {
       frame: false,
       // 不透明模式是「透明窗口在当前环境不可见」时的逃生通道
       transparent: !solid,
-      backgroundColor: solid ? '#ffffff' : '#00000000',
+      backgroundColor: capsuleBackground(solid),
       resizable: false,
       movable: true,
       minimizable: false,
@@ -181,6 +192,17 @@ export class FloatWindow {
     }
     win.setAlwaysOnTop(settings.floatAlwaysOnTop, 'floating')
     win.setOpacity(clampOpacity(settings.floatOpacity))
+  }
+
+  /**
+   * 外观变了：只有「实心底色」模式需要动 —— 透明窗口的底色本来就是全透明，
+   * 胶囊本体由 CSS 画。窗口底色可以在运行期改，不必重建。
+   */
+  syncTheme(): void {
+    const win = this.win
+    if (!win || win.isDestroyed()) return
+    if (!this.readSettings().floatSolidBackground) return
+    win.setBackgroundColor(capsuleBackground(true))
   }
 
   /**

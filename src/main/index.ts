@@ -1,17 +1,20 @@
-import { app, BrowserWindow, ipcMain, shell } from 'electron'
+import { app, BrowserWindow, ipcMain, nativeTheme, shell } from 'electron'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { collectSnapshot, type ParseCache } from '../shared/collector'
+import { collectDshSnapshot, type DshParseCache } from '../shared/dsh-collector'
 import { SOURCE_ORDER, sourceLabel } from '../shared/format'
 import { collectKimiSnapshot, type KimiParseCache } from '../shared/kimi-collector'
 import { collectMimoSnapshot } from '../shared/mimo-collector'
+import { collectReasonixSnapshot, type ReasonixParseCache } from '../shared/reasonix-collector'
 import { collectZcodeSnapshot } from '../shared/zcode-collector'
-import type { FloatState, Settings, Snapshot, SourceKind } from '../shared/types'
+import type { FloatState, Settings, Snapshot, SourceKind, ThemeMode } from '../shared/types'
 import { FloatWindow } from './float'
 import { OpencodeUsage } from './opencode-usage'
 import {
   appIconPath,
+  dshDir,
   hardenWindow,
   kimiDir,
   loadRenderer,
@@ -19,6 +22,7 @@ import {
   mimoDataDir,
   opencodeDir,
   preloadPath,
+  reasonixDir,
   workbuddyDir,
   zcodeDir
 } from './paths'
@@ -63,9 +67,11 @@ let floatWindow: FloatWindow | null = null
 let settingsStore: SettingsStore | null = null
 let isQuitting = false
 let snapshot: Snapshot | null = null
-/** 两个数据源各有一份解析缓存 —— 切换数据源不能把对方的增量缓存冲掉 */
+/** 各数据源各有一份解析缓存 —— 切换数据源不能把对方的增量缓存冲掉 */
 const workbuddyCache: ParseCache = new Map()
 const kimiCache: KimiParseCache = new Map()
+const reasonixCache: ReasonixParseCache = new Map()
+const dshCache: DshParseCache = new Map()
 
 /* ------------------------------------------------------------ 采集 */
 
@@ -77,12 +83,36 @@ function sourceDir(kind: SourceKind): string {
   if (kind === 'kimi') return kimiDir()
   if (kind === 'zcode') return zcodeDir()
   if (kind === 'mimo') return mimoDataDir()
+  if (kind === 'reasonix') return reasonixDir()
+  if (kind === 'dsh') return dshDir()
   if (kind === 'opencode') return opencodeDir()
   return workbuddyDir()
 }
 
 function currentSource(): SourceKind {
   return settingsStore?.settings.source ?? DEFAULT_SETTINGS.source
+}
+
+/**
+ * 外观走 Electron 的 nativeTheme.themeSource：设成 light / dark 之后，
+ * 渲染层的 `prefers-color-scheme` 会跟着变，两个窗口的 CSS 直接生效 ——
+ * 不用自己发一套主题消息，也就没有「主进程和页面各记一份」的机会。
+ */
+function applyTheme(mode: ThemeMode): void {
+  nativeTheme.themeSource = mode
+}
+
+function currentTheme(): ThemeMode {
+  return settingsStore?.settings.theme ?? DEFAULT_SETTINGS.theme
+}
+
+/**
+ * 窗口底色是**创建参数**，CSS 管不到它，只能主进程给。
+ * 这两个值必须和 styles.css 的 --paper 对上（深色 #0E1618 / 浅色 #EDF0EC），
+ * 否则窗口冒出来的那一帧会先闪一下另一种颜色。
+ */
+function windowBackground(): string {
+  return nativeTheme.shouldUseDarkColors ? '#0E1618' : '#EDF0EC'
 }
 
 function ensureOpencodeUsage(): OpencodeUsage {
@@ -147,6 +177,10 @@ function refresh(force = false): Snapshot | null {
       snapshot = collectZcodeSnapshot({ zcodeDir: sourceDir(kind) })
     } else if (kind === 'mimo') {
       snapshot = collectMimoSnapshot({ mimoDir: sourceDir(kind), cacheDir: mimoCacheDir() })
+    } else if (kind === 'reasonix') {
+      snapshot = collectReasonixSnapshot({ reasonixDir: sourceDir(kind), cache: reasonixCache })
+    } else if (kind === 'dsh') {
+      snapshot = collectDshSnapshot({ dshDir: sourceDir(kind), cache: dshCache })
     } else if (kind === 'opencode') {
       snapshot = buildOpencodeSnapshot()
       // 网络请求绝不能挡住 20 秒一次的同步轮询：先把缓存画出来，真拉到了再走一遍广播。
@@ -189,6 +223,12 @@ function patchSettings(patch: Partial<Settings>): void {
   tray?.notifyRefreshed()
   // 换数据源要立刻重采一次，否则界面会停在旧数据源上直到下一次轮询
   if (patch.source && patch.source !== before) refresh()
+  // 外观同理：themeSource 一变，两个窗口的 prefers-color-scheme 立刻跟着走，
+  // 只有「实心底色」的胶囊要主进程自己重刷窗口底色
+  if (patch.theme) {
+    applyTheme(next.theme)
+    floatWindow?.syncTheme()
+  }
 }
 
 function setFloatEnabled(enabled: boolean): void {
@@ -224,7 +264,7 @@ function ensureMainWindow(): BrowserWindow {
     minHeight: 520,
     show: false,
     title: 'Token 计量器',
-    backgroundColor: '#f4f6f9',
+    backgroundColor: windowBackground(),
     icon: appIconPath(),
     autoHideMenuBar: true,
     webPreferences: {
@@ -262,6 +302,8 @@ function bootstrap(): void {
   app.setAppUserModelId(APP_ID)
 
   settingsStore = new SettingsStore()
+  // 必须在建窗口之前定下来：窗口底色是创建参数，晚了会先闪一下白底
+  applyTheme(settingsStore.settings.theme)
 
   floatWindow = new FloatWindow(
     preloadPath(),
@@ -289,6 +331,10 @@ function bootstrap(): void {
     getSource: () => currentSource(),
     onSetSource: (kind) => patchSettings({ source: kind }),
 
+    /* 外观 */
+    getTheme: () => currentTheme(),
+    onSetTheme: (mode) => patchSettings({ theme: mode }),
+
     /* 桌面胶囊 */
     getFloatEnabled: () => settingsStore?.settings.floatEnabled ?? false,
     onToggleFloat: (enabled) => setFloatEnabled(enabled),
@@ -308,6 +354,14 @@ function bootstrap(): void {
   tray.create()
 
   ensureMainWindow()
+
+  // 跟随系统时，用户在 Windows 里切浅色 / 深色要立刻反映到两个窗口上。
+  // themeSource 是 system 时 Electron 会自己更新 prefers-color-scheme，
+  // 这里只需要重刷那些「不是 CSS 说了算」的地方。
+  nativeTheme.on('updated', () => {
+    floatWindow?.syncTheme()
+    mainWindow?.setBackgroundColor(windowBackground())
+  })
 
   // 按设置决定胶囊是否出现；自检时强制显示，否则测不到
   if (SMOKE || settingsStore.settings.floatEnabled) floatWindow.show()
@@ -333,7 +387,8 @@ function bootstrap(): void {
                const heat = document.querySelector('.heatmap')
                const active = document.querySelector('.source-switch .active')
                return {
-                 cards: document.querySelectorAll('.card').length,
+                 sections: document.querySelectorAll('.ch').length,
+                 theme: document.documentElement.dataset.theme || '',
                  bodyHeight: document.body.scrollHeight,
                  title: document.querySelector('.app-title')?.textContent || '',
                  source: active ? active.textContent : '',
@@ -390,7 +445,7 @@ function bootstrap(): void {
                    headline: [...document.querySelectorAll('.headline-value')].map((el) => el.textContent),
                    sessionRows: document.querySelectorAll('.session-row').length,
                    creditRows: document.querySelectorAll('.session-credits').length,
-                   contextNote: document.querySelector('.meter-foot')?.textContent || '',
+                   contextNote: document.querySelector('.gauge-foot')?.textContent || '',
                    modelHints: [...document.querySelectorAll('.bar-value em')].map((el) => el.textContent)
                  }
                })()`
@@ -449,6 +504,47 @@ function bootstrap(): void {
           smoke('narrow-header', narrow)
           win.setSize(originalBounds.width, originalBounds.height)
           await new Promise((resolve) => setTimeout(resolve, 300))
+
+          // 两套外观各截一张：深色主题只有真看一眼才知道对不对，
+          // 顺手把 dataset.theme 与实测底色回报出来，免得「设置改了但 CSS 没跟上」。
+          const themeBefore = settingsStore?.settings.theme ?? 'system'
+          const themeShots: Array<{ mode: string; actual: string | undefined; dom: unknown }> = []
+          for (const mode of ['dark', 'light'] as const) {
+            patchSettings({ theme: mode })
+            await new Promise((resolve) => setTimeout(resolve, 700))
+            const dom = await win.webContents.executeJavaScript(
+              `(() => {
+                 const body = getComputedStyle(document.body)
+                 // 这套设计押在 Bahnschrift（DIN 血统，Win10+ 自带）上，
+                 // 量一下字宽才知道它到底在不在 —— getComputedStyle 只会把 CSS 原样念回来
+                 const probe = (font) => {
+                   const ctx = document.createElement('canvas').getContext('2d')
+                   ctx.font = '40px ' + font
+                   return Math.round(ctx.measureText('Token 0123456789').width)
+                 }
+                 const counter = document.querySelector('.headline-value')
+                 return {
+                   stamped: document.documentElement.dataset.theme || '',
+                   prefersDark: matchMedia('(prefers-color-scheme: dark)').matches,
+                   background: body.backgroundColor,
+                   color: body.color,
+                   sections: document.querySelectorAll('.ch').length,
+                   themeButton: document.querySelector('.theme-toggle')?.textContent || '',
+                   counterFont: counter ? getComputedStyle(counter).fontFamily.split(',')[0] : '',
+                   fontWidth: {
+                     bahnschrift: probe('Bahnschrift'),
+                     segoe: probe('"Segoe UI"'),
+                     sans: probe('sans-serif')
+                   }
+                 }
+               })()`
+            )
+            writeFileSync(join(dir, `window-${mode}.png`), (await win.webContents.capturePage()).toPNG())
+            themeShots.push({ mode, actual: settingsStore?.settings.theme, dom })
+          }
+          smoke('theme', { before: themeBefore, shots: themeShots })
+          patchSettings({ theme: themeBefore })
+          await new Promise((resolve) => setTimeout(resolve, 400))
         }
 
         // 桌面胶囊单独截一张，并回报 DOM 度量

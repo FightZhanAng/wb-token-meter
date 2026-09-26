@@ -82,6 +82,24 @@ export function opencodeDir(): string {
   return join(homedir(), '.local', 'share', 'opencode')
 }
 
+/**
+ * Reasonix 的数据目录（桌面端与 CLI 共用这一份）。
+ * 用量流水是 <dir>/usage.jsonl，会话元数据在 <dir>/sessions/*.meta.json。
+ * 同目录下的 config.json 存着明文 apiKey，采集器刻意不碰。
+ */
+export function reasonixDir(): string {
+  const override = process.env['WB_TOKEN_METER_REASONIX_DIR']
+  if (override) return override
+  return join(homedir(), '.reasonix')
+}
+
+/** DeepSeek Harness 的数据目录；会话日志在 <dir>/sessions/<工作目录>/<会话>/ 下 */
+export function dshDir(): string {
+  const override = process.env['WB_TOKEN_METER_DSH_DIR']
+  if (override) return override
+  return join(homedir(), '.dsh')
+}
+
 export type RendererPage = 'index' | 'float'
 
 /** 按页面名加载渲染层；开发走 dev server，生产走打包后的 HTML */

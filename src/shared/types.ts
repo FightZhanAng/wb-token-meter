@@ -80,10 +80,11 @@ export interface Totals extends TokenBundle {
 
 /**
  * 数据源。各边的账本口径都不同，界面必须知道自己在看哪一本：
- * WorkBuddy 有积分（token 只是副产品），Kimi Code / ZCode / MiMo 只有 token，
- * OpenCode Go 连 token 都没有 —— 只有订阅额度的占用比例，而且还是联网查的。
+ * WorkBuddy 有积分（token 只是副产品），Kimi Code / ZCode / MiMo / Reasonix /
+ * DeepSeek Harness 只有 token，OpenCode Go 连 token 都没有 ——
+ * 只有订阅额度的占用比例，而且还是联网查的。
  */
-export type SourceKind = 'workbuddy' | 'kimi' | 'zcode' | 'mimo' | 'opencode'
+export type SourceKind = 'workbuddy' | 'kimi' | 'zcode' | 'mimo' | 'reasonix' | 'dsh' | 'opencode'
 
 export interface SnapshotSource {
   /** 数据根目录 */
@@ -154,6 +155,14 @@ export interface QuotaInfo {
   history: UsageSample[]
 }
 
+/* ------------------------------------------------------------ 外观 */
+
+/**
+ * 界面外观。`system` 交给操作系统（Windows 的浅色 / 深色开关），
+ * 另外两档是明确指定 —— 「系统是深色但这个工具偏要白底」时靠它们。
+ */
+export type ThemeMode = 'system' | 'light' | 'dark'
+
 /* ------------------------------------------------------------ 桌面胶囊 */
 
 export type FloatSize = 'small' | 'medium' | 'large'
@@ -166,6 +175,8 @@ export interface FloatPosition {
 export interface Settings {
   /** 当前统计哪个数据源 */
   source: SourceKind
+  /** 界面外观 */
+  theme: ThemeMode
   /** 是否在桌面显示胶囊 */
   floatEnabled: boolean
   /** 胶囊整体不透明度，0.3 ~ 1 */

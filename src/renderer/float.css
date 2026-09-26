@@ -1,4 +1,54 @@
 /*
+ * 桌面胶囊 —— 记录仪贴在桌面上的那枚小铭牌。
+ *
+ * 面板是「一张纸」，胶囊是「一块牌子」：所以它保留胶囊形（999px）而不是
+ * 面板那套 0/1/2px 的直角分档。它悬在别人的桌面上，需要一眼看出是个独立的东西。
+ *
+ * 独立入口必须自带一份令牌 —— styles.css 管不到这里。
+ */
+:root {
+  color-scheme: light;
+
+  --paper: #edf0ec;
+  --sheet: #f6f8f5;
+  --ink: #16211e;
+  --ink-2: #5a6a64;
+  --ink-3: #8d9c96;
+  --pen: #c4442a;
+  --warn: #b8801a;
+  --alarm: #a8271b;
+  --d-in: #2c5c7a;
+  --track: #dde3dd;
+
+  --capsule-bg: rgba(246, 248, 245, 0.94);
+  --capsule-line: rgba(22, 33, 30, 0.16);
+  --capsule-shadow: 0 4px 10px rgba(22, 33, 30, 0.22);
+
+  --font-ui: Bahnschrift, 'DIN Alternate', 'Segoe UI Variable Text', 'Segoe UI',
+    'Microsoft YaHei UI', 'Microsoft YaHei', sans-serif;
+  --font-num: Consolas, 'Cascadia Mono', ui-monospace, monospace;
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+
+  --paper: #0e1618;
+  --sheet: #131e21;
+  --ink: #e3ece8;
+  --ink-2: #93a5a0;
+  --ink-3: #667872;
+  --pen: #ff6b4a;
+  --warn: #e0a83c;
+  --alarm: #e5484d;
+  --d-in: #5b9bc4;
+  --track: #223033;
+
+  --capsule-bg: rgba(19, 30, 33, 0.94);
+  --capsule-line: rgba(227, 236, 232, 0.18);
+  --capsule-shadow: 0 4px 10px rgba(0, 0, 0, 0.5);
+}
+
+/*
  * 独立的 HTML 入口必须自带 box-sizing 重置 ——
  * 主界面的那份管不到这里。漏了的话内容盒会变成「窗口尺寸 + padding」，
  * 卡片被推出窗口边缘、圆角被裁掉，而且只有透明模式看得出来。
@@ -16,7 +66,9 @@ body,
 
 body {
   background: transparent;
-  font-family: system-ui, 'Microsoft YaHei UI', 'Segoe UI', sans-serif;
+  font-family: var(--font-ui);
+  font-size: 12.5px;
+  color: var(--ink);
   overflow: hidden;
   -webkit-font-smoothing: antialiased;
   /*
@@ -27,6 +79,15 @@ body {
   padding: 12px;
 }
 
+.boot {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
 .capsule {
   display: flex;
   align-items: center;
@@ -35,15 +96,15 @@ body {
   height: 100%;
   padding: 0 14px 0 10px;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.93);
-  border: 1px solid rgba(24, 95, 165, 0.14);
+  background: var(--capsule-bg);
+  border: 1px solid var(--capsule-line);
   /*
    * 阴影的「最远触达」= |offset-y| + blur。这里 4 + 10 = 14px，而窗口留了
    * 12px（SHADOW_PAD），差的 2px 只是最淡的边缘，看不出来。
    * 但别再往上调 —— 原来的 0 8px 20px 触达 28px，主阴影直接被窗口边界切平，
    * 露出一条直边，看起来就像胶囊外面糊了层底色。
    */
-  box-shadow: 0 4px 10px rgba(16, 42, 72, 0.18);
+  box-shadow: var(--capsule-shadow);
   cursor: grab;
   user-select: none;
   -webkit-user-select: none;
@@ -53,12 +114,12 @@ body {
   cursor: grabbing;
 }
 
-/* 不透明降级模式：窗口本身已是白底矩形，胶囊就不要再画圆角和阴影了 */
+/* 不透明降级模式：窗口本身已是实底矩形，胶囊就不要再画圆角和阴影了 */
 .capsule.solid {
-  border-radius: 6px;
+  border-radius: 2px;
   border: none;
   box-shadow: none;
-  background: #ffffff;
+  background: var(--sheet);
 }
 
 .ring {
@@ -75,36 +136,42 @@ body {
 }
 
 .tokens {
+  /* 与面板上的大读数同一个理由：Consolas 的 0 带斜杠，16px 就已经像个「Ø」 */
+  font-family: var(--font-ui);
+  font-variant-numeric: tabular-nums lining-nums;
   font-size: 16px;
   font-weight: 600;
   line-height: 1.15;
-  color: #17436e;
-  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+  color: var(--ink);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
 .tokens em {
+  font-family: var(--font-ui);
   font-style: normal;
-  font-size: 10.5px;
+  font-size: 10px;
   font-weight: 500;
-  color: #7b8fa5;
-  margin-left: 3px;
+  letter-spacing: 0;
+  color: var(--ink-3);
+  margin-left: 4px;
 }
 
 .credits {
-  font-size: 11px;
-  color: #a2641a;
+  font-family: var(--font-num);
   font-variant-numeric: tabular-nums;
+  font-size: 10.5px;
+  color: var(--warn);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-/* Kimi Code 没有积分：第二行放的是上下文水位与调用次数，用中性色，别穿积分的衣服 */
+/* 没有积分的源：第二行放的是上下文水位与调用次数，用中性色，别穿积分的衣服 */
 .credits.plain {
-  color: #7b8fa5;
+  color: var(--ink-3);
 }
 
 /* 最小档位放不下第二行，让位给 token */

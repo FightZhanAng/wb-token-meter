@@ -1,5 +1,5 @@
 /**
- * ZCode 用量采集 —— 三个数据源里最省事的一份。
+ * ZCode 用量采集 —— 所有本地源里最省事的一份。
  *
  * ZCode 把每次模型请求的 token 记在一张专门的表里，不用像 WorkBuddy 那样拿
  * traceId 去对账，也不用像 Kimi Code 那样逐行扫 JSONL：
@@ -8,7 +8,7 @@
  *     model_usage   一次模型请求一行：input / output / reasoning / cache_read ...
  *     session       会话元数据：标题、工作目录、项目、时间、是否归档
  *
- * 口径（实测与另外两个源一致）：
+ * 口径（实测与 WorkBuddy / Kimi Code 一致）：
  *   input_tokens 是**含缓存读**的完整输入 —— total = input + output，
  *   且实测 input(243577) 远大于 cache_read(243072)，不可能是「非缓存部分」；
  *   缓存命中 = cache_read_input_tokens；思考 token 单列，所以界面上

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type JSX } from 'react'
+import { useCallback, useEffect, useMemo, useState, type JSX, type ReactNode } from 'react'
 import type {
   DayStat,
   QuotaInfo,
@@ -6,6 +6,7 @@ import type {
   QuotaWindowKey,
   Snapshot,
   SourceKind,
+  ThemeMode,
   UsageSample
 } from '@shared/types'
 import {
@@ -24,6 +25,9 @@ import {
   SOURCE_ORDER,
   sourceLabel,
   startOfToday,
+  THEME_ORDER,
+  themeLabel,
+  themeShort,
   tokenPerCredit
 } from '@shared/format'
 import { describeReset, quotaLevel, quotaWindowLabel } from '@shared/opencode-quota'
@@ -36,11 +40,41 @@ function levelOf(ratio: number): 'safe' | 'warn' | 'danger' {
   return 'safe'
 }
 
+/**
+ * 记录纸上的一个通道：左边窄栏写通道名，右边放数据，中间那条竖线是脊。
+ * 面板上每一块内容都走这里 —— 没有卡片、没有阴影，结构全靠这条脊和横线。
+ */
+function Channel({
+  name,
+  note,
+  live,
+  children
+}: {
+  name: string
+  /** 通道名下面那句实情（更新于 / 累计多少 / 命中率），没有就不写 */
+  note?: ReactNode
+  /** 正在记录的那个通道：名字前多一枚记录笔色的小方块 */
+  live?: boolean
+  children: ReactNode
+}): JSX.Element {
+  return (
+    <section className={`ch${live ? ' live' : ''}`}>
+      <h2 className="ch-name">{name}</h2>
+      <div className="ch-body">
+        {note ? <div className="ch-note">{note}</div> : null}
+        {children}
+      </div>
+    </section>
+  )
+}
+
 interface BarRow {
   name: string
   value: number
   color: string
   hint?: string
+  /** 子项（缓存命中、思考）：缩进一格，不靠「·」这类符号提示层级 */
+  sub?: boolean
 }
 
 function Bars({ rows }: { rows: BarRow[] }): JSX.Element {
@@ -48,7 +82,7 @@ function Bars({ rows }: { rows: BarRow[] }): JSX.Element {
   return (
     <div className="bars">
       {rows.map((row) => (
-        <div className="bar-row" key={row.name}>
+        <div className={`bar-row${row.sub ? ' sub' : ''}`} key={row.name}>
           <div className="bar-name" title={row.name}>
             {row.name}
           </div>
@@ -61,6 +95,21 @@ function Bars({ rows }: { rows: BarRow[] }): JSX.Element {
           </div>
         </div>
       ))}
+    </div>
+  )
+}
+
+/**
+ * 带红线区的仪表。70% / 90% 两条分界印在刻度槽上（CSS 背景），永远看得见；
+ * 指针落在哪个区就染哪个区的颜色。这样「红」说的是「进红线区了」，
+ * 而不是「我把整条进度条刷红了」—— 真实仪表就是这么读的。
+ */
+function Gauge({ ratio }: { ratio: number }): JSX.Element {
+  const clamped = Math.min(1, Math.max(0, ratio))
+  return (
+    <div className="gauge" data-level={levelOf(clamped)}>
+      <div className="gauge-fill" style={{ width: `${clamped * 100}%` }} />
+      <div className="gauge-needle" style={{ left: `${clamped * 100}%` }} />
     </div>
   )
 }
@@ -129,6 +178,7 @@ function buildHeatmap(
 
 function Heatmap({ days, withCredits }: { days: DayStat[]; withCredits: boolean }): JSX.Element {
   const { cells, start, end, activeDays } = useMemo(() => buildHeatmap(days, HEAT_WEEKS), [days])
+  const todayKey = dayKeyOf(startOfToday())
 
   return (
     <>
@@ -142,7 +192,7 @@ function Heatmap({ days, withCredits }: { days: DayStat[]; withCredits: boolean 
           {cells.map((cell) => (
             <div
               key={cell.date}
-              className={`heat-cell${cell.future ? ' future' : ''}`}
+              className={`heat-cell${cell.future ? ' future' : ''}${cell.date === todayKey ? ' today' : ''}`}
               data-level={cell.level}
               title={
                 cell.future
@@ -173,11 +223,14 @@ function Heatmap({ days, withCredits }: { days: DayStat[]; withCredits: boolean 
 
 /* ------------------------------------------------- OpenCode Go 额度 */
 
-/** 折线颜色与粗细：窗口越长画得越重，5 小时窗口最轻，短线才不会压住长线 */
+/**
+ * 折线颜色与粗细：窗口越长画得越重，5 小时窗口最轻，短线才不会压住长线。
+ * 颜色走 CSS 变量 —— 写死十六进制的话深色主题下这几条线会糊在背景里。
+ */
 const TREND_SERIES: { key: QuotaWindowKey; color: string; width: number; opacity: number }[] = [
-  { key: 'monthly', color: '#378add', width: 2.4, opacity: 1 },
-  { key: 'weekly', color: '#ba7517', width: 1.8, opacity: 1 },
-  { key: 'rolling', color: '#9db8d6', width: 1.4, opacity: 0.85 }
+  { key: 'monthly', color: 'var(--d-in)', width: 2.4, opacity: 1 },
+  { key: 'weekly', color: 'var(--d-think)', width: 1.8, opacity: 1 },
+  { key: 'rolling', color: 'var(--d-rank)', width: 1.4, opacity: 0.85 }
 ]
 
 /**
@@ -314,7 +367,8 @@ function QuotaTrend({ history }: { history: UsageSample[] }): JSX.Element {
               x2={PLOT_W}
               y1={PLOT_H - (tick / top) * PLOT_H}
               y2={PLOT_H - (tick / top) * PLOT_H}
-              stroke="#eef2f7"
+              /* 走 style 而不是属性：SVG 的呈现属性不解析 CSS 变量，深色下会留在浅色网格 */
+              style={{ stroke: 'var(--rule-soft)' }}
               strokeWidth="1"
               vectorEffect="non-scaling-stroke"
             />
@@ -324,7 +378,7 @@ function QuotaTrend({ history }: { history: UsageSample[] }): JSX.Element {
               key={line.key}
               points={line.points}
               fill="none"
-              stroke={line.color}
+              style={{ stroke: line.color }}
               strokeWidth={line.width}
               strokeOpacity={line.opacity}
               strokeLinejoin="round"
@@ -357,45 +411,39 @@ function QuotaTrend({ history }: { history: UsageSample[] }): JSX.Element {
 function QuotaView({ quota, now }: { quota: QuotaInfo; now: number }): JSX.Element {
   return (
     <>
-      <section className="card">
-        <div className="card-head">
-          <div className="card-title">额度水位</div>
-          <div className="card-note">
-            {quota.stale
-              ? '旧数据'
-              : quota.fetchedAt
-                ? `更新于 ${relativeTime(quota.fetchedAt, now)}`
-                : quota.error
-                  ? '未取到数据'
-                  : '查询中'}
-          </div>
-        </div>
+      <Channel
+        name="额度"
+        note={
+          quota.stale
+            ? '旧数据'
+            : quota.fetchedAt
+              ? `更新于 ${relativeTime(quota.fetchedAt, now)}`
+              : quota.error
+                ? '未取到数据'
+                : '查询中'
+        }
+      >
         <QuotaMeter quota={quota} now={now} />
-      </section>
+      </Channel>
 
-      <section className="card">
-        <div className="card-head">
-          <div className="card-title">数据来源</div>
-          <div className="card-note">联网查询</div>
-        </div>
+      <Channel name="来源" note="联网查询">
         <QuotaSource quota={quota} now={now} />
-      </section>
+      </Channel>
 
-      <section className="card">
-        <div className="card-head">
-          <div className="card-title">额度消耗趋势</div>
-          <div className="card-note">最近 7 天 · {quota.history.length} 个采样点</div>
-        </div>
+      <Channel name="趋势" note={`最近 7 天 · ${quota.history.length} 个采样点`}>
         <QuotaTrend history={quota.history} />
-      </section>
+      </Channel>
     </>
   )
 }
 
 /* -------------------------------------------------------- 数据源切换 */
 
-/** 直接摆出来的源数量，其余收进「更多」—— 五个按钮会把顶栏标题挤成一个省略号 */
-const VISIBLE_SOURCES = 3
+/**
+ * 直接摆出来的源数量，其余收进「更多」。
+ * 数据源独占顶栏第二行，横向放得下四个 —— 摆得越多，切一次源要点的次数越少。
+ */
+const VISIBLE_SOURCES = 4
 
 function SourceSwitch({
   value,
@@ -463,11 +511,42 @@ function SourceSwitch({
   )
 }
 
+/* ------------------------------------------------------------ 外观 */
+
+/** 三档各一枚记号：跟随系统是半明半暗的圆，浅色是太阳，深色是月牙 */
+function ThemeGlyph({ mode }: { mode: ThemeMode }): JSX.Element {
+  if (mode === 'light') {
+    return (
+      <svg viewBox="0 0 14 14" aria-hidden="true">
+        <circle cx="7" cy="7" r="2.9" fill="currentColor" />
+        <g stroke="currentColor" strokeWidth="1.2" strokeLinecap="round">
+          <path d="M7 .8v1.9M7 11.3v1.9M.8 7h1.9M11.3 7h1.9" />
+          <path d="M2.6 2.6l1.35 1.35M10.05 10.05l1.35 1.35M11.4 2.6l-1.35 1.35M3.95 10.05L2.6 11.4" />
+        </g>
+      </svg>
+    )
+  }
+  if (mode === 'dark') {
+    return (
+      <svg viewBox="0 0 14 14" aria-hidden="true">
+        <path d="M11.7 8.9A5.2 5.2 0 0 1 5.1 2.3 5.6 5.6 0 1 0 11.7 8.9Z" fill="currentColor" />
+      </svg>
+    )
+  }
+  return (
+    <svg viewBox="0 0 14 14" aria-hidden="true">
+      <circle cx="7" cy="7" r="5" fill="none" stroke="currentColor" strokeWidth="1.2" />
+      <path d="M7 2a5 5 0 0 0 0 10Z" fill="currentColor" />
+    </svg>
+  )
+}
+
 /* ------------------------------------------------------------ 主组件 */
 
 export default function App(): JSX.Element {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null)
   const [source, setSource] = useState<SourceKind>('workbuddy')
+  const [theme, setTheme] = useState<ThemeMode>('system')
   const [error, setError] = useState<string>('')
   const [busy, setBusy] = useState(false)
   const [now, setNow] = useState(() => Date.now())
@@ -510,6 +589,20 @@ export default function App(): JSX.Element {
     [load]
   )
 
+  /** 系统 → 浅色 → 深色 → 系统。想要哪一档都能一键点到，不必去翻托盘菜单 */
+  const cycleTheme = useCallback(async () => {
+    const api = window.meter
+    if (!api) return
+    const next = THEME_ORDER[(THEME_ORDER.indexOf(theme) + 1) % THEME_ORDER.length]
+    setTheme(next)
+    try {
+      const saved = await api.updateSettings({ theme: next })
+      setTheme(saved.theme)
+    } catch (cause) {
+      setError(String(cause))
+    }
+  }, [theme])
+
   // 首个 effect 包 try/catch：effect 抛错又没有错误边界时，
   // React 会整棵树卸载，界面变成一片空白，极难定位。
   useEffect(() => {
@@ -519,10 +612,16 @@ export default function App(): JSX.Element {
       if (!api) return
       void api
         .getSettings()
-        .then((settings) => setSource(settings.source))
+        .then((settings) => {
+          setSource(settings.source)
+          setTheme(settings.theme)
+        })
         .catch(() => undefined)
       const offSnapshot = api.onSnapshot((next) => setSnapshot(next))
-      const offSettings = api.onSettings((settings) => setSource(settings.source))
+      const offSettings = api.onSettings((settings) => {
+        setSource(settings.source)
+        setTheme(settings.theme)
+      })
       const timer = window.setInterval(() => setNow(Date.now()), 30_000)
       return () => {
         offSnapshot()
@@ -550,27 +649,44 @@ export default function App(): JSX.Element {
   const structureRows = useMemo<BarRow[]>(() => {
     if (!totals) return []
     const rows: BarRow[] = [
-      { name: '输入', value: totals.inputTokens, color: '#378ADD' },
-      { name: '· 缓存命中', value: totals.cachedTokens, color: '#85B7EB' },
-      { name: '输出', value: totals.outputTokens, color: '#1D9E75' }
+      { name: '输入', value: totals.inputTokens, color: 'var(--d-in)' },
+      { name: '缓存命中', value: totals.cachedTokens, color: 'var(--d-cache)', sub: true },
+      { name: '输出', value: totals.outputTokens, color: 'var(--d-out)' }
     ]
-    // 只有 Kimi Code 的 output 里已含思考、没有单独一项；留着只会是根 0 长度的空条
-    if (withReasoning) rows.push({ name: '· 思考', value: totals.reasoningTokens, color: '#BA7517' })
+    // Kimi Code / Reasonix / DSH 的 output 里已含思考、没有单独一项；
+    // 留着只会是根 0 长度的空条
+    if (withReasoning) {
+      rows.push({ name: '思考', value: totals.reasoningTokens, color: 'var(--d-think)', sub: true })
+    }
     return rows
   }, [totals, withReasoning])
 
   const dayBars = useMemo(() => {
-    const days = (snapshot?.days ?? []).slice(0, 14).reverse()
-    const max = Math.max(1, ...days.map((day) => day.inputTokens + day.outputTokens))
-    const todayKey = new Date().toLocaleDateString('sv-SE')
-    return days.map((day) => ({
-      date: day.date,
+    const byDate = new Map((snapshot?.days ?? []).map((day) => [day.date, day]))
+    const today = startOfToday()
+    /*
+     * 补齐空档。只取「有数据的那些天」会让 14 根柱子等距排列 ——
+     * 看起来是一条连续时间轴，实际日期却在跳（19、25、26、01…），图在骗人。
+     * 缺的日子必须画成 0，横轴才是真的。
+     */
+    const range = Array.from({ length: 14 }, (_, index) => dayKeyOf(shiftDays(today, index - 13)))
+    const values = range.map((key) => {
+      const stat = byDate.get(key)
+      return {
+        date: key,
+        value: stat ? stat.inputTokens + stat.outputTokens : 0,
+        credits: stat?.credits ?? 0
+      }
+    })
+    const max = Math.max(1, ...values.map((item) => item.value))
+    return values.map((item, index) => ({
+      date: item.date,
       // 14 根柱子塞不下「M-D」这种标签，只留日号，完整日期交给 title
-      label: day.date.slice(8),
-      value: day.inputTokens + day.outputTokens,
-      ratio: (day.inputTokens + day.outputTokens) / max,
-      credits: day.credits,
-      isToday: day.date === todayKey
+      label: item.date.slice(8),
+      value: item.value,
+      ratio: item.value / max,
+      credits: item.credits,
+      isToday: index === range.length - 1
     }))
   }, [snapshot?.days])
 
@@ -617,7 +733,7 @@ export default function App(): JSX.Element {
       <div className="fatal">
         <strong>取数失败</strong>
         <div style={{ marginTop: 6 }}>{error}</div>
-        <div style={{ marginTop: 8, color: '#a3705f' }}>
+        <div style={{ marginTop: 8 }}>
           界面本身是正常的，失败发生在读取用量数据这一步。点右上角重试，或检查数据目录是否存在。
         </div>
       </div>
@@ -625,10 +741,11 @@ export default function App(): JSX.Element {
   }
 
   const activeRatio = snapshot?.active && snapshot.active.size > 0 ? snapshot.active.used / snapshot.active.size : 0
-  const activeLevel = levelOf(activeRatio)
   // 模型上限不落本地时（ZCode 走远程 provider）size 是 0：水位只能报已用量，
   // 硬算一个百分比出来比不显示更糟
   const sizeKnown = (snapshot?.active?.size ?? 0) > 0
+  const todayTokens = (today?.inputTokens ?? 0) + (today?.outputTokens ?? 0)
+  const newTokens = Math.max(0, (today?.inputTokens ?? 0) - (today?.cachedTokens ?? 0))
 
   return (
     <div className="app">
@@ -642,133 +759,123 @@ export default function App(): JSX.Element {
           </div>
         </div>
         <div className="header-actions">
-          <SourceSwitch value={source} disabled={busy} onChange={(kind) => void switchSource(kind)} />
+          <button
+            type="button"
+            className="theme-toggle"
+            title={`外观：${themeLabel(theme)}（点击切换）`}
+            aria-label={`外观：${themeLabel(theme)}，点击切换`}
+            onClick={() => void cycleTheme()}
+          >
+            <ThemeGlyph mode={theme} />
+            {themeShort(theme)}
+          </button>
           <button type="button" disabled={busy} onClick={() => void load(true)}>
             {busy ? '刷新中…' : '刷新'}
           </button>
         </div>
+        {/* 数据源单独占一行：它是这一页的主导航，挤在标题旁边只会把标题压成省略号 */}
+        <SourceSwitch value={source} disabled={busy} onChange={(kind) => void switchSource(kind)} />
       </header>
 
       <div className="app-body">
-        {/* 额度源拿不到 token 明细，整块换成额度视图；原来的卡片在这里只会是一片 0 和空态 */}
+        {/* 额度源拿不到 token 明细，整块换成额度视图；原来的通道在这里只会是一片 0 和空态 */}
         {quotaView ? (
           quota ? (
             <QuotaView quota={quota} now={now} />
           ) : (
-            <section className="card">
-              <div className="card-head">
-                <div className="card-title">额度水位</div>
-              </div>
+            <Channel name="额度">
               <div className="empty">还没有取到额度数据</div>
-            </section>
+            </Channel>
           )
         ) : (
           <>
-            {/* 今日 */}
-            <section className="card">
-              <div className="card-head">
-                <div className="card-title">今日</div>
-                <div className="card-note">{today?.calls ?? 0} 次调用</div>
-              </div>
-              <div className="headline">
-                <div className="headline-item">
-                  <div className="headline-value accent-token">
-                    {compact((today?.inputTokens ?? 0) + (today?.outputTokens ?? 0))}
-                    <span className="headline-unit">token</span>
+            {/* 今日 —— 正在记录的那个通道 */}
+            <Channel name="今日" live>
+              <div className="counter">
+                <div className="counter-main">
+                  <div className="headline-value">
+                    {compact(todayTokens)}
+                    <span className="unit">token</span>
                   </div>
-                  <div className="headline-label">
-                    输入 {compact(today?.inputTokens ?? 0)} · 输出 {compact(today?.outputTokens ?? 0)}
+                  <div className="counter-sub">
+                    输入 {compact(today?.inputTokens ?? 0)} · 输出 {compact(today?.outputTokens ?? 0)} ·{' '}
+                    {today?.calls ?? 0} 次
                   </div>
                 </div>
                 {withCredits ? (
-                  <div className="headline-item">
-                    <div className="headline-value accent-credit">
+                  <div className="counter-side">
+                    <div className="headline-value">
                       {formatCredits(today?.credits ?? 0)}
-                      <span className="headline-unit">积分</span>
+                      <span className="unit">积分</span>
                     </div>
-                    <div className="headline-label">
-                      今日比价 1 积分 ≈ {tokenPerCredit((today?.inputTokens ?? 0) + (today?.outputTokens ?? 0), today?.credits ?? 0)} token
-                    </div>
+                    <div className="counter-sub">1 积分 ≈ {tokenPerCredit(todayTokens, today?.credits ?? 0)} token</div>
                   </div>
                 ) : (
-                  <div className="headline-item">
-                    <div className="headline-value accent-cache">
-                      {percent(today?.cachedTokens ?? 0, today?.inputTokens ?? 0)}
-                      <span className="headline-unit">% 缓存命中</span>
+                  <div className="counter-side">
+                    <div className="headline-value">
+                      {percent(today?.cachedTokens ?? 0, today?.inputTokens ?? 0)}%
+                      <span className="unit">缓存命中</span>
                     </div>
-                    <div className="headline-label">
-                      命中 {compact(today?.cachedTokens ?? 0)} · 新增{' '}
-                      {compact(Math.max(0, (today?.inputTokens ?? 0) - (today?.cachedTokens ?? 0)))} token
+                    <div className="counter-sub">
+                      命中 {compact(today?.cachedTokens ?? 0)} · 新增 {compact(newTokens)}
                     </div>
                   </div>
                 )}
               </div>
-            </section>
+            </Channel>
 
-            {/* 上下文水位 */}
-            <section className="card">
-              <div className="card-head">
-                <div className="card-title">当前会话上下文</div>
-                <div className="card-note">
-                  {snapshot?.active ? relativeTime(snapshot.active.updatedAt, now) : '无活跃会话'}
-                </div>
-              </div>
+            {/* 上下文水位 —— 带红线区的仪表 */}
+            <Channel
+              name="上下文"
+              note={snapshot?.active ? relativeTime(snapshot.active.updatedAt, now) : '无活跃会话'}
+            >
               {snapshot?.active ? (
                 <>
-                  <div className="meter-head">
-                    <div className="session-title" title={snapshot.active.title}>
+                  <div className="gauge-head">
+                    <div className="gauge-title" title={snapshot.active.title}>
                       {snapshot.active.title}
                     </div>
-                    {sizeKnown ? (
-                      <div className="meter-value">{percent(snapshot.active.used, snapshot.active.size)}%</div>
-                    ) : (
-                      <div className="meter-value">
-                        {compact(snapshot.active.used)}
-                        <span className="meter-unit">token</span>
-                      </div>
-                    )}
-                  </div>
-                  {sizeKnown ? (
-                    <div className="meter">
-                      <div
-                        className={`meter-fill ${activeLevel}`}
-                        style={{ width: `${Math.min(100, activeRatio * 100)}%` }}
-                      />
+                    <div className="gauge-readout">
+                      {sizeKnown ? (
+                        <>
+                          {percent(snapshot.active.used, snapshot.active.size)}%
+                        </>
+                      ) : (
+                        <>
+                          {compact(snapshot.active.used)}
+                          <span className="unit">token</span>
+                        </>
+                      )}
                     </div>
-                  ) : null}
-                  <div className="meter-foot">
+                  </div>
+                  {sizeKnown ? <Gauge ratio={activeRatio} /> : null}
+                  <div className="gauge-foot">
                     <span>
                       {sizeKnown
                         ? `${grouped(snapshot.active.used)} / ${grouped(snapshot.active.size)} token`
                         : '模型上限未知，只报已用量'}
                     </span>
-                    <span>{snapshot.active.cwd || '—'}</span>
+                    <span title={snapshot.active.cwd || undefined}>{snapshot.active.cwd || '—'}</span>
                   </div>
                 </>
               ) : (
                 <div className="empty">没有正在进行的会话</div>
               )}
-            </section>
+            </Channel>
 
             {/* Token 结构 */}
-            <section className="card">
-              <div className="card-head">
-                <div className="card-title">Token 结构（累计）</div>
-                <div className="card-note">缓存命中占输入 {percent(totals?.cachedTokens ?? 0, totals?.inputTokens ?? 0)}%</div>
-              </div>
+            <Channel
+              name="结构"
+              note={`累计 ${compact((totals?.inputTokens ?? 0) + (totals?.outputTokens ?? 0))} token${
+                withCredits ? ` · ${formatCredits(totals?.credits ?? 0)} 积分` : ''
+              }`}
+            >
               <Bars rows={structureRows} />
-            </section>
+            </Channel>
 
             {/* 近 14 天 */}
-            <section className="card">
-              <div className="card-head">
-                <div className="card-title">近 14 天</div>
-                <div className="card-note">
-                  累计 {compact((totals?.inputTokens ?? 0) + (totals?.outputTokens ?? 0))} token
-                  {withCredits ? ` · ${formatCredits(totals?.credits ?? 0)} 积分` : ''}
-                </div>
-              </div>
-              {dayBars.length ? (
+            <Channel name="14 天" note={`缓存命中占输入 ${percent(totals?.cachedTokens ?? 0, totals?.inputTokens ?? 0)}%`}>
+              {dayBars.some((day) => day.value > 0) ? (
                 <div className="days">
                   {dayBars.map((day) => (
                     <div
@@ -778,87 +885,84 @@ export default function App(): JSX.Element {
                     >
                       <div
                         className={`day-bar${day.isToday ? ' today' : ''}`}
-                        style={{ height: `${Math.max(3, day.ratio * 100)}%` }}
+                        /*
+                         * 没有用量的日子画成 0 高度，让基线自己说话 ——
+                         * 给个最小高度会让「那天没干活」和「那天干得很少」长得一模一样。
+                         * 只有今天例外：它是个「你在这儿」的记号，不是一根数据柱，
+                         * 所以哪怕今天没用量也留一小截记录笔色。
+                         */
+                        style={{
+                          height: day.value > 0 ? `${Math.max(3, day.ratio * 100)}%` : day.isToday ? '3px' : '0px'
+                        }}
                       />
                       <div className="day-label">{day.label}</div>
                     </div>
                   ))}
                 </div>
               ) : (
-                <div className="empty">暂无数据</div>
+                <div className="empty">最近 14 天没有用量</div>
               )}
-            </section>
+            </Channel>
 
             {/* 活跃热力图 */}
-            <section className="card">
-              <div className="card-head">
-                <div className="card-title">活跃热力图</div>
-                <div className="card-note">近 26 周 · 按 token 深浅</div>
-              </div>
+            <Channel name="活跃">
               {(snapshot?.days.length ?? 0) > 0 ? (
                 <Heatmap days={snapshot?.days ?? []} withCredits={withCredits} />
               ) : (
                 <div className="empty">暂无数据</div>
               )}
-            </section>
+            </Channel>
 
             {/* 模型分布 */}
-            <section className="card">
-              <div className="card-head">
-                <div className="card-title">按模型</div>
-                <div className="card-note">
-                  {withCredits
-                    ? `1 积分 ≈ ${tokenPerCredit((totals?.inputTokens ?? 0) + (totals?.outputTokens ?? 0), totals?.credits ?? 0)} token`
-                    : `${snapshot?.models.length ?? 0} 个模型`}
-                </div>
-              </div>
+            <Channel
+              name="模型"
+              note={
+                withCredits
+                  ? `1 积分 ≈ ${tokenPerCredit((totals?.inputTokens ?? 0) + (totals?.outputTokens ?? 0), totals?.credits ?? 0)} token`
+                  : undefined
+              }
+            >
               {snapshot?.models.length ? (
                 <Bars
                   rows={snapshot.models.slice(0, 5).map((model) => ({
                     name: model.model,
                     value: model.inputTokens + model.outputTokens,
-                    color: '#534AB7',
+                    color: 'var(--d-rank)',
                     hint: withCredits ? `${Math.round(model.credits)}分` : `${model.calls} 次`
                   }))}
                 />
               ) : (
                 <div className="empty">暂无数据</div>
               )}
-            </section>
+            </Channel>
 
             {/* 项目分布 */}
-            <section className="card">
-              <div className="card-head">
-                <div className="card-title">按项目</div>
-                <div className="card-note">{snapshot?.projects.length ?? 0} 个</div>
-              </div>
+            <Channel name="项目">
               {snapshot?.projects.length ? (
                 <Bars
                   rows={snapshot.projects.slice(0, 5).map((project) => ({
                     name: projectLabel(project.projectDir, project.cwd),
                     value: project.inputTokens + project.outputTokens,
-                    color: '#1D9E75',
+                    color: 'var(--d-rank)',
                     hint: `${project.sessions}会话`
                   }))}
                 />
               ) : (
                 <div className="empty">暂无数据</div>
               )}
-            </section>
+            </Channel>
 
             {/* 会话排行 */}
-            <section className="card">
-              <div className="card-head">
-                <div className="card-title">会话排行</div>
-                <div className="card-note">
-                  {snapshot?.totals.sessions ?? 0} 个会话 ·{' '}
-                  {withCredits
-                    ? `${snapshot?.totals.dbTraces ?? 0} 个计费回合`
-                    : `${snapshot?.totals.calls ?? 0} 次调用`}
-                </div>
-              </div>
+            <Channel
+              name="会话"
+              note={`${snapshot?.totals.sessions ?? 0} 个 · ${
+                withCredits
+                  ? `${snapshot?.totals.dbTraces ?? 0} 个计费回合`
+                  : `${snapshot?.totals.calls ?? 0} 次调用`
+              }`}
+            >
               <div className="sessions">{sessionRows ?? <div className="empty">暂无会话</div>}</div>
-            </section>
+            </Channel>
           </>
         )}
 

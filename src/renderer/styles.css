@@ -1,3 +1,119 @@
+/*
+ * Token 计量器 —— 记录仪
+ *
+ * 这套界面的原型是**多通道记录仪**：整块面板是一张记录纸，每张卡是纸上的一个
+ * 通道 —— 左边一条窄栏写通道名，一条竖细线（脊）从上贯到下，数据占右边一栏。
+ * 没有卡片、没有阴影、没有统一的圆角；结构靠格线和分区表达，和它模仿的材料一样。
+ *
+ * 三件刻意的事：
+ * 1) **只有「被测量的东西」才有颜色**。外壳一律是纸 + 墨 + 细线，
+ *    颜色只出现在数据上，而且 --pen（记录笔红）只表示一个意思：现在。
+ * 2) **上下文水位是一把带红线区的仪表**。70% / 90% 两条分界是印在刻度上的
+ *    结构（永远看得见），指针的颜色随它落在哪个区变化 —— 真实仪表的读法。
+ * 3) **纸上没有背景网格**。格线只在热力图里出现，因为那里它本身就是数据。
+ *    铺满整页的网格会和热力图打架，纯粹是噪声。
+ */
+:root {
+  color-scheme: light;
+
+  /* 记录纸：冷调浅灰绿。刻意避开「米色 + 衬线 + 陶土红」那套默认组合 */
+  --paper: #edf0ec;
+  --sheet: #f6f8f5;
+  --sheet-2: #e7ebe6;
+  --track: #dde3dd;
+
+  --ink: #16211e;
+  --ink-2: #5a6a64;
+  --ink-3: #8d9c96;
+  --rule: #c7d1ca;
+  --rule-soft: #dae0da;
+
+  /* 记录笔：只表示「现在」—— 今日的数字、今天那根柱子、当前数据源、活跃通道 */
+  --pen: #c4442a;
+  --pen-wash: rgba(196, 68, 42, 0.1);
+
+  /* 仪表分区：印在刻度上的结构，不是状态 */
+  --warn: #b8801a;
+  --warn-zone: rgba(184, 128, 26, 0.16);
+  --alarm: #a8271b;
+  --alarm-zone: rgba(168, 39, 27, 0.16);
+
+  /* 数据色：只用在「构成」上（输入 / 缓存 / 输出 / 思考） */
+  --d-in: #2c5c7a;
+  --d-cache: #a6c2d2;
+  --d-out: #1d6b4f;
+  --d-think: #9a7420;
+  --d-rank: #6d8798;
+  --d-day: #9ab8cb;
+  --heat-1: #d5e3ec;
+  --heat-2: #a8c6da;
+  --heat-3: #6b9cba;
+  --heat-4: #2f6b91;
+
+  --notice-bg: #fbf3e0;
+  --notice-line: #e8d8b0;
+  --notice-ink: #6f5a25;
+  --fatal-bg: #fbe9e6;
+  --fatal-line: #eec6bf;
+  --fatal-ink: #8c3226;
+
+  --focus: #2c5c7a;
+  --menu-shadow: 0 10px 26px rgba(22, 33, 30, 0.18);
+
+  --gutter: 84px;
+  --font-ui: Bahnschrift, 'DIN Alternate', 'Segoe UI Variable Text', 'Segoe UI',
+    'Microsoft YaHei UI', 'Microsoft YaHei', sans-serif;
+  --font-num: Consolas, 'Cascadia Mono', ui-monospace, monospace;
+}
+
+/*
+ * 深色 = 暗房里的同一台仪器：机壳是深青灰（不是 #0B0B0B），
+ * 纸面比机壳略亮，记录笔提亮到在深底上仍然抓眼。
+ */
+:root[data-theme='dark'] {
+  color-scheme: dark;
+
+  --paper: #0e1618;
+  --sheet: #131e21;
+  --sheet-2: #0a1113;
+  --track: #223033;
+
+  --ink: #e3ece8;
+  --ink-2: #93a5a0;
+  --ink-3: #667872;
+  --rule: #2b3b3e;
+  --rule-soft: #1f2c2f;
+
+  --pen: #ff6b4a;
+  --pen-wash: rgba(255, 107, 74, 0.14);
+
+  --warn: #e0a83c;
+  --warn-zone: rgba(224, 168, 60, 0.16);
+  --alarm: #e5484d;
+  --alarm-zone: rgba(229, 72, 77, 0.18);
+
+  --d-in: #5b9bc4;
+  --d-cache: #33566b;
+  --d-out: #4faa83;
+  --d-think: #d8a94a;
+  --d-rank: #7d9aab;
+  --d-day: #3d6a86;
+  --heat-1: #1d2f38;
+  --heat-2: #2b4c5e;
+  --heat-3: #3f7896;
+  --heat-4: #6fb2d4;
+
+  --notice-bg: #2a2415;
+  --notice-line: #4a3f22;
+  --notice-ink: #e0c88a;
+  --fatal-bg: #2c1715;
+  --fatal-line: #552a24;
+  --fatal-ink: #f0a79c;
+
+  --focus: #5b9bc4;
+  --menu-shadow: 0 10px 26px rgba(0, 0, 0, 0.5);
+}
+
 * {
   box-sizing: border-box;
 }
@@ -10,12 +126,55 @@ body,
 
 body {
   margin: 0;
-  font-family: system-ui, 'Microsoft YaHei UI', 'Segoe UI', sans-serif;
-  font-size: 13px;
-  line-height: 1.5;
-  color: #1c2b3a;
-  background: #f4f6f9;
+  font-family: var(--font-ui);
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--ink);
+  background: var(--paper);
   -webkit-font-smoothing: antialiased;
+}
+
+/* 小号数字一律等宽：这一页到处都是要对齐的列，比例数字会让它们跳来跳去 */
+.num,
+.bar-value,
+.day-label,
+.heat-foot,
+.gauge-foot,
+.session-numbers,
+.quota-percent,
+.quota-reset,
+.trend-axis,
+.app-subtitle {
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
+}
+
+/*
+ * 大号读数走界面字体，**不用等宽**：Consolas 的 0 带一道斜杠，
+ * 放到 38px 就是一个刺眼的「Ø」—— 那是个代码字体，不是仪表读数。
+ * 这里本来也只有单个数字要对齐，等宽没有意义。
+ */
+.headline-value,
+.gauge-readout {
+  font-family: var(--font-ui);
+  font-variant-numeric: tabular-nums lining-nums;
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+
+/* 静态兜底文案：React 挂载前那一瞬间显示的东西 */
+.boot {
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--ink-2);
+  padding: 16px;
+}
+
+.boot span {
+  color: var(--ink-3);
 }
 
 .app {
@@ -24,88 +183,84 @@ body {
   height: 100%;
 }
 
-/* ------------------------------------------------------------ 顶栏 */
+/* ------------------------------------------------------------ 机头 */
 
+/*
+ * 机头分两行：第一行是身份（标题 + 更新时间）和两个动作（外观、刷新），
+ * 第二行整行给数据源。
+ *
+ * 挤成一行时，「DeepSeek Harness」这种长名字会把标题压成「Token ...」——
+ * 标题是这个工具的名字，不该为了省一行而变成省略号；
+ * 而数据源本来就是这一页的主导航，独占一行反而更清楚。
+ */
 .app-header {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas:
+    'main actions'
+    'sources sources';
   align-items: center;
-  justify-content: space-between;
-  /*
-   * 允许折行：按钮收成「3 个 + 更多」之后，窄窗下仍可能顶到标题 ——
-   * 一行放不下时整块掉到第二行，而不是把标题挤成 0 宽，
-   * 标题一旦溢出就会画在按钮上面。
-   */
-  flex-wrap: wrap;
-  gap: 8px 10px;
-  padding: 12px 14px;
-  background: #fff;
-  border-bottom: 1px solid #e3e8ef;
+  gap: 9px 10px;
+  padding: 11px 14px;
+  /* 机头比纸面深一档，像仪器的顶轨 */
+  background: var(--sheet-2);
+  border-bottom: 1px solid var(--rule);
   flex: none;
 }
 
-.app-title {
-  font-size: 14px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-}
-
 /*
- * 五个数据源的按钮 + 刷新已经占了半行，左侧这块必须能收缩：
- * 不给 min-width: 0，flex 子项不会小于内容宽度，窗口收到最小尺寸时
+ * 七个数据源的名字加起来很宽，左侧这块必须能收缩：
+ * 不给 min-width: 0，flex/grid 子项不会小于内容宽度，窗口收到最小尺寸时
  * 顶栏就会被撑破。副标题同理，超长就省略号。
- *
- * flex-basis 归零：折行判断用的是 flex-basis，不是收缩后的实际宽度。
- * 留着 auto 的话，标题块按「副标题满宽」参与折行计算，560px 的默认窗宽
- * 就会白白折成两行。
  */
 .app-header-main {
-  flex: 1 1 0;
+  grid-area: main;
   min-width: 0;
   overflow: hidden;
 }
 
 .app-title {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .app-subtitle {
-  font-size: 12px;
-  color: #7b8fa5;
-  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  color: var(--ink-3);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .header-actions {
+  grid-area: actions;
   display: flex;
   align-items: center;
   gap: 8px;
-  flex: none;
-  /* 折到第二行时也靠右，位置和单行时一致 */
-  margin-left: auto;
 }
 
 button {
   font: inherit;
   font-size: 12px;
   padding: 5px 11px;
-  border-radius: 7px;
-  border: 1px solid #d3dce6;
-  background: #fff;
-  color: #2b4257;
+  /* 控件 2px、刻度槽 1px、纸面 0 —— 圆角按「这是什么」分档，不是一律 8px */
+  border-radius: 2px;
+  border: 1px solid var(--rule);
+  background: var(--sheet);
+  color: var(--ink);
   cursor: pointer;
 }
 
-button:hover {
-  border-color: #9fb3c8;
-  background: #f7fafd;
+button:hover:not(:disabled) {
+  border-color: var(--ink-3);
 }
 
-button:active {
-  background: #eef4fa;
+button:active:not(:disabled) {
+  background: var(--paper);
 }
 
 button:disabled {
@@ -113,35 +268,54 @@ button:disabled {
   cursor: default;
 }
 
-/* 数据源切换：两个选项，选中态一眼可辨 */
+/* 外观循环按钮：图标 + 当前档位的短名，比三个并排的分段控件省地方 */
+.theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 8px;
+}
+
+.theme-toggle svg {
+  display: block;
+  width: 13px;
+  height: 13px;
+}
+
+/* ------------------------------------------------ 数据源切换 */
+
 .source-switch {
+  grid-area: sources;
   position: relative;
   display: flex;
+  /* 窄窗下按钮多到放不下时整块折行，而不是把机头顶破 */
+  flex-wrap: wrap;
   gap: 2px;
   padding: 2px;
-  border-radius: 8px;
-  background: #eef2f7;
+  border-radius: 2px;
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  justify-self: start;
 }
 
 .source-switch button {
   font-size: 11.5px;
   padding: 3px 9px;
   border: none;
-  border-radius: 6px;
+  border-radius: 1px;
   background: transparent;
-  color: #5c7189;
+  color: var(--ink-2);
 }
 
 .source-switch button:hover:not(:disabled) {
-  border-color: transparent;
-  background: #e3ebf4;
+  background: var(--sheet);
 }
 
+/* 当前数据源 = 「现在在看的那本账」，用记录笔色，和今日的数字同一套语义 */
 .source-switch button.active {
-  background: #fff;
-  color: #185fa5;
+  background: var(--pen-wash);
+  color: var(--pen);
   font-weight: 600;
-  box-shadow: 0 1px 2px rgba(24, 95, 165, 0.16);
 }
 
 .source-switch .caret {
@@ -151,7 +325,7 @@ button:disabled {
   border-left: 3.5px solid transparent;
   border-right: 3.5px solid transparent;
   vertical-align: middle;
-  opacity: 0.65;
+  opacity: 0.7;
 }
 
 /* 展开时铺一层透明遮罩，点别处就收起 —— 比监听 document 少一处清理 */
@@ -170,209 +344,292 @@ button:disabled {
   flex-direction: column;
   min-width: 132px;
   padding: 4px;
-  border: 1px solid #e3e9f0;
-  border-radius: 8px;
-  background: #fff;
-  box-shadow: 0 10px 26px rgba(20, 45, 80, 0.16);
+  border: 1px solid var(--rule);
+  border-radius: 2px;
+  background: var(--sheet);
+  box-shadow: var(--menu-shadow);
 }
 
 .source-menu button {
   text-align: left;
   padding: 5px 9px;
-  border-radius: 6px;
-  color: #5c7189;
+  border-radius: 1px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--ink-2);
+}
+
+.source-menu button:hover:not(:disabled) {
+  background: var(--paper);
 }
 
 .source-menu button.active {
-  background: #eef4fb;
+  background: var(--pen-wash);
+  color: var(--pen);
   box-shadow: none;
 }
 
-/* ------------------------------------------------------------ 主体 */
+/* ------------------------------------------------------------ 纸面 */
 
 .app-body {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 12px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
 }
 
-.card {
-  background: #fff;
-  border: 1px solid #e3e8ef;
-  border-radius: 10px;
-  padding: 12px 14px;
-  flex: none;
+/*
+ * 一个通道。左边窄栏写通道名、右边放数据，中间那条竖线就是「脊」——
+ * 相邻通道的脊首尾相接，整页看起来是一台多通道仪器而不是一叠卡片。
+ */
+.ch {
+  display: grid;
+  grid-template-columns: var(--gutter) minmax(0, 1fr);
+  /* 不设 gap：脊要连续，通道之间只靠一条横线分隔 */
 }
 
-.card-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 10px;
+.ch + .ch {
+  border-top: 1px solid var(--rule-soft);
 }
 
-.card-title {
-  font-size: 12px;
-  font-weight: 600;
-  color: #4a6076;
-  letter-spacing: 0.03em;
-}
-
-.card-note {
+.ch-name {
+  /* stretch 让竖线撑满整条通道，短内容也不会把脊断开 */
+  align-self: stretch;
+  border-right: 1px solid var(--rule);
+  padding: 15px 10px 15px 16px;
   font-size: 11.5px;
-  color: #8b9db0;
-  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--ink-2);
 }
 
-/* 今日大数字 */
+/* 正在记录的那个通道：名字前面一枚记录笔色的小方块 */
+.ch.live .ch-name {
+  color: var(--ink);
+}
 
-.headline {
+.ch.live .ch-name::before {
+  content: '';
+  display: block;
+  width: 7px;
+  height: 7px;
+  margin-bottom: 6px;
+  background: var(--pen);
+}
+
+.ch-body {
+  min-width: 0;
+  padding: 15px 16px 15px 14px;
+}
+
+.ch-note {
+  font-size: 11px;
+  color: var(--ink-3);
+  margin-bottom: 9px;
+}
+
+/* 通道名右边那句话（更新于 / 多少次调用），和名字同一条基线 */
+.ch-note-inline {
+  font-size: 11px;
+  color: var(--ink-3);
+}
+
+/* ------------------------------------------------------- 今日读数 */
+
+.counter {
   display: flex;
   align-items: flex-end;
-  gap: 26px;
+  gap: 22px;
 }
 
-.headline-item {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
+.counter-main {
+  min-width: 0;
 }
 
+.counter-side {
+  margin-left: auto;
+  text-align: right;
+  min-width: 0;
+}
+
+/*
+ * 计数器本体。大、紧、等宽 —— 尺度就是它的强调方式，
+ * 不靠颜色（红只留给「现在」这个语义，见 .ch.live）。
+ */
 .headline-value {
-  font-size: 25px;
+  font-size: 38px;
   font-weight: 600;
-  line-height: 1.15;
-  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  letter-spacing: -0.02em;
+  color: var(--ink);
+  white-space: nowrap;
 }
 
-.headline-unit {
-  font-size: 13px;
+.headline-value .unit {
+  font-family: var(--font-ui);
+  font-size: 12px;
   font-weight: 500;
-  color: #7b8fa5;
-  margin-left: 3px;
+  letter-spacing: 0;
+  color: var(--ink-2);
+  /* 38px 的数字旁边，5px 的间隙会被吃掉，看起来像「0token」 */
+  margin-left: 8px;
 }
 
-.headline-label {
-  font-size: 11.5px;
-  color: #8b9db0;
+.counter-side .headline-value {
+  font-size: 21px;
 }
 
-.accent-token {
-  color: #185fa5;
+.counter-side .headline-value .unit {
+  font-size: 11px;
+  margin-left: 6px;
 }
 
-.accent-credit {
-  color: #a2641a;
-}
-
-/* Kimi Code 没有积分，今日卡的第二个大数字改用缓存命中率 */
-.accent-cache {
-  color: #1d7a5c;
-}
-
-/* 进度条 */
-
-.meter {
-  height: 8px;
-  border-radius: 4px;
-  background: #eef2f7;
+.counter-sub {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--ink-3);
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
   overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.meter-fill {
-  height: 100%;
-  border-radius: 4px;
-  transition: width 0.35s ease;
-}
+/* --------------------------------------------------------- 仪表 */
 
-.meter-fill.safe {
-  background: #378add;
-}
-
-.meter-fill.warn {
-  background: #d99b28;
-}
-
-.meter-fill.danger {
-  background: #d15b4a;
-}
-
-.meter-head {
+.gauge-head {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 6px;
+  gap: 10px;
+  margin-bottom: 8px;
 }
 
-.meter-value {
-  font-size: 15px;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-}
-
-.meter-unit {
-  font-size: 11px;
-  font-weight: 500;
-  color: #7b8fa5;
-  margin-left: 3px;
-}
-
-.meter-foot {
-  display: flex;
-  justify-content: space-between;
-  gap: 8px;
-  margin-top: 6px;
-  font-size: 11.5px;
-  color: #8b9db0;
-  font-variant-numeric: tabular-nums;
-}
-
-.session-title {
+.gauge-title {
+  min-width: 0;
   font-size: 12.5px;
-  color: #40566c;
+  color: var(--ink);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 300px;
 }
 
-/* 横向条形 */
+.gauge-readout {
+  flex: none;
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
+  font-size: 19px;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--ink);
+}
+
+.gauge-readout .unit {
+  font-family: var(--font-ui);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--ink-2);
+  margin-left: 3px;
+}
+
+/*
+ * 刻度槽。70% / 90% 两条硬分界是**印上去的**，永远看得见 ——
+ * 这样「红」表示的是「指针进红线区了」，而不是「我把整条进度条刷红了」。
+ */
+.gauge {
+  position: relative;
+  height: 11px;
+  border-radius: 1px;
+  background-color: var(--track);
+  background-image: linear-gradient(
+    90deg,
+    transparent 0 70%,
+    var(--warn-zone) 70% 90%,
+    var(--alarm-zone) 90% 100%
+  );
+  overflow: hidden;
+}
+
+/* 已占用的部分：一层淡淡的墨，不抢指针 */
+.gauge-fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  background: color-mix(in srgb, var(--ink) 22%, transparent);
+  transition: width 0.26s ease-out;
+}
+
+/* 指针：读数本身。落在哪个区就染哪个区的颜色 */
+.gauge-needle {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 2px;
+  background: var(--ink);
+  transition: left 0.26s ease-out, background-color 0.26s ease-out;
+}
+
+.gauge[data-level='warn'] .gauge-needle {
+  background: var(--warn);
+}
+
+.gauge[data-level='danger'] .gauge-needle {
+  background: var(--alarm);
+}
+
+.gauge-foot {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 7px;
+  font-size: 11px;
+  color: var(--ink-3);
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
+}
+
+.gauge-foot span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ------------------------------------------------------ 横向条形 */
 
 .bars {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 9px;
 }
 
 .bar-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: 104px minmax(40px, 1fr) auto;
   align-items: center;
   gap: 10px;
 }
 
 /* 模型名可能很长（deepseek-v4.1-flash），必须能省略而不是折行 */
 .bar-name {
-  flex: none;
-  width: 128px;
-  font-size: 12px;
-  color: #5c7189;
+  font-size: 11.5px;
+  color: var(--ink-2);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+/* 子项（缓存命中、思考）缩进一格，不靠「·」这类符号提示层级 */
+.bar-row.sub .bar-name {
+  padding-left: 11px;
+  color: var(--ink-3);
+}
+
 .bar-track {
-  flex: 1;
-  min-width: 48px;
-  height: 7px;
-  border-radius: 4px;
-  background: #eef2f7;
+  height: 8px;
+  border-radius: 1px;
+  background: var(--track);
   overflow: hidden;
 }
 
@@ -380,34 +637,34 @@ button:disabled {
   height: 100%;
   /* 输出/思考相对输入小三个数量级，没有最小宽度就是一条看不见的线 */
   min-width: 2px;
-  border-radius: 4px;
-  transition: width 0.35s ease;
+  transition: width 0.26s ease-out;
 }
 
 .bar-value {
-  flex: none;
-  min-width: 74px;
-  font-size: 12px;
+  font-size: 11.5px;
   text-align: right;
-  font-variant-numeric: tabular-nums;
-  color: #33485e;
+  color: var(--ink);
   white-space: nowrap;
 }
 
 .bar-value em {
+  font-family: var(--font-ui);
   font-style: normal;
-  color: #94a6b8;
-  margin-left: 4px;
-  font-size: 11.5px;
+  color: var(--ink-3);
+  margin-left: 5px;
+  font-size: 11px;
 }
 
-/* 日趋势 */
+/* --------------------------------------------------------- 日趋势 */
 
 .days {
   display: flex;
   align-items: flex-end;
-  gap: 5px;
-  height: 78px;
+  gap: 4px;
+  height: 74px;
+  /* 基线：柱子坐在纸上的一条实线上，比悬空的柱子稳 */
+  border-bottom: 1px solid var(--rule);
+  padding-bottom: 1px;
 }
 
 .day-col {
@@ -423,24 +680,24 @@ button:disabled {
 
 .day-bar {
   width: 100%;
-  border-radius: 3px 3px 0 0;
-  background: #7fb2e3;
-  min-height: 2px;
-  transition: height 0.35s ease;
+  border-radius: 1px 1px 0 0;
+  background: var(--d-day);
+  transition: height 0.26s ease-out;
 }
 
+/* 今天那根用记录笔色 —— 全页唯一的「现在」标记之一 */
 .day-bar.today {
-  background: #185fa5;
+  background: var(--pen);
 }
 
 .day-label {
-  font-size: 10px;
-  color: #9aabbb;
+  font-size: 9.5px;
+  color: var(--ink-3);
   white-space: nowrap;
   overflow: hidden;
 }
 
-/* 活跃热力图 */
+/* ------------------------------------------------------ 活跃热力图 */
 
 .heat-wrap {
   display: flex;
@@ -450,47 +707,53 @@ button:disabled {
 /* 星期轴：只标出一/三/五，和 7 行网格对齐 */
 .heat-axis {
   display: grid;
-  grid-template-rows: repeat(7, 12px);
+  grid-template-rows: repeat(7, 11px);
   gap: 2px;
   margin-right: 5px;
   font-size: 9px;
-  line-height: 12px;
-  color: #9aabbb;
+  line-height: 11px;
+  color: var(--ink-3);
 }
 
 .heatmap {
   display: grid;
   grid-auto-flow: column;
-  grid-template-rows: repeat(7, 12px);
-  grid-auto-columns: 12px;
+  grid-template-rows: repeat(7, 11px);
+  grid-auto-columns: 11px;
   gap: 2px;
   justify-content: start;
 }
 
+/* 热力图是这一页唯一铺网格的地方 —— 因为这里格子本身就是数据 */
 .heat-cell {
-  border-radius: 2px;
-  background: #eaeff5;
+  border-radius: 1px;
+  background: var(--track);
 }
 
 .heat-cell[data-level='1'] {
-  background: #cfe3f7;
+  background: var(--heat-1);
 }
 
 .heat-cell[data-level='2'] {
-  background: #9cc4ea;
+  background: var(--heat-2);
 }
 
 .heat-cell[data-level='3'] {
-  background: #5f9fd8;
+  background: var(--heat-3);
 }
 
 .heat-cell[data-level='4'] {
-  background: #2f7bc4;
+  background: var(--heat-4);
 }
 
 /* 未来日期留空，不要画成「零用量」 */
 .heat-cell.future {
   background: transparent;
+}
+
+/* 26 周里想找到「今天」很难，给它一圈记录笔色的边 */
+.heat-cell.today {
+  box-shadow: inset 0 0 0 1px var(--pen);
 }
 
 .heat-foot {
@@ -499,9 +762,8 @@ button:disabled {
   justify-content: space-between;
   gap: 8px;
   margin-top: 9px;
-  font-size: 11.5px;
-  color: #8b9db0;
-  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  color: var(--ink-3);
 }
 
 .heat-legend {
@@ -512,51 +774,54 @@ button:disabled {
 
 .heat-legend i {
   display: block;
-  width: 10px;
-  height: 10px;
-  border-radius: 2px;
-  background: #eaeff5;
+  width: 9px;
+  height: 9px;
+  border-radius: 1px;
+  background: var(--track);
 }
 
 .heat-legend i[data-level='1'] {
-  background: #cfe3f7;
+  background: var(--heat-1);
 }
 
 .heat-legend i[data-level='2'] {
-  background: #9cc4ea;
+  background: var(--heat-2);
 }
 
 .heat-legend i[data-level='3'] {
-  background: #5f9fd8;
+  background: var(--heat-3);
 }
 
 .heat-legend i[data-level='4'] {
-  background: #2f7bc4;
+  background: var(--heat-4);
 }
 
-/* 会话列表 */
+/* --------------------------------------------------------- 会话列表 */
 
 .sessions {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  max-height: 268px;
+  max-height: 264px;
   overflow-y: auto;
-  margin: -4px -4px -4px -4px;
-  padding: 4px;
+  margin: -6px -6px -6px -6px;
+  padding: 6px;
 }
 
 .session-row {
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 10px;
   padding: 7px 8px;
-  border-radius: 7px;
   align-items: center;
+  border-bottom: 1px solid var(--rule-soft);
+}
+
+.session-row:last-child {
+  border-bottom: none;
 }
 
 .session-row:hover {
-  background: #f5f8fb;
+  background: var(--sheet);
 }
 
 .session-main {
@@ -566,9 +831,17 @@ button:disabled {
   gap: 2px;
 }
 
+.session-title {
+  font-size: 12px;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .session-meta {
-  font-size: 11px;
-  color: #94a6b8;
+  font-size: 10.5px;
+  color: var(--ink-3);
   display: flex;
   gap: 7px;
   align-items: center;
@@ -580,66 +853,65 @@ button:disabled {
 
 .session-numbers {
   text-align: right;
-  font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
 .session-tokens {
   font-size: 12.5px;
-  color: #33485e;
-  font-weight: 500;
+  color: var(--ink);
+  font-weight: 600;
 }
 
 .session-credits {
-  font-size: 11px;
-  color: #a2641a;
+  font-size: 10.5px;
+  color: var(--warn);
 }
 
-/* 杂项 */
+/* ------------------------------------------------------------ 杂项 */
 
 .tag {
   display: inline-block;
-  font-size: 10.5px;
-  padding: 1px 6px;
-  border-radius: 5px;
-  background: #eef4fa;
-  color: #4a7ba7;
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 1px;
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  color: var(--ink-2);
   white-space: nowrap;
 }
 
 .notice {
-  font-size: 12px;
-  color: #7a6a3f;
-  background: #fdf7e8;
-  border: 1px solid #f0e2c0;
-  border-radius: 8px;
-  padding: 8px 11px;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--notice-ink);
+  background: var(--notice-bg);
+  border-top: 1px solid var(--notice-line);
+  border-bottom: 1px solid var(--notice-line);
+  padding: 9px 16px;
 }
 
 .empty {
   font-size: 12px;
-  color: #94a6b8;
-  padding: 12px 0;
+  color: var(--ink-3);
+  padding: 14px 0;
   text-align: center;
 }
 
 .fatal {
   margin: 16px;
   padding: 14px;
-  border-radius: 10px;
-  background: #fdeceb;
-  border: 1px solid #f3c9c5;
-  color: #8c3226;
-  font-size: 12.5px;
+  border-radius: 2px;
+  background: var(--fatal-bg);
+  border: 1px solid var(--fatal-line);
+  color: var(--fatal-ink);
+  font-size: 12px;
   line-height: 1.7;
 }
 
-.fatal code {
-  font-family: ui-monospace, Consolas, monospace;
-  font-size: 11.5px;
-  background: #f8dedb;
-  padding: 1px 4px;
-  border-radius: 4px;
+.fatal code,
+code {
+  font-family: var(--font-num);
+  font-size: 11px;
 }
 
 /* ------------------------------------------------ OpenCode Go 额度视图 */
@@ -647,60 +919,58 @@ button:disabled {
 .quota-rows {
   display: flex;
   flex-direction: column;
-  gap: 9px;
+  gap: 10px;
 }
 
 /*
- * 一行一个额度窗口：名字 / 进度条 / 百分比。
- * 重置文案另起一行挂在进度条下面（跨到百分比列，视觉上仍属同一条）。
+ * 一行一个额度窗口：名字 / 刻度槽 / 百分比。
+ * 重置文案另起一行挂在刻度槽下面（跨到百分比列，视觉上仍属同一条）。
  */
 .quota-row {
   display: grid;
-  grid-template-columns: 48px minmax(0, 1fr) auto;
+  grid-template-columns: 46px minmax(0, 1fr) auto;
   align-items: center;
   gap: 3px 10px;
 }
 
 .quota-label {
-  font-size: 12px;
-  color: #5c7189;
+  font-size: 11.5px;
+  color: var(--ink-2);
   white-space: nowrap;
 }
 
+/* 额度槽和上下文仪表同一套：分区印在刻度上，读数用指针 */
 .quota-track {
-  height: 8px;
-  border-radius: 4px;
-  background: #eef2f7;
+  position: relative;
+  height: 11px;
+  border-radius: 1px;
+  background-color: var(--track);
+  background-image: linear-gradient(
+    90deg,
+    transparent 0 70%,
+    var(--warn-zone) 70% 90%,
+    var(--alarm-zone) 90% 100%
+  );
   overflow: hidden;
 }
 
 .quota-fill {
-  height: 100%;
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
   /* 占用只有个位数时也要看得见那一条 */
   min-width: 2px;
-  border-radius: 4px;
-  transition: width 0.35s ease;
-}
-
-.quota-fill.ok {
-  background: #378add;
-}
-
-.quota-fill.warn {
-  background: #ba7517;
-}
-
-.quota-fill.danger {
-  background: #d15b4a;
+  background: color-mix(in srgb, var(--ink) 22%, transparent);
+  transition: width 0.26s ease-out;
 }
 
 .quota-percent {
-  min-width: 40px;
+  min-width: 38px;
   text-align: right;
-  font-size: 16px;
+  font-size: 15px;
   font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  color: #33485e;
+  color: var(--ink);
 }
 
 .quota-reset {
@@ -708,20 +978,19 @@ button:disabled {
   display: flex;
   justify-content: space-between;
   gap: 8px;
-  font-size: 11px;
-  color: #8b9db0;
-  font-variant-numeric: tabular-nums;
+  font-size: 10.5px;
+  color: var(--ink-3);
 }
 
 /* 逼近上限：数字和标记一起转红，扫一眼就能看见 */
 .quota-row.danger .quota-percent {
-  color: #d15b4a;
+  color: var(--alarm);
 }
 
 .quota-row.danger .quota-reset em {
   font-style: normal;
   font-weight: 600;
-  color: #d15b4a;
+  color: var(--alarm);
 }
 
 .quota-meta {
@@ -729,50 +998,47 @@ button:disabled {
   align-items: baseline;
   gap: 8px;
   padding: 2px 0;
-  font-size: 11.5px;
-  color: #5c7189;
+  font-size: 11px;
+  color: var(--ink-2);
 }
 
 .quota-meta > span:first-child {
   flex: none;
   width: 30px;
-  color: #8b9db0;
+  color: var(--ink-3);
 }
 
-/* 端点是 URL、凭证是长路径，窄窗口下要能折行而不是把卡片撑宽 */
+/* 端点是 URL、凭证是长路径，窄窗口下要能折行而不是把纸撑宽 */
 .quota-meta code {
   min-width: 0;
-  font-family: ui-monospace, Consolas, monospace;
-  font-size: 11px;
-  background: #f2f6fa;
-  border-radius: 4px;
+  background: var(--paper);
+  border: 1px solid var(--rule-soft);
+  border-radius: 1px;
   padding: 1px 5px;
   overflow-wrap: anywhere;
 }
 
 .quota-note {
   margin-top: 7px;
-  font-size: 11px;
-  color: #94a6b8;
+  font-size: 10.5px;
+  color: var(--ink-3);
 }
 
-/* 取数失败的黄条，配色与 .notice 一致，只是要嵌在卡片里 */
+/* 取数失败/取不到的提示条，配色与 .notice 一致，只是要嵌在通道里 */
 .quota-notice {
   margin-top: 8px;
-  padding: 7px 10px;
-  border-radius: 8px;
-  border: 1px solid #f0e2c0;
-  background: #fdf7e8;
-  color: #7a6a3f;
-  font-size: 11.5px;
+  padding: 8px 10px;
+  border-radius: 2px;
+  border: 1px solid var(--notice-line);
+  background: var(--notice-bg);
+  color: var(--notice-ink);
+  font-size: 11px;
   line-height: 1.65;
 }
 
 .quota-notice code {
-  font-family: ui-monospace, Consolas, monospace;
-  font-size: 11px;
-  background: #f6edd8;
-  border-radius: 4px;
+  background: var(--paper);
+  border-radius: 1px;
   padding: 1px 4px;
 }
 
@@ -781,7 +1047,7 @@ button:disabled {
   display: flex;
   align-items: stretch;
   gap: 6px;
-  height: 116px;
+  height: 112px;
 }
 
 .trend-plot {
@@ -795,10 +1061,9 @@ button:disabled {
   position: relative;
   flex: none;
   width: 20px;
-  font-size: 10px;
+  font-size: 9.5px;
   line-height: 1;
-  color: #9aabbb;
-  font-variant-numeric: tabular-nums;
+  color: var(--ink-3);
 }
 
 /* 刻度中心对齐网格线：top 按百分比，再上移半个字高 */
@@ -813,8 +1078,8 @@ button:disabled {
   align-items: center;
   gap: 14px;
   margin-top: 10px;
-  font-size: 11.5px;
-  color: #8b9db0;
+  font-size: 11px;
+  color: var(--ink-2);
 }
 
 .trend-legend span {
@@ -826,11 +1091,51 @@ button:disabled {
 .trend-legend i {
   display: block;
   width: 14px;
-  border-radius: 2px;
+  border-radius: 1px;
 }
 
 .trend-note {
   margin-top: 7px;
-  font-size: 11px;
-  color: #94a6b8;
+  font-size: 10.5px;
+  color: var(--ink-3);
+}
+
+/* ------------------------------------------------------------ 窄窗 */
+
+@media (max-width: 500px) {
+  :root {
+    --gutter: 68px;
+  }
+
+  .ch-name {
+    font-size: 11px;
+    padding: 13px 8px 13px 12px;
+  }
+
+  .ch-body {
+    padding: 13px 12px 13px 11px;
+  }
+
+  .headline-value {
+    font-size: 32px;
+  }
+
+  .counter {
+    gap: 14px;
+  }
+}
+
+/* ------------------------------------------------------ 动效克制 */
+
+/*
+ * 只有一个编排过的动作：读数到位时指针和柱子滑过去。
+ * 没有逐卡片的淡入上浮 —— 那是模板味最重的一种动效。
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.001ms !important;
+    animation-duration: 0.001ms !important;
+  }
 }

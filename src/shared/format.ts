@@ -1,6 +1,6 @@
 /** 数字与时间格式化 —— 主进程、渲染层、测试脚本共用 */
 
-import type { SourceKind } from './types'
+import type { SourceKind, ThemeMode } from './types'
 
 /** 12345678 -> 12.3M；1234 -> 1.23K */
 export function compact(value: number): string {
@@ -38,8 +38,8 @@ export function credits(value: number): string {
 
 /**
  * 该数据源是否按积分计量。
- * 只有 WorkBuddy 有积分这一层，Kimi Code / ZCode / MiMo / OpenCode Go 都没有 ——
- * 所有积分相关的数字、比价、提示都要整块收起来，显示成 0 分比不显示更糟。
+ * 只有 WorkBuddy 有积分这一层，其余六个源都没有 —— 所有积分相关的数字、比价、
+ * 提示都要整块收起来，显示成 0 分比不显示更糟。
  */
 export function hasCredits(kind: SourceKind): boolean {
   return kind === 'workbuddy'
@@ -47,8 +47,9 @@ export function hasCredits(kind: SourceKind): boolean {
 
 /**
  * 该数据源是否单列思考 token。
- * WorkBuddy、ZCode 与 MiMo 都单列；Kimi Code 的 output 里已含思考，没有这一项，
- * 留着只会永远是一根 0 长度的空条。
+ * WorkBuddy、ZCode 与 MiMo 单列；Kimi Code 的 output 里已含思考，
+ * Reasonix 与 DeepSeek Harness 也一样（前者引擎不单记，后者 pi-ai 把 reasoning
+ * 折进了 output），都没有这一项，留着只会永远是一根 0 长度的空条。
  */
 export function hasReasoning(kind: SourceKind): boolean {
   return kind === 'workbuddy' || kind === 'zcode' || kind === 'mimo'
@@ -63,16 +64,49 @@ export function hasQuota(kind: SourceKind): boolean {
   return kind === 'opencode'
 }
 
-/** 数据源在界面上的顺序 —— 面板分段按钮与托盘菜单共用同一份，免得两边点错位 */
-export const SOURCE_ORDER: SourceKind[] = ['workbuddy', 'kimi', 'zcode', 'mimo', 'opencode']
+/**
+ * 数据源在界面上的顺序 —— 面板分段按钮与托盘菜单共用同一份，免得两边点错位。
+ * 按「账本性质」排：先是带积分的，接着是一整排只有 token 的，
+ * 最后是唯一联网查额度的那个。
+ */
+export const SOURCE_ORDER: SourceKind[] = [
+  'workbuddy',
+  'kimi',
+  'zcode',
+  'mimo',
+  'reasonix',
+  'dsh',
+  'opencode'
+]
 
 /** 数据源显示名 */
 export function sourceLabel(kind: SourceKind): string {
   if (kind === 'workbuddy') return 'WorkBuddy'
   if (kind === 'zcode') return 'ZCode'
   if (kind === 'mimo') return 'MiMo'
+  if (kind === 'reasonix') return 'Reasonix'
+  if (kind === 'dsh') return 'DeepSeek Harness'
   if (kind === 'opencode') return 'OpenCode Go'
   return 'Kimi Code'
+}
+
+/* ------------------------------------------------------------ 外观 */
+
+/** 外观档位顺序 —— 面板上的循环按钮与托盘菜单共用 */
+export const THEME_ORDER: ThemeMode[] = ['system', 'light', 'dark']
+
+/** 托盘菜单里用全名 */
+export function themeLabel(mode: ThemeMode): string {
+  if (mode === 'light') return '浅色'
+  if (mode === 'dark') return '深色'
+  return '跟随系统'
+}
+
+/** 面板顶栏只放得下两个字 */
+export function themeShort(mode: ThemeMode): string {
+  if (mode === 'light') return '浅色'
+  if (mode === 'dark') return '深色'
+  return '系统'
 }
 
 /**

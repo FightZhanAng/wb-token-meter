@@ -8,15 +8,22 @@
  *   3. traceId 与积分明细的对齐率
  *   4. OpenCode Go 的额度接口：除「真实数据」一段外全部打在本地 mock 服务上
  */
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { homedir, tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+import { zstdCompressSync } from 'node:zlib'
 import { OpencodeUsage } from '../src/main/opencode-usage'
 import type { OpencodeUsageOptions } from '../src/main/opencode-usage'
 import { collectSnapshot, localDate, parseUsageLine } from '../src/shared/collector'
+import {
+  collectDshSnapshot,
+  decodeZstdFrames,
+  parseDshLog,
+  sessionLogVersion
+} from '../src/shared/dsh-collector'
 import {
   collectKimiSnapshot,
   parseKimiContextLine,
@@ -37,9 +44,14 @@ import {
   recentSamples,
   windowOf
 } from '../src/shared/opencode-quota'
+import {
+  collectReasonixSnapshot,
+  parseReasonixMeta,
+  parseReasonixUsageLine
+} from '../src/shared/reasonix-collector'
 import { collectZcodeSnapshot } from '../src/shared/zcode-collector'
 import { collectMimoSnapshot } from '../src/shared/mimo-collector'
-import { compact, grouped, percent, sourceLabel, SOURCE_ORDER, tokenPerCredit } from '../src/shared/format'
+import { compact, grouped, percent, sourceLabel, SOURCE_ORDER, THEME_ORDER, themeLabel, themeShort, tokenPerCredit } from '../src/shared/format'
 import type { CallRecord, Snapshot, UsageSample } from '../src/shared/types'
 
 let passed = 0
@@ -247,6 +259,100 @@ check('compact 999', compact(999) === '999', compact(999))
 check('grouped 千分位', grouped(1_234_567) === '1,234,567', grouped(1_234_567))
 check('percent 一位小数', percent(1, 3) === 33.3, String(percent(1, 3)))
 check('tokenPerCredit 无积分返回破折号', tokenPerCredit(100, 0) === '—')
+
+/* ---------------------------------------------------------- 4b. 外观 */
+
+section('外观主题')
+
+check('三档顺序固定', THEME_ORDER.join('/') === 'system/light/dark', THEME_ORDER.join('/'))
+check(
+  '档位名各有全名与短名',
+  themeLabel('system') === '跟随系统' &&
+    themeShort('system') === '系统' &&
+    themeLabel('light') === themeShort('light') &&
+    themeLabel('dark') === themeShort('dark'),
+  `${themeLabel('system')}/${themeShort('system')}`
+)
+
+/**
+ * 两套主题的令牌必须对得上。
+ *
+ * 深色块漏掉一个变量是这套设计最容易犯、又最难一眼看出来的错：CSS 变量会从
+ * :root 继承下去，漏掉的那个不会报错，只会在深色下继续用浅色的值 ——
+ * 表现为「某一块在深色里特别刺眼」，但没人知道该去改哪一行。
+ *
+ * 两条不变量：
+ *   1) 深色块只做**覆盖**，不能凭空发明令牌 —— 否则浅色下那个变量是空的；
+ *   2) 文件里 var(--x) 用到的每个令牌，浅色块都得定义 —— 它是兜底的那一份。
+ * 主题无关的令牌（--gutter、--font-ui 之类）只写在 :root 里，这是对的，
+ * 所以不要求深色块把它们抄一遍。
+ */
+function cssTokenBlock(css: string, selector: string): { tokens: Set<string>; values: Map<string, string> } {
+  const tokens = new Set<string>()
+  const values = new Map<string, string>()
+  const start = css.indexOf(selector)
+  if (start < 0) return { tokens, values }
+  const open = css.indexOf('{', start)
+  const close = css.indexOf('}', open)
+  const block = css.slice(open + 1, close)
+  for (const match of block.matchAll(/(--[a-z0-9-]+)\s*:\s*([^;]+);/g)) {
+    tokens.add(match[1])
+    values.set(match[1], match[2].trim())
+  }
+  return { tokens, values }
+}
+
+const rendererDir = join(process.cwd(), 'src', 'renderer')
+
+for (const [label, file, minOverrides] of [
+  ['面板', 'styles.css', 20],
+  ['胶囊', 'float.css', 10]
+] as const) {
+  const css = readFileSync(join(rendererDir, file), 'utf8')
+  const light = cssTokenBlock(css, ':root {')
+  const dark = cssTokenBlock(css, ":root[data-theme='dark'] {")
+
+  check(`${label}：浅色块定义了令牌`, light.tokens.size >= minOverrides, `${light.tokens.size} 个`)
+  check(
+    `${label}：深色块确实换掉了整套配色`,
+    dark.tokens.size >= minOverrides,
+    `${dark.tokens.size} 个覆盖`
+  )
+  check(
+    `${label}：深色块只覆盖、不发明令牌`,
+    [...dark.tokens].every((name) => light.tokens.has(name)),
+    [...dark.tokens].filter((name) => !light.tokens.has(name)).join(', ') || '无'
+  )
+  check(
+    `${label}：var() 用到的令牌浅色块都定义了`,
+    [...css.matchAll(/var\((--[a-z0-9-]+)/g)].every((match) => light.tokens.has(match[1])),
+    [...new Set([...css.matchAll(/var\((--[a-z0-9-]+)/g)].map((m) => m[1]))]
+      .filter((name) => !light.tokens.has(name))
+      .join(', ') || '无'
+  )
+  check(
+    `${label}：两套主题的纸面与墨色确实不同`,
+    light.values.get('--paper') !== dark.values.get('--paper') && light.values.get('--ink') !== dark.values.get('--ink'),
+    `${light.values.get('--paper')} / ${dark.values.get('--paper')}`
+  )
+
+  if (file === 'styles.css') {
+    /*
+     * 窗口底色是创建参数，只能由主进程给（见 main/index.ts 的 windowBackground）。
+     * 它和 --paper 对不上的表现是「窗口冒出来时先闪一下另一种颜色」，
+     * 所以这两个值必须逐字节相等。
+     */
+    const mainSource = readFileSync(join(process.cwd(), 'src', 'main', 'index.ts'), 'utf8')
+    for (const mode of ['light', 'dark'] as const) {
+      const paper = mode === 'light' ? light.values.get('--paper') : dark.values.get('--paper')
+      check(
+        `窗口底色（${mode}）与 --paper 一致`,
+        Boolean(paper) && mainSource.toUpperCase().includes(paper!.toUpperCase()),
+        String(paper)
+      )
+    }
+  }
+}
 
 /* ---------------------------------------------- 5. Kimi Code 数据源 */
 
@@ -739,6 +845,546 @@ check(
   collectMimoSnapshot({ mimoDir: join(homedir(), '.mimo-nonexistent'), cacheDir: mimoCachePath }).sessions.length === 0
 )
 check('路径为空不崩', collectMimoSnapshot({ mimoDir: '', cacheDir: '' }).sessions.length === 0)
+
+/* ------------------------------------------------- 9. Reasonix 数据源 */
+
+section('Reasonix 单行解析')
+
+check(
+  '正常行四个 token 字段各就各位',
+  (() => {
+    const row = parseReasonixUsageLine(
+      JSON.stringify({
+        ts: FIXED_NOW,
+        session: 'code-Agent',
+        model: 'deepseek-v4-flash',
+        promptTokens: 12910,
+        completionTokens: 730,
+        cacheHitTokens: 0,
+        cacheMissTokens: 12910,
+        costUsd: 0.002,
+        claudeEquivUsd: 0.05
+      })
+    )
+    return (
+      row?.sessionId === 'code-Agent' &&
+      row?.model === 'deepseek-v4-flash' &&
+      row?.inputTokens === 12910 &&
+      row?.outputTokens === 730 &&
+      row?.cachedTokens === 0 &&
+      row?.timestamp === FIXED_NOW
+    )
+  })()
+)
+check('坏 JSON 返回 null', parseReasonixUsageLine('{ 不是 json') === null)
+check('缺 ts 的行丢掉', parseReasonixUsageLine(JSON.stringify({ session: 's', promptTokens: 10 })) === null)
+check(
+  '零 token 的行丢掉',
+  parseReasonixUsageLine(
+    JSON.stringify({ ts: FIXED_NOW, session: 's', promptTokens: 0, completionTokens: 0 })
+  ) === null
+)
+check('空行返回 null', parseReasonixUsageLine('') === null)
+check(
+  'meta 只取标题 / 工作目录 / 水位，多行标题压成一行',
+  (() => {
+    const meta = parseReasonixMeta(
+      JSON.stringify({ summary: '第一行\n第二行', workspace: 'D:\\Agent', lastPromptTokens: 174186, turnCount: 786 })
+    )
+    return meta?.title === '第一行 第二行' && meta?.workspace === 'D:\\Agent' && meta?.lastPromptTokens === 174186
+  })()
+)
+check('meta 坏 JSON 返回 null', parseReasonixMeta('nope') === null)
+
+section('Reasonix 目录扫描（临时夹具）')
+
+const reasonixRoot = mkdtempSync(join(tmpdir(), 'wbtm-reasonix-'))
+mkdirSync(join(reasonixRoot, 'sessions'), { recursive: true })
+
+const reasonixLine = (row: Record<string, unknown>): string => JSON.stringify(row)
+writeFileSync(
+  join(reasonixRoot, 'usage.jsonl'),
+  [
+    reasonixLine({
+      ts: FIXED_NOW - 3000,
+      session: 'code-Agent',
+      model: 'deepseek-v4-flash',
+      promptTokens: 1000,
+      completionTokens: 100,
+      cacheHitTokens: 800,
+      cacheMissTokens: 200
+    }),
+    reasonixLine({
+      ts: FIXED_NOW - 1000,
+      session: 'code-Agent',
+      model: 'deepseek-v4-flash',
+      promptTokens: 2000,
+      completionTokens: 50,
+      cacheHitTokens: 1800,
+      cacheMissTokens: 200
+    }),
+    /* 子代理的调用也走同一本流水账，只是多带一个 kind —— 算真实消耗 */
+    reasonixLine({
+      ts: FIXED_NOW - 2000,
+      session: 'code-Agent',
+      model: 'deepseek-v4-flash',
+      promptTokens: 300,
+      completionTokens: 30,
+      cacheHitTokens: 0,
+      cacheMissTokens: 300,
+      kind: 'subagent',
+      subagent: { skillName: 'explore', toolIters: 12 }
+    }),
+    '{ 半行（追加写被强杀时会留下）',
+    reasonixLine({ ts: FIXED_NOW - 500, session: 'code-Agent', model: 'x', promptTokens: 0, completionTokens: 0 }),
+    reasonixLine({ session: 'code-Agent', model: 'x', promptTokens: 42, completionTokens: 1 }),
+    reasonixLine({
+      ts: FIXED_NOW - 1500,
+      session: 'desktop-202605240306-1',
+      model: 'other-model',
+      promptTokens: 500,
+      completionTokens: 20,
+      cacheHitTokens: 100,
+      cacheMissTokens: 400
+    }),
+    ''
+  ].join('\n'),
+  'utf8'
+)
+writeFileSync(
+  join(reasonixRoot, 'sessions', 'code-Agent.meta.json'),
+  JSON.stringify({ summary: '夹具会话', workspace: 'D:\\proj\\a', lastPromptTokens: 2000, turnCount: 3 }),
+  'utf8'
+)
+/* 刻意留一个没有 meta 的会话：标题留空、项目退回会话名，不能崩 */
+writeFileSync(join(reasonixRoot, 'sessions', 'broken.meta.json'), '{ 坏 meta', 'utf8')
+
+const reasonixLedgerPath = join(reasonixRoot, 'usage.jsonl')
+const reasonixFixture = collectReasonixSnapshot({ reasonixDir: reasonixRoot, now: FIXED_NOW })
+
+check('kind 标记为 reasonix', reasonixFixture.kind === 'reasonix')
+check('扫到 2 个会话', reasonixFixture.totals.sessions === 2, String(reasonixFixture.totals.sessions))
+check('半行 / 零 token / 缺 ts 的行被丢掉', reasonixFixture.totals.calls === 4, String(reasonixFixture.totals.calls))
+check(
+  '输入 = promptTokens（含缓存读）',
+  reasonixFixture.totals.inputTokens === 1000 + 2000 + 300 + 500,
+  String(reasonixFixture.totals.inputTokens)
+)
+check('缓存命中只算 cacheHitTokens', reasonixFixture.totals.cachedTokens === 2700, String(reasonixFixture.totals.cachedTokens))
+check('输出求和', reasonixFixture.totals.outputTokens === 200, String(reasonixFixture.totals.outputTokens))
+check('思考 token 恒为 0（引擎不单记）', reasonixFixture.totals.reasoningTokens === 0)
+check(
+  '所有粒度的积分都是 0',
+  reasonixFixture.totals.credits === 0 &&
+    reasonixFixture.sessions.every((s) => s.credits === 0) &&
+    reasonixFixture.days.every((d) => d.credits === 0) &&
+    reasonixFixture.models.every((m) => m.credits === 0)
+)
+check(
+  '上下文水位取 meta 的 lastPromptTokens',
+  reasonixFixture.sessions.find((s) => s.sessionId === 'code-Agent')?.contextUsed === 2000,
+  String(reasonixFixture.sessions.find((s) => s.sessionId === 'code-Agent')?.contextUsed)
+)
+check(
+  '上下文上限拿不到，留 0（界面只报已用）',
+  reasonixFixture.sessions.every((s) => s.contextSize === 0)
+)
+check('会话标题来自 meta.summary', reasonixFixture.sessions[0]?.title === '夹具会话', reasonixFixture.sessions[0]?.title)
+check(
+  '按 meta.workspace 分组，没有 meta 的退回会话名',
+  reasonixFixture.projects.map((p) => p.projectDir).sort().join('|') ===
+    ['D:\\proj\\a', 'desktop-202605240306-1'].sort().join('|'),
+  reasonixFixture.projects.map((p) => p.projectDir).join('|')
+)
+check('活跃会话取最近有动静的', reasonixFixture.active?.sessionId === 'code-Agent', String(reasonixFixture.active?.sessionId))
+check('子代理的调用并进原会话（只有 2 个会话）', reasonixFixture.totals.sessions === 2)
+
+const reasonixStatBefore = statSync(reasonixLedgerPath)
+collectReasonixSnapshot({ reasonixDir: reasonixRoot, now: FIXED_NOW })
+const reasonixStatAfter = statSync(reasonixLedgerPath)
+check(
+  '采集不修改流水账',
+  reasonixStatBefore.mtimeMs === reasonixStatAfter.mtimeMs && reasonixStatBefore.size === reasonixStatAfter.size
+)
+
+rmSync(reasonixRoot, { recursive: true, force: true })
+
+section('Reasonix 真实数据')
+
+const reasonixDirPath = join(homedir(), '.reasonix')
+const reasonixStarted = Date.now()
+const reasonixReal = collectReasonixSnapshot({ reasonixDir: reasonixDirPath })
+const reasonixElapsed = Date.now() - reasonixStarted
+
+console.log(`  读取耗时 ${reasonixElapsed} ms`)
+console.log(`  会话 ${reasonixReal.totals.sessions} 个 · 调用 ${grouped(reasonixReal.totals.calls)} 次`)
+console.log(
+  `  token 输入 ${compact(reasonixReal.totals.inputTokens)} · 输出 ${compact(reasonixReal.totals.outputTokens)}` +
+    ` · 缓存 ${compact(reasonixReal.totals.cachedTokens)}`
+)
+console.log(`  当前上下文 ${grouped(reasonixReal.active?.used ?? 0)} token`)
+
+const hasReasonix = reasonixReal.totals.calls > 0
+
+if (!hasReasonix) {
+  console.log('  skip 未检测到 Reasonix 数据 —— 真实数据相关断言全部跳过（CI 环境属正常）')
+} else {
+  check('读到调用', reasonixReal.totals.calls > 0)
+  check('读取在 5 秒内', reasonixElapsed < 5_000, `${reasonixElapsed} ms`)
+  check('积分恒为 0', reasonixReal.totals.credits === 0)
+  check('思考 token 恒为 0', reasonixReal.totals.reasoningTokens === 0)
+  check(
+    '会话 token 之和 == 全局',
+    sum(reasonixReal.sessions.map((s) => s.inputTokens + s.outputTokens)) ===
+      reasonixReal.totals.inputTokens + reasonixReal.totals.outputTokens
+  )
+  check(
+    '日 token 之和 == 全局',
+    sum(reasonixReal.days.map((d) => d.inputTokens + d.outputTokens)) ===
+      reasonixReal.totals.inputTokens + reasonixReal.totals.outputTokens
+  )
+  check('缓存命中不超过输入', reasonixReal.totals.cachedTokens <= reasonixReal.totals.inputTokens)
+  check('有活跃会话', reasonixReal.active !== null)
+  check('至少一个会话带标题', reasonixReal.sessions.some((s) => s.title.length > 0))
+  check('至少一个会话带工作目录', reasonixReal.sessions.some((s) => s.cwd.length > 0))
+}
+
+check(
+  'Reasonix 目录不存在不崩',
+  collectReasonixSnapshot({ reasonixDir: join(homedir(), '.reasonix-nonexistent') }).sessions.length === 0
+)
+check('路径为空不崩', collectReasonixSnapshot({ reasonixDir: '' }).sessions.length === 0)
+
+/* ------------------------------------------- 10. DeepSeek Harness 数据源 */
+
+section('DeepSeek Harness 多帧 zstd 解码')
+
+check('空缓冲解出空串', decodeZstdFrames(Buffer.alloc(0)) === '')
+check(
+  '多帧拼接能全部解出来（Node 的 zstdDecompressSync 只吃第一帧）',
+  decodeZstdFrames(
+    Buffer.concat([zstdCompressSync(Buffer.from('第一帧\n')), zstdCompressSync(Buffer.from('第二帧\n'))])
+  ) === '第一帧\n第二帧\n'
+)
+check(
+  '尾部半帧停在上一帧，已解出来的内容照常返回',
+  decodeZstdFrames(Buffer.concat([zstdCompressSync(Buffer.from('完整\n')), Buffer.from([0x28, 0xb5, 0x2f, 0xfd, 0x00])])) ===
+    '完整\n'
+)
+check('不是 zstd 的缓冲解出空串', decodeZstdFrames(Buffer.from('这不是 zstd')) === '')
+check(
+  '文件名版本号：无版本记 0、.v3 记 3、.v4 记 4、别的记 -1',
+  sessionLogVersion('session.jsonl.zstd') === 0 &&
+    sessionLogVersion('session.v3.jsonl.zstd') === 3 &&
+    sessionLogVersion('session.v4.jsonl.zstd') === 4 &&
+    sessionLogVersion('state.json') === -1
+)
+
+section('DeepSeek Harness 会话日志解析')
+
+check(
+  '用量只认 assistant/message —— 早期格式的 assistant/chunk 是同值副本，一起算就是双倍',
+  (() => {
+    const text = [
+      JSON.stringify({ type: 'session', id: 's1', createdAt: FIXED_NOW - 5000, cwd: 'D:\\p', delegationDepth: 0 }),
+      JSON.stringify({ type: 'request/header', time: FIXED_NOW, data: { header: { config: { provider: 'p', model: 'm' } } } }),
+      JSON.stringify({ type: 'request/context', time: FIXED_NOW, data: { provider: 'p', model: 'm', contextWindow: 1000 } }),
+      JSON.stringify({
+        type: 'assistant/chunk',
+        time: FIXED_NOW - 100,
+        data: { chunk: { type: 'usage', usage: { inputTokens: 10, outputTokens: 1, cacheReadTokens: 90 } } }
+      }),
+      JSON.stringify({
+        type: 'assistant/message',
+        time: FIXED_NOW - 100,
+        data: { turn: 1, step: 1, usage: { inputTokens: 10, outputTokens: 1, cacheReadTokens: 90 } }
+      })
+    ].join('\n')
+    const parsed = parseDshLog(text, 'fallback')
+    return parsed.calls.length === 1 && parsed.calls[0].inputTokens === 100 && parsed.calls[0].cachedTokens === 90
+  })()
+)
+check(
+  '只有 chunk 没有 message 的老格式退回用 chunk',
+  (() => {
+    const text = JSON.stringify({
+      type: 'assistant/chunk',
+      time: FIXED_NOW,
+      data: { chunk: { type: 'usage', usage: { inputTokens: 5, outputTokens: 2, cacheReadTokens: 95 } } }
+    })
+    const parsed = parseDshLog(text, 'fallback')
+    return parsed.calls.length === 1 && parsed.calls[0].inputTokens === 100
+  })()
+)
+check(
+  '坏行与没有 usage 的助手消息都不进账',
+  (() => {
+    const text = [
+      '{ 半行',
+      JSON.stringify({ type: 'assistant/message', time: FIXED_NOW, data: { turn: 1, step: 1, message: { role: 'assistant' } } })
+    ].join('\n')
+    return parseDshLog(text, 's1').calls.length === 0
+  })()
+)
+check(
+  '零 token 的用量不进账',
+  (() => {
+    const text = JSON.stringify({
+      type: 'assistant/message',
+      time: FIXED_NOW,
+      data: { usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0 } }
+    })
+    return parseDshLog(text, 's1').calls.length === 0
+  })()
+)
+check(
+  '模型变更靠 request/header 与 model/selection 往前带',
+  (() => {
+    const text = [
+      JSON.stringify({ type: 'model/selection', time: FIXED_NOW, data: { provider: 'p', model: 'm1' } }),
+      JSON.stringify({ type: 'assistant/message', time: FIXED_NOW, data: { usage: { inputTokens: 1, outputTokens: 1 } } }),
+      JSON.stringify({ type: 'model/selection', time: FIXED_NOW, data: { provider: 'p', model: 'm2' } }),
+      JSON.stringify({ type: 'assistant/message', time: FIXED_NOW + 1, data: { usage: { inputTokens: 1, outputTokens: 1 } } })
+    ].join('\n')
+    const parsed = parseDshLog(text, 's1')
+    return parsed.calls[0].model === 'm1' && parsed.calls[1].model === 'm2'
+  })()
+)
+check(
+  '会话标题取最后一个 session/title',
+  (() => {
+    const text = [
+      JSON.stringify({ type: 'session/title', time: FIXED_NOW, data: { title: '旧标题' } }),
+      JSON.stringify({ type: 'session/title', time: FIXED_NOW + 1, data: { title: '新标题' } })
+    ].join('\n')
+    return parseDshLog(text, 's1').title === '新标题'
+  })()
+)
+
+section('DeepSeek Harness 目录扫描（临时夹具）')
+
+const dshRoot = mkdtempSync(join(tmpdir(), 'wbtm-dsh-'))
+
+/** DSH 每 flush 一次追加一帧，夹具照这个形态写 */
+const writeDshLog = (file: string, chunks: string[]): void => {
+  mkdirSync(dirname(file), { recursive: true })
+  writeFileSync(file, Buffer.concat(chunks.map((chunk) => zstdCompressSync(Buffer.from(chunk, 'utf8')))))
+}
+
+const dshDemoDir = join(dshRoot, 'sessions', '--D-demo--', 'session-abc')
+writeDshLog(join(dshDemoDir, 'session.v4.jsonl.zstd'), [
+  JSON.stringify({
+    type: 'session',
+    version: 4,
+    id: 'session-abc',
+    createdAt: FIXED_NOW - 9000,
+    cwd: 'D:\\proj\\demo',
+    delegationDepth: 0
+  }) + '\n',
+  JSON.stringify({ type: 'session/title', time: FIXED_NOW - 8000, data: { title: '夹具标题' } }) + '\n',
+  JSON.stringify({ type: 'request/header', time: FIXED_NOW - 7000, data: { header: { config: { provider: 'p', model: 'demo-model' } } } }) + '\n',
+  JSON.stringify({ type: 'request/context', time: FIXED_NOW - 7000, data: { provider: 'p', model: 'demo-model', contextWindow: 1000000 } }) + '\n',
+  /* 一帧里塞两行，模拟一次 flush 写了多个事件 */
+  JSON.stringify({
+    type: 'assistant/message',
+    time: FIXED_NOW - 3000,
+    data: { turn: 1, step: 1, usage: { inputTokens: 1000, outputTokens: 100, cacheReadTokens: 500 } }
+  }) +
+    '\n' +
+    JSON.stringify({
+      type: 'assistant/message',
+      time: FIXED_NOW - 1000,
+      data: { turn: 1, step: 2, usage: { inputTokens: 200, outputTokens: 50, cacheReadTokens: 1800, totalTokens: 2050 } }
+    }) +
+    '\n',
+  /* 尾部半帧：写到一半就被读到，不该把整个会话带崩 */
+  '{"type":"assistant/message","time":' + (FIXED_NOW - 500) + ',"data":{"usage":{"inputTok'
+])
+/* 同一个会话目录里的老世代：版本号更低，必须被忽略（这里塞了个天文数字） */
+writeDshLog(join(dshDemoDir, 'session.jsonl.zstd'), [
+  JSON.stringify({
+    type: 'assistant/message',
+    time: FIXED_NOW - 9000,
+    data: { usage: { inputTokens: 99999, outputTokens: 99999, cacheReadTokens: 99999 } }
+  }) + '\n'
+])
+
+/* 只有老格式的会话：chunk 与 message 是同一次用量的两份副本，只能算一次 */
+writeDshLog(join(dshRoot, 'sessions', '--D-old--', 'session-old', 'session.jsonl.zstd'), [
+  JSON.stringify({ type: 'session', id: 'session-old', createdAt: FIXED_NOW - 6000, cwd: 'D:\\proj\\old' }) + '\n',
+  JSON.stringify({
+    type: 'assistant/chunk',
+    time: FIXED_NOW - 4000,
+    data: { chunk: { type: 'usage', usage: { inputTokens: 10, outputTokens: 1, cacheReadTokens: 90 } } }
+  }) + '\n',
+  JSON.stringify({
+    type: 'assistant/message',
+    time: FIXED_NOW - 4000,
+    data: { usage: { inputTokens: 10, outputTokens: 1, cacheReadTokens: 90 } }
+  }) + '\n'
+])
+
+/* 只开过没说话的会话：一个调用都没有，不该出现在排行榜里 */
+writeDshLog(join(dshRoot, 'sessions', '--D-empty--', 'session-empty', 'session.v4.jsonl.zstd'), [
+  JSON.stringify({ type: 'session', version: 4, id: 'session-empty', createdAt: FIXED_NOW, cwd: 'D:\\proj\\empty' }) + '\n'
+])
+
+mkdirSync(join(dshRoot, 'storages'), { recursive: true })
+writeFileSync(
+  join(dshRoot, 'storages', 'workspace.json'),
+  JSON.stringify({ global: { archivedSessionIds: ['session-old'] } }),
+  'utf8'
+)
+
+const dshFixture = collectDshSnapshot({ dshDir: dshRoot, now: FIXED_NOW })
+
+check('kind 标记为 dsh', dshFixture.kind === 'dsh')
+check('扫到 2 个会话（空会话不进榜）', dshFixture.totals.sessions === 2, String(dshFixture.totals.sessions))
+check('调用数按 message 级算，chunk 副本不重复计', dshFixture.totals.calls === 3, String(dshFixture.totals.calls))
+check(
+  '输入 = 非缓存输入 + 缓存读（与 MiMo 同向的反向口径）',
+  dshFixture.totals.inputTokens === 1000 + 500 + 200 + 1800 + 10 + 90,
+  String(dshFixture.totals.inputTokens)
+)
+check('缓存命中只算 cacheReadTokens', dshFixture.totals.cachedTokens === 2300 + 90, String(dshFixture.totals.cachedTokens))
+check('输出求和', dshFixture.totals.outputTokens === 151, String(dshFixture.totals.outputTokens))
+check('思考 token 恒为 0（pi-ai 折进 output）', dshFixture.totals.reasoningTokens === 0)
+check('老世代的文件被忽略（没把 99999 算进来）', dshFixture.totals.inputTokens < 100000)
+check(
+  '所有粒度的积分都是 0',
+  dshFixture.totals.credits === 0 &&
+    dshFixture.sessions.every((s) => s.credits === 0) &&
+    dshFixture.days.every((d) => d.credits === 0) &&
+    dshFixture.models.every((m) => m.credits === 0)
+)
+check(
+  '上下文水位取最后一次请求的完整 prompt',
+  dshFixture.sessions.find((s) => s.sessionId === 'session-abc')?.contextUsed === 2000,
+  String(dshFixture.sessions.find((s) => s.sessionId === 'session-abc')?.contextUsed)
+)
+check(
+  '上下文窗口来自 request/context',
+  dshFixture.sessions.find((s) => s.sessionId === 'session-abc')?.contextSize === 1000000,
+  String(dshFixture.sessions.find((s) => s.sessionId === 'session-abc')?.contextSize)
+)
+check(
+  '没有 request/context 的会话窗口留 0',
+  dshFixture.sessions.find((s) => s.sessionId === 'session-old')?.contextSize === 0
+)
+check('会话标题来自 session/title', dshFixture.sessions[0]?.title === '夹具标题', dshFixture.sessions[0]?.title)
+check(
+  '按日志里的 cwd 分组（不用解目录名的转义）',
+  dshFixture.projects.map((p) => p.projectDir).sort().join('|') === ['D:\\proj\\demo', 'D:\\proj\\old'].sort().join('|'),
+  dshFixture.projects.map((p) => p.projectDir).join('|')
+)
+check('归档会话不参与活跃评选', dshFixture.active?.sessionId === 'session-abc', String(dshFixture.active?.sessionId))
+check('模型名取请求头里的那个', dshFixture.models[0]?.model === 'demo-model', dshFixture.models[0]?.model)
+
+const dshLogBefore = statSync(join(dshDemoDir, 'session.v4.jsonl.zstd'))
+collectDshSnapshot({ dshDir: dshRoot, now: FIXED_NOW })
+const dshLogAfter = statSync(join(dshDemoDir, 'session.v4.jsonl.zstd'))
+check(
+  '采集不修改会话日志',
+  dshLogBefore.mtimeMs === dshLogAfter.mtimeMs && dshLogBefore.size === dshLogAfter.size
+)
+
+rmSync(dshRoot, { recursive: true, force: true })
+
+section('DeepSeek Harness 真实数据')
+
+const dshDirPath = join(homedir(), '.dsh')
+const dshStarted = Date.now()
+const dshReal = collectDshSnapshot({ dshDir: dshDirPath })
+const dshElapsed = Date.now() - dshStarted
+
+console.log(`  读取耗时 ${dshElapsed} ms`)
+console.log(`  会话 ${dshReal.totals.sessions} 个 · 调用 ${grouped(dshReal.totals.calls)} 次 · 文件 ${dshReal.source.files} 个`)
+console.log(
+  `  token 输入 ${compact(dshReal.totals.inputTokens)} · 输出 ${compact(dshReal.totals.outputTokens)}` +
+    ` · 缓存 ${compact(dshReal.totals.cachedTokens)}`
+)
+console.log(
+  `  当前上下文 ${grouped(dshReal.active?.used ?? 0)} / ${grouped(dshReal.active?.size ?? 0)} token`
+)
+
+const hasDsh = dshReal.totals.calls > 0
+
+if (!hasDsh) {
+  console.log('  skip 未检测到 DeepSeek Harness 数据 —— 真实数据相关断言全部跳过（CI 环境属正常）')
+} else {
+  check('读到调用', dshReal.totals.calls > 0)
+  check('读取在 15 秒内', dshElapsed < 15_000, `${dshElapsed} ms`)
+  check('积分恒为 0', dshReal.totals.credits === 0)
+  check('思考 token 恒为 0', dshReal.totals.reasoningTokens === 0)
+  check(
+    '会话 token 之和 == 全局',
+    sum(dshReal.sessions.map((s) => s.inputTokens + s.outputTokens)) ===
+      dshReal.totals.inputTokens + dshReal.totals.outputTokens
+  )
+  check(
+    '日 token 之和 == 全局',
+    sum(dshReal.days.map((d) => d.inputTokens + d.outputTokens)) === dshReal.totals.inputTokens + dshReal.totals.outputTokens
+  )
+  check('缓存命中不超过输入', dshReal.totals.cachedTokens <= dshReal.totals.inputTokens)
+  check('有活跃会话', dshReal.active !== null)
+  check('至少一个会话带标题', dshReal.sessions.some((s) => s.title.length > 0))
+  check('至少一个会话能算出上下文窗口', dshReal.sessions.some((s) => s.contextSize > 0))
+
+  /* 拿 DSH 自己的投影缓存对账：它按会话记 uncachedInput / output / cacheRead / cacheWrite。
+     正在跑的那个会话两边可能差几十秒，所以只对「非最近活跃」的会话要求逐字节相等。 */
+  const oracleRoot = join(dshDirPath, 'storages', 'session_projcache', 'sessions')
+  if (existsSync(oracleRoot)) {
+    const oracle = new Map<string, { uncached: number; output: number; cacheRead: number; cacheWrite: number }>()
+    for (const name of readdirSync(oracleRoot)) {
+      if (!name.endsWith('.json')) continue
+      try {
+        const raw = JSON.parse(readFileSync(join(oracleRoot, name), 'utf8')) as Record<string, any>
+        const totals = raw?.record?.rows?.tokenUsage?.val?.totals
+        if (!totals) continue
+        oracle.set(name.slice(0, -'.json'.length), {
+          uncached: Number(totals.uncachedInputTokens) || 0,
+          output: Number(totals.outputTokens) || 0,
+          cacheRead: Number(totals.cacheReadTokens) || 0,
+          cacheWrite: Number(totals.cacheWriteTokens) || 0
+        })
+      } catch {
+        /* 正在被 DSH 重写的投影文件读坏了就跳过这一个会话 */
+      }
+    }
+
+    const live = dshReal.sessions.reduce(
+      (newest, s) => (newest === null || s.lastActivity > newest.lastActivity ? s : newest),
+      null as (typeof dshReal.sessions)[number] | null
+    )
+    const compared: string[] = []
+    const mismatched: string[] = []
+    for (const session of dshReal.sessions) {
+      const expected = oracle.get(session.sessionId)
+      if (!expected || session.sessionId === live?.sessionId) continue
+      compared.push(session.sessionId)
+      const ok =
+        session.inputTokens === expected.uncached + expected.cacheRead + expected.cacheWrite &&
+        session.cachedTokens === expected.cacheRead &&
+        session.outputTokens === expected.output
+      if (!ok) {
+        mismatched.push(
+          `${session.sessionId}: 本地 ${session.inputTokens}/${session.cachedTokens}/${session.outputTokens}` +
+            ` vs 投影 ${expected.uncached + expected.cacheRead + expected.cacheWrite}/${expected.cacheRead}/${expected.output}`
+        )
+      }
+    }
+    check(
+      '与 DSH 自己的投影缓存逐会话对账一致（最近活跃的那个除外）',
+      compared.length > 0 && mismatched.length === 0,
+      compared.length ? `对账 ${compared.length} 个会话${mismatched.length ? ' · ' + mismatched.join(' · ') : ''}` : '投影缓存里没有可对账的会话'
+    )
+  } else {
+    console.log('  skip 没找到 DSH 投影缓存 —— 对账断言跳过')
+  }
+}
+
+check('DSH 目录不存在不崩', collectDshSnapshot({ dshDir: join(homedir(), '.dsh-nonexistent') }).sessions.length === 0)
+check('路径为空不崩', collectDshSnapshot({ dshDir: '' }).sessions.length === 0)
 
 /* ---------------------------------------------- 8. OpenCode Go 数据源 */
 
@@ -1448,7 +2094,7 @@ async function main(): Promise<void> {
 
     /* --------------------------------------------- 多源隔离 */
 
-    section('五个数据源互不影响')
+    section('七个数据源互不影响')
 
     const sharedWbCache = new Map()
     const wbBefore = collectSnapshot({ workbuddyDir, cache: sharedWbCache, now: FIXED_NOW })
@@ -1457,6 +2103,10 @@ async function main(): Promise<void> {
     collectKimiSnapshot({ kimiDir, cache: kimiCache, now: FIXED_NOW })
     collectZcodeSnapshot({ zcodeDir: zcodeDirPath, now: FIXED_NOW })
     collectMimoSnapshot({ mimoDir: mimoDataPath, cacheDir: mimoCachePath, now: FIXED_NOW })
+    const reasonixCache = new Map()
+    collectReasonixSnapshot({ reasonixDir: reasonixDirPath, cache: reasonixCache, now: FIXED_NOW })
+    const dshCache = new Map()
+    collectDshSnapshot({ dshDir: dshDirPath, cache: dshCache, now: FIXED_NOW })
 
     /* OpenCode Go 是唯一会发请求的源，这里让它连失败两次：一次压根没有凭证（不发请求），
        一次打到没人监听的本地端口（网络层失败）。两次都不该动到另外四个源的缓存与快照。 */
@@ -1493,18 +2143,32 @@ async function main(): Promise<void> {
       'WorkBuddy 缓存里没有别的源的文件',
       wbKeysBefore.every(
         (key) =>
-          !key.includes('.kimi-code') && !key.includes('.zcode') && !key.includes('mimocode') && !key.includes('opencode')
+          !key.includes('.kimi-code') &&
+          !key.includes('.zcode') &&
+          !key.includes('mimocode') &&
+          !key.includes('opencode') &&
+          !key.includes('.reasonix') &&
+          !key.includes('.dsh')
       )
     )
     check('Kimi 缓存里没有 WorkBuddy 的文件', [...kimiCache.keys()].every((key) => !key.includes('.workbuddy')))
     check(
-      '五个源的 kind 各自正确',
+      'Reasonix 缓存里只有 Reasonix 的文件',
+      reasonixCache.size > 0 && [...reasonixCache.keys()].every((key) => key.includes('.reasonix'))
+    )
+    check('DSH 缓存里只有 DSH 的文件', dshCache.size > 0 && [...dshCache.keys()].every((key) => key.includes('.dsh')))
+    check(
+      '七个源的 kind 各自正确',
       wbAfter.kind === 'workbuddy' &&
         kimiReal.kind === 'kimi' &&
         zcodeReal.kind === 'zcode' &&
         mimoReal.kind === 'mimo' &&
+        reasonixReal.kind === 'reasonix' &&
+        dshReal.kind === 'dsh' &&
         sourceLabel('opencode') === 'OpenCode Go' &&
-        SOURCE_ORDER.length === 5,
+        sourceLabel('reasonix') === 'Reasonix' &&
+        sourceLabel('dsh') === 'DeepSeek Harness' &&
+        SOURCE_ORDER.length === 7,
       SOURCE_ORDER.join('/')
     )
   } finally {
