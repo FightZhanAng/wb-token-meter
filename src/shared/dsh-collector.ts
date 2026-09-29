@@ -380,6 +380,7 @@ export function collectDshSnapshot(options: DshCollectOptions): Snapshot {
     const calls: CallRecord[] = session.calls.map((row) => ({
       // DSH 没有要拿 traceId 对账的东西
       traceId: '',
+      conversationRequestId: '',
       sessionId: session.sessionId,
       // 按会话的工作目录分组（会话日志里的 cwd 字段，不用解目录名的转义）
       projectDir: session.cwd || session.sessionId,

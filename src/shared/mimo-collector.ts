@@ -247,6 +247,7 @@ export function collectMimoSnapshot(options: MimoCollectOptions): Snapshot {
     const call: CallRecord = {
       // MiMo 没有要拿 traceId 对账的东西
       traceId: '',
+      conversationRequestId: '',
       sessionId: row.sessionId,
       projectDir: meta.get(row.sessionId)?.cwd || row.sessionId,
       model: row.model,

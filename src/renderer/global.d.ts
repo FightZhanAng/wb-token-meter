@@ -1,4 +1,4 @@
-import type { Settings, Snapshot } from '../shared/types'
+import type { Settings, Snapshot, UpdateState } from '../shared/types'
 
 declare global {
   interface Window {
@@ -19,6 +19,14 @@ declare global {
       getSettings(): Promise<Settings>
       updateSettings(patch: Partial<Settings>): Promise<Settings>
       onSettings(handler: (settings: Settings) => void): () => void
+
+      /* 版本与更新 */
+      getUpdate(): Promise<UpdateState>
+      checkUpdate(): Promise<UpdateState>
+      downloadUpdate(): Promise<UpdateState>
+      installUpdate(): Promise<UpdateState>
+      openReleasePage(): Promise<string>
+      onUpdate(handler: (state: UpdateState) => void): () => void
     }
   }
 }

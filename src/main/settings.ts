@@ -16,6 +16,10 @@ import type { FloatPosition, Settings, SourceKind, ThemeMode } from '../shared/t
 export const DEFAULT_SETTINGS: Settings = {
   source: 'workbuddy',
   theme: 'system',
+  // 检查更新默认开着（只查不装，发现新版也只是一个提示），
+  // 自动下载安装默认关掉 —— 那是个会真的改磁盘的行为，得用户自己点。
+  autoCheckUpdate: true,
+  autoDownloadUpdate: false,
   floatEnabled: true,
   floatOpacity: 0.94,
   floatSize: 'medium',
@@ -59,6 +63,12 @@ function parseSettings(raw: unknown): Settings {
   return {
     source: isSourceKind(source) ? source : DEFAULT_SETTINGS.source,
     theme: isThemeMode(theme) ? theme : DEFAULT_SETTINGS.theme,
+    autoCheckUpdate:
+      typeof input.autoCheckUpdate === 'boolean' ? input.autoCheckUpdate : DEFAULT_SETTINGS.autoCheckUpdate,
+    autoDownloadUpdate:
+      typeof input.autoDownloadUpdate === 'boolean'
+        ? input.autoDownloadUpdate
+        : DEFAULT_SETTINGS.autoDownloadUpdate,
     floatEnabled:
       typeof input.floatEnabled === 'boolean' ? input.floatEnabled : DEFAULT_SETTINGS.floatEnabled,
     floatOpacity: clampNumber(input.floatOpacity, 0.3, 1, DEFAULT_SETTINGS.floatOpacity),

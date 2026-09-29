@@ -14,7 +14,8 @@ import {
   themeLabel
 } from '../shared/format'
 import { describeReset, quotaSummary, quotaWindowLabel, windowOf } from '../shared/opencode-quota'
-import type { FloatSize, Snapshot, SourceKind, ThemeMode } from '../shared/types'
+import type { FloatSize, Snapshot, SourceKind, ThemeMode, UpdateState } from '../shared/types'
+import { updateStatusText } from '../shared/update'
 import { trayIconImage } from './paths'
 
 export interface TrayCallbacks {
@@ -22,6 +23,13 @@ export interface TrayCallbacks {
   onRefresh(): void
   onOpenDataDir(): void
   onQuit(): void
+
+  /* 版本与更新 */
+  getUpdate(): UpdateState
+  onCheckUpdate(): void
+  onDownloadUpdate(): void
+  onInstallUpdate(): void
+  onOpenReleasePage(): void
 
   /* 数据源 */
   getSource(): SourceKind
@@ -96,6 +104,7 @@ export class TrayController {
 
     const source = this.cb.getSource()
     const theme = this.cb.getTheme()
+    const update = this.cb.getUpdate()
     const floatEnabled = this.cb.getFloatEnabled()
     const floatSize = this.cb.getFloatSize()
     const floatOpacity = this.cb.getFloatOpacity()
@@ -121,6 +130,7 @@ export class TrayController {
       quotaSignature,
       source,
       theme,
+      `${update.status}:${update.current}:${update.latest}:${Math.round(update.percent)}`,
       floatEnabled,
       floatSize,
       floatOpacity.toFixed(2),
@@ -218,6 +228,9 @@ export class TrayController {
         enabled: false
       },
       { type: 'separator' },
+      { label: `版本 ${update.current || '未知'}`, enabled: false },
+      ...updateActionItems(update, this.cb),
+      { type: 'separator' },
       {
         label: '桌面胶囊',
         type: 'checkbox',
@@ -280,6 +293,46 @@ export class TrayController {
 /** 菜单行前面已经写了「重置：」，而 describeReset 的文案自带「重置」二字，去掉尾缀免得读重 */
 function resetBrief(resetsAt: number, now: number): string {
   return describeReset(resetsAt, now).replace(/重置$/, '')
+}
+
+/**
+ * 版本号下面那几行。状态自己会说话，所以只给「现在能做什么」——
+ * 没有新版本时给「检查更新」，有新版本时给下载/发布页，下完了给安装。
+ */
+function updateActionItems(update: UpdateState, cb: TrayCallbacks): MenuItemConstructorOptions[] {
+  const openPage: MenuItemConstructorOptions = {
+    label: '打开发布页',
+    click: () => cb.onOpenReleasePage()
+  }
+  const recheck: MenuItemConstructorOptions = {
+    label: '检查更新',
+    click: () => cb.onCheckUpdate()
+  }
+
+  switch (update.status) {
+    case 'unsupported':
+      return [{ label: updateStatusText(update), enabled: false }, openPage]
+    case 'checking':
+    case 'downloading':
+      return [{ label: updateStatusText(update), enabled: false }]
+    case 'available':
+      return [
+        { label: updateStatusText(update), enabled: false },
+        ...(update.canDownload
+          ? [{ label: '下载更新', click: () => cb.onDownloadUpdate() } as MenuItemConstructorOptions]
+          : []),
+        openPage
+      ]
+    case 'downloaded':
+      return [
+        { label: `新版本 ${update.latest} 已下载`, enabled: false },
+        { label: '重启并安装', click: () => cb.onInstallUpdate() }
+      ]
+    case 'error':
+      return [{ label: updateStatusText(update), enabled: false }, { ...recheck, label: '重新检查' }]
+    default:
+      return [recheck]
+  }
 }
 
 /** 全局 token/积分比价；积分太小或无数据时退回 0 */

@@ -5,7 +5,7 @@
  * 重点验证四件事：
  *   1. 单行解析在真实数据上不掉字段、在脏数据上不崩
  *   2. 各维度聚合能交叉对上（会话/日/模型/项目 求和 == 全局）
- *   3. traceId 与积分明细的对齐率
+ *   3. 计费键（traceId / conversationRequestId）与积分明细的对齐率
  *   4. OpenCode Go 的额度接口：除「真实数据」一段外全部打在本地 mock 服务上
  */
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
@@ -52,7 +52,15 @@ import {
 import { collectZcodeSnapshot } from '../src/shared/zcode-collector'
 import { collectMimoSnapshot } from '../src/shared/mimo-collector'
 import { compact, grouped, percent, sourceLabel, SOURCE_ORDER, THEME_ORDER, themeLabel, themeShort, tokenPerCredit } from '../src/shared/format'
-import type { CallRecord, Snapshot, UsageSample } from '../src/shared/types'
+import {
+  compareVersion,
+  isNewerVersion,
+  normalizeVersion,
+  updateBusy,
+  updateNeedsAttention,
+  updateStatusText
+} from '../src/shared/update'
+import type { CallRecord, Snapshot, UpdateState, UsageSample } from '../src/shared/types'
 
 let passed = 0
 let failed = 0
@@ -82,6 +90,7 @@ const realLine = JSON.stringify({
   providerData: {
     model: 'deepseek-v4.1-flash',
     traceId: 'e10415d4625d4f0c9b9a7f6931458cf0',
+    conversationRequestId: '01a0eb71fd1e76debd6b1ea2be26e5b9',
     usage: {
       requests: 1,
       inputTokens: 37668,
@@ -101,6 +110,7 @@ if (parsed) {
   check('cachedTokens', parsed.cachedTokens === 8960, String(parsed.cachedTokens))
   check('reasoningTokens', parsed.reasoningTokens === 1520, String(parsed.reasoningTokens))
   check('traceId', parsed.traceId === 'e10415d4625d4f0c9b9a7f6931458cf0')
+  check('conversationRequestId', parsed.conversationRequestId === '01a0eb71fd1e76debd6b1ea2be26e5b9')
   check('model', parsed.model === 'deepseek-v4.1-flash')
   check('timestamp', parsed.timestamp === 1789368777394)
 }
@@ -176,7 +186,20 @@ if (!hasData) {
   check('扫到调用', snapshot.totals.calls > 0)
   check('首次扫描在 15 秒内', elapsed < 15_000, `${elapsed} ms`)
   check('有积分数据', snapshot.totals.credits > 0, String(snapshot.totals.credits))
-  check('traceId 对齐率 > 50%', snapshot.totals.matchedTraces / Math.max(1, snapshot.totals.traces) > 0.5)
+  /* 计费键对齐率。
+     分母必须用数据库里的计费回合数，不能用 transcript 的回合总数 ——
+     后者混着大量根本没走到结算的调用（子代理、免费额度、被清理的会话），
+     拿它当分母只会得到一个永远不达标的假指标。 */
+  check(
+    'DB 计费回合基本都能对到本地记录',
+    snapshot.totals.matchedTraces / Math.max(1, snapshot.totals.dbTraces) > 0.9,
+    `${snapshot.totals.matchedTraces}/${snapshot.totals.dbTraces}`
+  )
+  check(
+    '积分归因率 > 90%（总额不会凭空少一截）',
+    snapshot.totals.attributedCredits / Math.max(1, snapshot.totals.credits) > 0.9,
+    `${snapshot.totals.attributedCredits}/${snapshot.totals.credits}`
+  )
 
   /* 二次扫描应当能命中文件缓存 */
   const cachedStart = Date.now()
@@ -233,6 +256,192 @@ check('已归因不超过权威总额', snapshot.totals.attributedCredits <= sna
 const modelCreditCeiling = Math.max(...snapshot.models.map((m) => m.credits))
 check('模型积分不超过已归因总额（无重复计数）', modelCreditCeiling <= snapshot.totals.attributedCredits + 0.01,
   `max=${modelCreditCeiling} attributed=${snapshot.totals.attributedCredits}`)
+
+/* ------------------------------------------- 3b. 计费键（临时夹具） */
+
+section('WorkBuddy 计费键：traceId vs conversationRequestId')
+
+/*
+ * 回归用例。2026-09 起 WorkBuddy 把 credit_json 的 key 从 traceId 换成了
+ * conversationRequestId，两者不再同值 —— 只认 traceId 的话新会话积分全是 0。
+ * 夹具刻意让两种口径同时存在，任何一边退化成「只认 traceId」都会红。
+ */
+const wbFixtureNow = Date.now()
+const wbRoot = mkdtempSync(join(tmpdir(), 'wbtm-wb-'))
+mkdirSync(join(wbRoot, 'projects', 'proj_demo', 'sess_new', 'subagents'), { recursive: true })
+
+const wbLine = (opts: {
+  ts: number
+  traceId: string
+  convReqId: string
+  input: number
+  output: number
+}): string =>
+  JSON.stringify({
+    timestamp: opts.ts,
+    type: 'function_call',
+    providerData: {
+      model: 'demo-model',
+      traceId: opts.traceId,
+      conversationRequestId: opts.convReqId,
+      usage: {
+        requests: 1,
+        inputTokens: opts.input,
+        outputTokens: opts.output,
+        inputTokensDetails: [],
+        outputTokensDetails: []
+      }
+    }
+  })
+
+/* 新口径会话：两轮工具调用同属一个计费回合（convReqId 相同、traceId 不同），
+   外加一个子代理回合 —— 子代理的调用必须并进来，但同一回合只能结算一次 */
+writeFileSync(
+  join(wbRoot, 'projects', 'proj_demo', 'sess_new.jsonl'),
+  [
+    wbLine({ ts: wbFixtureNow - 5000, traceId: 'trace-new-a', convReqId: 'req-new-1', input: 1000, output: 100 }),
+    wbLine({ ts: wbFixtureNow - 4000, traceId: 'trace-new-b', convReqId: 'req-new-1', input: 1200, output: 80 })
+  ].join('\n') + '\n'
+)
+writeFileSync(
+  join(wbRoot, 'projects', 'proj_demo', 'sess_new', 'subagents', 'agent-1.jsonl'),
+  wbLine({ ts: wbFixtureNow - 3000, traceId: 'trace-sub', convReqId: 'req-new-2', input: 500, output: 40 }) + '\n'
+)
+
+/* 老口径会话：traceId 与 conversationRequestId 同值 —— 兼容路径不能丢 */
+writeFileSync(
+  join(wbRoot, 'projects', 'proj_demo', 'sess_old.jsonl'),
+  wbLine({ ts: wbFixtureNow - 2000, traceId: 'req-old-1', convReqId: 'req-old-1', input: 700, output: 60 }) + '\n'
+)
+
+const wbFixtureDb = new DatabaseSync(join(wbRoot, 'workbuddy.db'))
+wbFixtureDb.exec(`
+  CREATE TABLE sessions (
+    id TEXT PRIMARY KEY, title TEXT, cwd TEXT, model TEXT, status TEXT, updated_at INTEGER
+  );
+  CREATE TABLE session_usage (
+    session_id TEXT PRIMARY KEY, used INTEGER, size INTEGER, updated_at INTEGER, credit_json TEXT
+  );
+`)
+wbFixtureDb
+  .prepare('INSERT INTO sessions (id, title, cwd, model, status, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+  .run('sess_new', '新口径会话', 'D:\\proj\\demo', 'demo-model', 'idle', wbFixtureNow - 3000)
+wbFixtureDb
+  .prepare('INSERT INTO sessions (id, title, cwd, model, status, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+  .run('sess_old', '老口径会话', 'D:\\proj\\demo', 'demo-model', 'idle', wbFixtureNow - 2000)
+const insertWbUsage = wbFixtureDb.prepare(
+  'INSERT INTO session_usage (session_id, used, size, updated_at, credit_json) VALUES (?, ?, ?, ?, ?)'
+)
+insertWbUsage.run('sess_new', 1700, 300000, wbFixtureNow - 3000, JSON.stringify({ 'req-new-1': 4.5, 'req-new-2': 1.5 }))
+insertWbUsage.run('sess_old', 700, 300000, wbFixtureNow - 2000, JSON.stringify({ 'req-old-1': 2.25 }))
+wbFixtureDb.close()
+
+const wbFixture = collectSnapshot({ workbuddyDir: wbRoot, now: wbFixtureNow })
+const wbNew = wbFixture.sessions.find((s) => s.sessionId === 'sess_new')
+const wbOld = wbFixture.sessions.find((s) => s.sessionId === 'sess_old')
+
+check('权威总额 = 数据库 credit_json 之和', near(wbFixture.totals.credits, 8.25), String(wbFixture.totals.credits))
+check('已归因 == 权威（新旧口径都要能对上）', near(wbFixture.totals.attributedCredits, 8.25),
+  String(wbFixture.totals.attributedCredits))
+check('未归因归零', wbFixture.totals.unattributedCredits === 0, String(wbFixture.totals.unattributedCredits))
+check('子代理的调用并进父会话', wbFixture.totals.calls === 4, String(wbFixture.totals.calls))
+
+check('新口径会话拿到积分', near(wbNew?.credits ?? -1, 6), String(wbNew?.credits))
+check('同一计费回合的多轮调用只结算一次', (wbNew?.credits ?? 0) !== 10.5, String(wbNew?.credits))
+check('老口径会话仍能对上（向后兼容）', near(wbOld?.credits ?? -1, 2.25), String(wbOld?.credits))
+
+check('日粒度拿到积分', near(sum(wbFixture.days.map((d) => d.credits)), 8.25),
+  String(sum(wbFixture.days.map((d) => d.credits))))
+check('模型粒度拿到积分', near(sum(wbFixture.models.map((m) => m.credits)), 8.25),
+  String(sum(wbFixture.models.map((m) => m.credits))))
+check('今日积分不为 0 —— 就是这次修的 bug', wbFixture.today.credits > 0, String(wbFixture.today.credits))
+check('计费回合命中数 = 全部 3 个', wbFixture.totals.matchedTraces === 3,
+  `${wbFixture.totals.matchedTraces}/${wbFixture.totals.dbTraces}`)
+check('口径对得上时不报假警告', !wbFixture.warnings.some((w) => w.includes('口径不一致')), wbFixture.warnings.join('; '))
+
+rmSync(wbRoot, { recursive: true, force: true })
+
+/* ------------------------------------------------ 3c. 版本比较与更新状态 */
+
+section('版本比较')
+
+check('等值返回 0', compareVersion('0.6.0', '0.6.0') === 0)
+// 字符串比较在这里会翻车："0.6.10" < "0.6.9"，所以必须逐段按数值比
+check('数字段按数值比，不是按字符串比', compareVersion('0.6.10', '0.6.9') === 1,
+  `${compareVersion('0.6.10', '0.6.9')}`)
+check('段数不同时短的一方缺位补 0', compareVersion('0.7', '0.7.0') === 0)
+check('主版本优先于次版本', compareVersion('1.0.0', '0.9.9') === 1)
+check('v 前缀不影响比较', compareVersion('v1.2.3', '1.2.3') === 0)
+check('预发布小于同版本正式版', compareVersion('0.7.0-beta.1', '0.7.0') === -1)
+check('正式版大于同版本预发布', compareVersion('0.7.0', '0.7.0-beta.1') === 1)
+check('预发布段里的数字按数值比', compareVersion('1.0.0-alpha.10', '1.0.0-alpha.9') === 1)
+check('预发布段数少的更小', compareVersion('1.0.0-alpha', '1.0.0-alpha.1') === -1)
+check('数字标识符小于字母标识符', compareVersion('1.0.0-1', '1.0.0-alpha') === -1)
+check('垃圾输入当 0 处理，不抛异常', compareVersion('', '') === 0 && compareVersion(null, '') === 0)
+
+check('isNewer：新版', isNewerVersion('0.6.1', '0.6.0'))
+check('isNewer：同版本为假', !isNewerVersion('0.6.0', '0.6.0'))
+check('isNewer：旧版本为假', !isNewerVersion('0.5.9', '0.6.0'))
+check('normalizeVersion 去掉 v 前缀与空白', normalizeVersion(' v1.2.3 ') === '1.2.3')
+
+section('更新状态文案')
+
+const updateStateOf = (patch: Partial<UpdateState>): UpdateState => ({
+  status: 'idle',
+  current: '0.6.0',
+  latest: '',
+  percent: 0,
+  message: '',
+  checkedAt: 0,
+  notes: '',
+  canDownload: false,
+  ...patch
+})
+
+check('检查中', updateStatusText(updateStateOf({ status: 'checking' })) === '正在检查更新…')
+check('有新版本要把版本号报出来',
+  updateStatusText(updateStateOf({ status: 'available', latest: '0.7.0' })).includes('0.7.0'),
+  updateStatusText(updateStateOf({ status: 'available', latest: '0.7.0' })))
+check('下载中带百分比（四舍五入）',
+  updateStatusText(updateStateOf({ status: 'downloading', latest: '0.7.0', percent: 42.6 })).includes('43%'),
+  updateStatusText(updateStateOf({ status: 'downloading', latest: '0.7.0', percent: 42.6 })))
+check('百分比越界也不会写出 120%',
+  updateStatusText(updateStateOf({ status: 'downloading', latest: '0.7.0', percent: 120 })).includes('100%'))
+check('下载完提示已就绪',
+  updateStatusText(updateStateOf({ status: 'downloaded', latest: '0.7.0' })).includes('已就绪'))
+check('失败时直接给原因',
+  updateStatusText(updateStateOf({ status: 'error', message: '网络不可达，稍后再试' })) === '网络不可达，稍后再试')
+check('不支持时说明为什么不支持',
+  updateStatusText(updateStateOf({ status: 'unsupported', message: '免安装版：请到发布页下载新版本' })).includes('免安装版'))
+check('不支持但没给原因时也有兜底文案',
+  updateStatusText(updateStateOf({ status: 'unsupported' })).length > 0)
+
+check('只有「可更新」与「已下载」需要强调',
+  updateNeedsAttention('available') && updateNeedsAttention('downloaded') &&
+    !updateNeedsAttention('latest') && !updateNeedsAttention('error') && !updateNeedsAttention('idle'))
+check('检查中与下载中都算忙',
+  updateBusy('checking') && updateBusy('downloading') && !updateBusy('idle') && !updateBusy('available'))
+
+/* ------------------------------------------------ 3d. 更新设置在界面上有落点 */
+
+section('更新界面接线')
+
+const appSource = readFileSync(join(process.cwd(), 'src', 'renderer', 'App.tsx'), 'utf8')
+const preloadSource = readFileSync(join(process.cwd(), 'src', 'preload', 'index.ts'), 'utf8')
+
+// 版本号必须真的画出来，而不是只存在于状态里
+check('面板渲染当前版本号', appSource.includes('foot-version'))
+// 底栏要排在滚动区之后 —— 埋进 .app-body 里就会被滚动带走，看不见了
+check('底栏在滚动区之外',
+  appSource.indexOf('className="app-footer"') > appSource.indexOf('className="app-body"'),
+  `${appSource.indexOf('className="app-body"')} → ${appSource.indexOf('className="app-footer"')}`)
+check('两个更新开关都在界面上',
+  appSource.includes('启动时自动检查更新') && appSource.includes('发现新版本后自动下载'))
+check('自动下载开关受自动检查约束',
+  appSource.includes('disabled={!autoCheck}'))
+check('preload 暴露了更新接口',
+  ['update:get', 'update:check', 'update:download', 'update:install', 'update:open-page'].every((channel) =>
+    preloadSource.includes(channel)))
 
 /* -------------------------------------------------------- 4. 边界与形态 */
 
@@ -2137,7 +2346,27 @@ async function main(): Promise<void> {
 
     const wbAfter = collectSnapshot({ workbuddyDir, cache: sharedWbCache, now: FIXED_NOW })
 
-    check('采集另外三个源之后 WorkBuddy 快照逐字节一致', JSON.stringify(wbBefore) === JSON.stringify(wbAfter))
+    /*
+     * 这里不能断言「快照逐字节一致」：~/.workbuddy/projects 是活的目录，
+     * 两次采集之间只要当前会话往 transcript 写一行，缓存就会失效、结果就会变。
+     * 那是个必然随机红的假指标。真正要守的是——采集别的源不会把
+     * WorkBuddy 的快照弄丢、弄坏、或者串了数据源。
+     */
+    const beforeById = new Map(wbBefore.sessions.map((s) => [s.sessionId, s]))
+    const afterById = new Map(wbAfter.sessions.map((s) => [s.sessionId, s]))
+    check(
+      '采集其它源不会丢会话',
+      [...beforeById.keys()].every((id) => afterById.has(id)),
+      `${beforeById.size} → ${afterById.size}`
+    )
+    check(
+      '既有会话的用量不倒退',
+      [...beforeById.values()].every((s) => {
+        const after = afterById.get(s.sessionId)
+        return after !== undefined && after.calls >= s.calls && after.inputTokens >= s.inputTokens
+      })
+    )
+    check('数据源标记没被串改', wbAfter.kind === 'workbuddy' && wbAfter.source.dbRows >= wbBefore.source.dbRows)
     check('WorkBuddy 的解析缓存没被动过', JSON.stringify([...sharedWbCache.keys()]) === JSON.stringify(wbKeysBefore))
     check(
       'WorkBuddy 缓存里没有别的源的文件',

@@ -78,6 +78,7 @@ export function parseKimiUsageLine(
 
   return {
     traceId: '',
+    conversationRequestId: '',
     sessionId,
     projectDir: workspaceDir,
     model: typeof row.model === 'string' && row.model ? row.model : '未知模型',

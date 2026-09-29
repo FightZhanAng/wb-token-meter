@@ -55,11 +55,14 @@ jobs:
 
       - name: 发布 Release
         if: startsWith(github.ref, 'refs/tags/')
-        # Windows runner 默认 shell 是 pwsh，通配符不会展开，必须显式用 bash
+        # Windows runner 默认 shell 是 pwsh，通配符不会展开，必须显式用 bash。
+        # latest.yml 与 blockmap 不能少：应用内的更新检查先去 Release 拉 latest.yml
+        # 才知道有没有新版本，blockmap 是差分下载用的。
         shell: bash
         run: >
           gh release create "${{ github.ref_name }}"
           release/*-setup.exe release/*-portable.exe
+          release/latest.yml release/*.blockmap
           --generate-notes
 
       - name: 留档构建产物

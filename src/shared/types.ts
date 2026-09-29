@@ -3,6 +3,13 @@
 /** 一次模型调用的用量记录 */
 export interface CallRecord {
   traceId: string
+  /**
+   * 计费键。workbuddy.db 的 credit_json 以它为 key；
+   * 老版本 WorkBuddy 里它和 traceId 同值，新版本两者分离 ——
+   * 只认 traceId 会导致新会话的积分全是 0。
+   * 见 collector.ts 的 billingKey()。
+   */
+  conversationRequestId: string
   sessionId: string
   projectDir: string
   model: string
@@ -155,6 +162,42 @@ export interface QuotaInfo {
   history: UsageSample[]
 }
 
+/* ------------------------------------------------------------ 版本与更新 */
+
+/**
+ * 更新检查的状态。
+ *
+ * `unsupported` 不是错误 —— 开发模式与免安装版本来就装不了更新，
+ * 界面要老老实实说明原因，而不是假装「已是最新」。
+ */
+export type UpdateStatus =
+  | 'unsupported'
+  | 'idle'
+  | 'checking'
+  | 'latest'
+  | 'available'
+  | 'downloading'
+  | 'downloaded'
+  | 'error'
+
+export interface UpdateState {
+  status: UpdateStatus
+  /** 当前运行的版本号 */
+  current: string
+  /** 远端发现的新版本号；未知时为空串 */
+  latest: string
+  /** 下载进度 0..100，仅 status === 'downloading' 时有意义 */
+  percent: number
+  /** 失败原因或「不支持」的原因；状态正常时为空串 */
+  message: string
+  /** 最近一次检查完成的时刻（毫秒）；从未查过为 0 */
+  checkedAt: number
+  /** 新版本的更新说明，可能为空 */
+  notes: string
+  /** 能否直接在本应用内下载 —— false 时只能去发布页手动下 */
+  canDownload: boolean
+}
+
 /* ------------------------------------------------------------ 外观 */
 
 /**
@@ -177,6 +220,10 @@ export interface Settings {
   source: SourceKind
   /** 界面外观 */
   theme: ThemeMode
+  /** 启动后自动检查更新（之后每 24 小时一次）；关掉就只能手动点「检查更新」 */
+  autoCheckUpdate: boolean
+  /** 发现新版本后自动下载；关掉只做提示，自己去发布页下 */
+  autoDownloadUpdate: boolean
   /** 是否在桌面显示胶囊 */
   floatEnabled: boolean
   /** 胶囊整体不透明度，0.3 ~ 1 */

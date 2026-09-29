@@ -55,7 +55,8 @@ export function localDate(timestamp: number): string {
  *     inputTokensDetails:  [{ cached_tokens }],
  *     outputTokensDetails: [{ reasoning_tokens }]
  *   }
- * 同层的 providerData.traceId 是通往积分明细的钥匙，model 是计费模型名。
+ * 同层的 providerData.traceId / conversationRequestId 是通往积分明细的钥匙，
+ * model 是计费模型名 —— 见 billingKey() 里的口径说明。
  *
  * 绝大多数行不含 usage（file-history-snapshot / reasoning / function_call_result 等），
  * 所以先用字符串探测快速跳过，避免无谓的 JSON.parse。
@@ -96,6 +97,8 @@ export function parseUsageLine(line: string, sessionId: string, projectDir: stri
 
   return {
     traceId: typeof provider.traceId === 'string' ? provider.traceId : '',
+    conversationRequestId:
+      typeof provider.conversationRequestId === 'string' ? provider.conversationRequestId : '',
     sessionId,
     projectDir,
     model:
@@ -108,6 +111,37 @@ export function parseUsageLine(line: string, sessionId: string, projectDir: stri
     cachedTokens: sumDetail(usage.inputTokensDetails, 'cached_tokens'),
     reasoningTokens: sumDetail(usage.outputTokensDetails, 'reasoning_tokens')
   }
+}
+
+/* ------------------------------------------------------------ 计费键 */
+
+/**
+ * 一次调用对应哪个计费回合。
+ *
+ * workbuddy.db 的 `session_usage.credit_json` 是一张 `{计费键: 积分}` 表。
+ * 2026-09 前后 WorkBuddy 把这张表的 key 从 `traceId` 换成了
+ * `conversationRequestId`：
+ *
+ * - 老版本：两个字段同值，拿 traceId 去查能查到；
+ * - 新版本：两者分离，拿 traceId 去查**永远查不到** ——
+ *   症状就是「今日 0 积分、新会话 0 积分」，而累计总额又是对的。
+ *
+ * 所以优先用 conversationRequestId，缺失时退回 traceId（老数据兼容）。
+ */
+export function billingKey(call: CallRecord): string {
+  return call.conversationRequestId || call.traceId
+}
+
+/**
+ * 从 credit_json 里取这次调用的积分。
+ * 两个键都试一遍，避免数据处在两种口径之间的过渡期时漏掉。
+ */
+function creditOf(credits: Record<string, number>, call: CallRecord): number | null {
+  for (const key of [call.conversationRequestId, call.traceId]) {
+    const value = key ? credits[key] : undefined
+    if (typeof value === 'number' && Number.isFinite(value)) return value
+  }
+  return null
 }
 
 /* ------------------------------------------------------------ 文件级解析 */
@@ -178,7 +212,21 @@ export function scanTranscripts(workbuddyDir: string, cache?: ParseCache): Scann
   const root = join(workbuddyDir, 'projects')
   if (!existsSync(root)) return []
 
-  const out: ScannedTranscript[] = []
+  // 同一个会话常常既有 <id>.jsonl 又有 <id>/subagents/*.jsonl ——
+  // 必须并成一条，否则会话列表里会出现两条同 id 的记录、积分还被劈成两半。
+  const bySession = new Map<string, ScannedTranscript>()
+
+  const merge = (sessionId: string, projectDir: string, calls: CallRecord[], title: string): void => {
+    const existing = bySession.get(sessionId)
+    if (existing) {
+      if (calls.length) existing.calls.push(...calls)
+      if (!existing.title && title) existing.title = title
+      return
+    }
+    // 拷贝一份：calls 可能直接来自解析缓存，往后 push 会污染缓存
+    bySession.set(sessionId, { sessionId, projectDir, calls: calls.slice(), title })
+  }
+
   let projects: string[] = []
   try {
     projects = readdirSync(root)
@@ -199,14 +247,13 @@ export function scanTranscripts(workbuddyDir: string, cache?: ParseCache): Scann
       if (entry.isFile() && entry.name.endsWith('.jsonl')) {
         const sessionId = entry.name.slice(0, -'.jsonl'.length)
         const parsed = parseTranscriptFile(join(projectPath, entry.name), sessionId, projectDir, cache)
-        if (parsed.calls.length || parsed.title) {
-          out.push({ sessionId, projectDir, calls: parsed.calls, title: parsed.title })
-        }
+        merge(sessionId, projectDir, parsed.calls, parsed.title)
         continue
       }
 
       // <sessionId>/subagents/agent-*.jsonl —— 子代理的调用也算真实消耗，
-      // 归到父会话名下，但拿不到 ai-title（标题仍以父会话为准）
+      // 归到父会话名下，但拿不到 ai-title（标题仍以父会话为准）。
+      // 里面可能还有 agent-xxx/tool-results/ 这类目录，不含 jsonl，不用管。
       if (entry.isDirectory()) {
         const subDir = join(projectPath, entry.name, 'subagents')
         if (!existsSync(subDir)) continue
@@ -220,14 +267,12 @@ export function scanTranscripts(workbuddyDir: string, cache?: ParseCache): Scann
         for (const name of subFiles) {
           merged.push(...parseTranscriptFile(join(subDir, name), entry.name, projectDir, cache).calls)
         }
-        if (merged.length) {
-          out.push({ sessionId: entry.name, projectDir, calls: merged, title: '' })
-        }
+        merge(entry.name, projectDir, merged, '')
       }
     }
   }
 
-  return out
+  return [...bySession.values()].filter((session) => session.calls.length || session.title)
 }
 
 /* -------------------------------------------------------------- 数据库 */
@@ -331,6 +376,40 @@ function readDatabase(dbPath: string): DatabaseRead {
 
 /* -------------------------------------------------------------- 聚合 */
 
+/** 一个计费回合：一次结算，可能包含多轮工具调用 */
+interface BillingRound {
+  sessionId: string
+  call: CallRecord
+  credit: number
+}
+
+/**
+ * 把 transcript 摊平成计费回合列表。
+ *
+ * 同一个计费键在一个会话里只算一次，否则「一回合多轮工具调用」会把积分
+ * 放大好几倍。没有任何积分记录的回合直接跳过 —— 调用方只关心算得出钱的部分。
+ */
+function billingRounds(
+  transcripts: ScannedTranscript[],
+  usageMeta: Map<string, UsageRow>
+): BillingRound[] {
+  const out: BillingRound[] = []
+  for (const transcript of transcripts) {
+    const usageRow = usageMeta.get(transcript.sessionId)
+    if (!usageRow) continue
+    const seen = new Set<string>()
+    for (const call of transcript.calls) {
+      const key = billingKey(call)
+      if (!key || seen.has(key)) continue
+      const credit = creditOf(usageRow.credits, call)
+      if (credit === null) continue
+      seen.add(key)
+      out.push({ sessionId: transcript.sessionId, call, credit })
+    }
+  }
+  return out
+}
+
 export interface CollectOptions {
   workbuddyDir: string
   cache?: ParseCache
@@ -383,8 +462,9 @@ export function collectSnapshot(options: CollectOptions): Snapshot {
   const todayBundle: TokenBundle & { credits: number } = { ...emptyBundle(), credits: 0 }
   const todayKey = localDate(now)
 
-  // 同一个 traceId 的积分只能计一次 —— 子代理与父会话可能重复出现
-  const creditedTraces = new Set<string>()
+  // 同一个计费回合的积分只能计一次 —— 一个 conversationRequestId 下有多轮工具调用，
+  // 子代理与父会话也可能重复出现
+  const creditedKeys = new Set<string>()
 
   for (const transcript of transcripts) {
     const meta = sessionMeta.get(transcript.sessionId)
@@ -392,21 +472,26 @@ export function collectSnapshot(options: CollectOptions): Snapshot {
     const credits = usageRow?.credits ?? {}
 
     const bundle = emptyBundle()
-    const traceIds = new Set<string>()
-    let matched = 0
+    const billingKeys = new Set<string>()
+    const hitKeys = new Set<string>()
     let creditsForSession = 0
     let lastActivity = meta?.updatedAt ?? 0
 
     for (const call of transcript.calls) {
       addCall(bundle, call)
       if (call.timestamp > lastActivity) lastActivity = call.timestamp
-      if (call.traceId) traceIds.add(call.traceId)
 
-      if (call.traceId && !creditedTraces.has(call.traceId)) {
-        const value = credits[call.traceId]
-        if (typeof value === 'number') {
-          creditedTraces.add(call.traceId)
-          creditsForSession += value
+      // 计费回合：同一个键只结算一次，而且只认数据库里真有记录的那些
+      const key = billingKey(call)
+      if (key) {
+        billingKeys.add(key)
+        const value = creditOf(credits, call)
+        if (value !== null) {
+          hitKeys.add(key)
+          if (!creditedKeys.has(key)) {
+            creditedKeys.add(key)
+            creditsForSession += value
+          }
         }
       }
 
@@ -429,18 +514,15 @@ export function collectSnapshot(options: CollectOptions): Snapshot {
       addCall(model, call)
     }
 
-    for (const traceId of traceIds) {
-      if (typeof credits[traceId] === 'number') matched += 1
-    }
-
     totals.calls += bundle.calls
     totals.inputTokens += bundle.inputTokens
     totals.outputTokens += bundle.outputTokens
     totals.cachedTokens += bundle.cachedTokens
     totals.reasoningTokens += bundle.reasoningTokens
     attributedCredits += creditsForSession
-    totals.traces += traceIds.size
-    totals.matchedTraces += matched
+    totals.traces += billingKeys.size
+    // 命中数：这个会话里能从数据库取到积分的计费回合个数
+    totals.matchedTraces += hitKeys.size
     totals.sessions += 1
 
     const projectKey = transcript.projectDir
@@ -464,8 +546,8 @@ export function collectSnapshot(options: CollectOptions): Snapshot {
       model: meta?.model || mostFrequentModel(transcript.calls),
       status: meta?.status ?? '',
       credits: round2(creditsForSession),
-      totalTraces: traceIds.size,
-      matchedTraces: matched,
+      totalTraces: billingKeys.size,
+      matchedTraces: hitKeys.size,
       contextUsed: usageRow?.used ?? 0,
       contextSize: usageRow?.size ?? 0,
       lastActivity,
@@ -473,40 +555,25 @@ export function collectSnapshot(options: CollectOptions): Snapshot {
     })
   }
 
-  // 模型粒度的积分：把该模型涉及的 traceId 到会话积分表里取值。
-  // 一个 traceId 下有多轮调用，必须去重，否则积分会被乘以调用次数。
+  // 模型粒度与日粒度的积分都基于「计费回合」：把 transcript 按计费键去重，
+  // 再带上数据库里这一回合的积分。一个回合下有多轮工具调用，
+  // 直接逐次累加会把积分乘以调用次数。
+  const rounds = billingRounds(transcripts, usageMeta)
+
   for (const [modelName, stat] of modelMap) {
     let credits = 0
-    for (const transcript of transcripts) {
-      const usageRow = usageMeta.get(transcript.sessionId)
-      if (!usageRow) continue
-      const seen = new Set<string>()
-      for (const call of transcript.calls) {
-        if (call.model !== modelName || !call.traceId || seen.has(call.traceId)) continue
-        seen.add(call.traceId)
-        const value = usageRow.credits[call.traceId]
-        if (typeof value === 'number') credits += value
-      }
+    for (const round of rounds) {
+      if (round.call.model === modelName) credits += round.credit
     }
     stat.credits = round2(credits)
     stat.sessions = countSessionsForModel(transcripts, modelName)
   }
 
-  // 日粒度的积分
-  for (const transcript of transcripts) {
-    const usageRow = usageMeta.get(transcript.sessionId)
-    if (!usageRow) continue
-    const seen = new Set<string>()
-    for (const call of transcript.calls) {
-      if (!call.traceId || seen.has(call.traceId)) continue
-      seen.add(call.traceId)
-      const value = usageRow.credits[call.traceId]
-      if (typeof value !== 'number') continue
-      const dayKey = localDate(call.timestamp)
-      const day = dayMap.get(dayKey)
-      if (day) day.credits += value
-      if (dayKey === todayKey) todayBundle.credits += value
-    }
+  for (const round of rounds) {
+    const dayKey = localDate(round.call.timestamp)
+    const day = dayMap.get(dayKey)
+    if (day) day.credits += round.credit
+    if (dayKey === todayKey) todayBundle.credits += round.credit
   }
 
   for (const day of dayMap.values()) day.credits = round2(day.credits)
@@ -515,6 +582,12 @@ export function collectSnapshot(options: CollectOptions): Snapshot {
   totals.attributedCredits = round2(attributedCredits)
   totals.unattributedCredits = round2(Math.max(0, dbCreditTotal - attributedCredits))
   totals.dbTraces = creditTotals.size
+
+  // 数据库里有积分、本地却一条都对不上 —— 大概率是 WorkBuddy 又改了计费键的口径。
+  // 这曾经真实发生过（traceId → conversationRequestId），值得留个显式提示。
+  if (dbCreditTotal > 0 && attributedCredits === 0 && transcripts.length > 0) {
+    warnings.push('积分明细与本地记录口径不一致，积分可能显示为 0')
+  }
 
   // 当前活跃会话：优先「正在工作」的，其次最近活动的
   const activeSource =

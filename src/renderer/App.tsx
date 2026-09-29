@@ -7,6 +7,7 @@ import type {
   Snapshot,
   SourceKind,
   ThemeMode,
+  UpdateState,
   UsageSample
 } from '@shared/types'
 import {
@@ -31,6 +32,7 @@ import {
   tokenPerCredit
 } from '@shared/format'
 import { describeReset, quotaLevel, quotaWindowLabel } from '@shared/opencode-quota'
+import { updateBusy, updateNeedsAttention, updateStatusText } from '@shared/update'
 
 /* ------------------------------------------------------------ 小工具 */
 
@@ -550,6 +552,9 @@ export default function App(): JSX.Element {
   const [error, setError] = useState<string>('')
   const [busy, setBusy] = useState(false)
   const [now, setNow] = useState(() => Date.now())
+  const [update, setUpdate] = useState<UpdateState | null>(null)
+  const [autoCheck, setAutoCheck] = useState(true)
+  const [autoDownload, setAutoDownload] = useState(false)
 
   const load = useCallback(async (force: boolean) => {
     const api = window.meter
@@ -615,17 +620,24 @@ export default function App(): JSX.Element {
         .then((settings) => {
           setSource(settings.source)
           setTheme(settings.theme)
+          setAutoCheck(settings.autoCheckUpdate)
+          setAutoDownload(settings.autoDownloadUpdate)
         })
         .catch(() => undefined)
+      void api.getUpdate().then(setUpdate).catch(() => undefined)
       const offSnapshot = api.onSnapshot((next) => setSnapshot(next))
       const offSettings = api.onSettings((settings) => {
         setSource(settings.source)
         setTheme(settings.theme)
+        setAutoCheck(settings.autoCheckUpdate)
+        setAutoDownload(settings.autoDownloadUpdate)
       })
+      const offUpdate = api.onUpdate((next) => setUpdate(next))
       const timer = window.setInterval(() => setNow(Date.now()), 30_000)
       return () => {
         offSnapshot()
         offSettings()
+        offUpdate()
         window.clearInterval(timer)
       }
     } catch (cause) {
@@ -633,6 +645,38 @@ export default function App(): JSX.Element {
       return
     }
   }, [load])
+
+  /** 更新按钮的统一入口 —— 主进程会把最新状态回抛，顺便也广播给托盘 */
+  const runUpdateAction = useCallback(async (action: 'check' | 'download' | 'install' | 'page') => {
+    const api = window.meter
+    if (!api) return
+    try {
+      if (action === 'check') setUpdate(await api.checkUpdate())
+      else if (action === 'download') setUpdate(await api.downloadUpdate())
+      else if (action === 'install') setUpdate(await api.installUpdate())
+      else await api.openReleasePage()
+    } catch (cause) {
+      setError(String(cause))
+    }
+  }, [])
+
+  const setUpdateFlag = useCallback(
+    async (patch: { autoCheckUpdate?: boolean; autoDownloadUpdate?: boolean }) => {
+      const api = window.meter
+      if (!api) return
+      // 先点亮开关，主进程落盘 + 广播之后再以它为准校正回来
+      if (patch.autoCheckUpdate !== undefined) setAutoCheck(patch.autoCheckUpdate)
+      if (patch.autoDownloadUpdate !== undefined) setAutoDownload(patch.autoDownloadUpdate)
+      try {
+        const saved = await api.updateSettings(patch)
+        setAutoCheck(saved.autoCheckUpdate)
+        setAutoDownload(saved.autoDownloadUpdate)
+      } catch (cause) {
+        setError(String(cause))
+      }
+    },
+    []
+  )
 
   const totals = snapshot?.totals
   const today = snapshot?.today
@@ -746,6 +790,20 @@ export default function App(): JSX.Element {
   const sizeKnown = (snapshot?.active?.size ?? 0) > 0
   const todayTokens = (today?.inputTokens ?? 0) + (today?.outputTokens ?? 0)
   const newTokens = Math.max(0, (today?.inputTokens ?? 0) - (today?.cachedTokens ?? 0))
+
+  // 主进程还没回过状态时先摆一个空壳，免得底栏先闪一下再填
+  const updateState: UpdateState = update ?? {
+    status: 'idle',
+    current: '',
+    latest: '',
+    percent: 0,
+    message: '',
+    checkedAt: 0,
+    notes: '',
+    canDownload: false
+  }
+  const updateWorking = updateBusy(updateState.status)
+  const updateAlerts = updateNeedsAttention(updateState.status)
 
   return (
     <div className="app">
@@ -982,6 +1040,80 @@ export default function App(): JSX.Element {
           </div>
         ) : null}
       </div>
+
+      {/*
+        底栏固定在窗口底部（body 才是滚动区），版本号与更新状态始终看得见 ——
+        埋进滚动内容里就等于藏起来了，而「我这是哪个版本」正是要找的时候才看的信息。
+      */}
+      <footer className="app-footer">
+        <div className="foot-row">
+          <span className="foot-version" title="当前运行的版本">
+            v{updateState.current || '—'}
+          </span>
+          <span
+            className={`foot-state${updateAlerts ? ' alert' : ''}`}
+            data-status={updateState.status}
+            title={updateState.notes || undefined}
+          >
+            {updateStatusText(updateState)}
+          </span>
+
+          <span className="foot-actions">
+            {updateWorking ? (
+              <button type="button" className="ghost" disabled>
+                {updateState.status === 'downloading' ? '下载中…' : '检查中…'}
+              </button>
+            ) : updateState.status === 'downloaded' ? (
+              <button type="button" className="primary" onClick={() => void runUpdateAction('install')}>
+                重启并安装
+              </button>
+            ) : updateState.status === 'available' && updateState.canDownload ? (
+              <button type="button" className="primary" onClick={() => void runUpdateAction('download')}>
+                下载更新
+              </button>
+            ) : updateState.status === 'unsupported' ? (
+              <button type="button" className="ghost" onClick={() => void runUpdateAction('page')}>
+                打开发布页
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="ghost"
+                title={updateState.message || undefined}
+                onClick={() => void runUpdateAction('check')}
+              >
+                检查更新
+              </button>
+            )}
+
+            {updateState.status === 'available' && updateState.canDownload ? (
+              <button type="button" className="ghost" onClick={() => void runUpdateAction('page')}>
+                发布页
+              </button>
+            ) : null}
+          </span>
+        </div>
+
+        <div className="foot-row switches">
+          <label className="switch">
+            <input
+              type="checkbox"
+              checked={autoCheck}
+              onChange={(event) => void setUpdateFlag({ autoCheckUpdate: event.target.checked })}
+            />
+            启动时自动检查更新
+          </label>
+          <label className={`switch${autoCheck ? '' : ' muted'}`}>
+            <input
+              type="checkbox"
+              checked={autoDownload}
+              disabled={!autoCheck}
+              onChange={(event) => void setUpdateFlag({ autoDownloadUpdate: event.target.checked })}
+            />
+            发现新版本后自动下载
+          </label>
+        </div>
+      </footer>
     </div>
   )
 }

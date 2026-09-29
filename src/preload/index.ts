@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { Settings, Snapshot } from '../shared/types'
+import type { Settings, Snapshot, UpdateState } from '../shared/types'
 
 const api = {
   /* 用量数据 */
@@ -37,6 +37,20 @@ const api = {
     ipcRenderer.on('settings', listener)
     return () => {
       ipcRenderer.off('settings', listener)
+    }
+  },
+
+  /* 版本与更新 */
+  getUpdate: (): Promise<UpdateState> => ipcRenderer.invoke('update:get') as Promise<UpdateState>,
+  checkUpdate: (): Promise<UpdateState> => ipcRenderer.invoke('update:check') as Promise<UpdateState>,
+  downloadUpdate: (): Promise<UpdateState> => ipcRenderer.invoke('update:download') as Promise<UpdateState>,
+  installUpdate: (): Promise<UpdateState> => ipcRenderer.invoke('update:install') as Promise<UpdateState>,
+  openReleasePage: (): Promise<string> => ipcRenderer.invoke('update:open-page') as Promise<string>,
+  onUpdate: (handler: (state: UpdateState) => void): (() => void) => {
+    const listener = (_event: unknown, state: UpdateState): void => handler(state)
+    ipcRenderer.on('update', listener)
+    return () => {
+      ipcRenderer.off('update', listener)
     }
   }
 }

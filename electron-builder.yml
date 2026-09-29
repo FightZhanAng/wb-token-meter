@@ -6,6 +6,15 @@ directories:
   buildResources: resources
   output: release
 
+# 更新源的声明。它只影响两处：
+#   1. 打包时生成 resources/app-update.yml —— electron-updater 靠它知道去哪儿查版本
+#   2. 生成 latest.yml（版本清单），CI 会连同安装包一起传上 Release
+# 真正上传由 CI 的 gh release create 负责，dist 脚本固定带 --publish never。
+publish:
+  provider: github
+  owner: FightZhanAng
+  repo: wb-token-meter
+
 files:
   - out/**/*
   - package.json

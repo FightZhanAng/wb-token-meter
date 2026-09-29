@@ -178,6 +178,7 @@ export function collectZcodeSnapshot(options: ZcodeCollectOptions): Snapshot {
     const call: CallRecord = {
       // ZCode 的 trace_id 是给自家链路追踪用的；这里没有积分要对账，不需要带上
       traceId: '',
+      conversationRequestId: '',
       sessionId: row.sessionId,
       projectDir: meta.get(row.sessionId)?.projectId || row.sessionId,
       model: row.model,

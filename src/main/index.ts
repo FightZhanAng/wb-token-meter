@@ -9,7 +9,7 @@ import { collectKimiSnapshot, type KimiParseCache } from '../shared/kimi-collect
 import { collectMimoSnapshot } from '../shared/mimo-collector'
 import { collectReasonixSnapshot, type ReasonixParseCache } from '../shared/reasonix-collector'
 import { collectZcodeSnapshot } from '../shared/zcode-collector'
-import type { FloatState, Settings, Snapshot, SourceKind, ThemeMode } from '../shared/types'
+import type { FloatState, Settings, Snapshot, SourceKind, ThemeMode, UpdateState } from '../shared/types'
 import { FloatWindow } from './float'
 import { OpencodeUsage } from './opencode-usage'
 import {
@@ -28,6 +28,7 @@ import {
 } from './paths'
 import { DEFAULT_SETTINGS, SettingsStore } from './settings'
 import { TrayController } from './tray'
+import { UpdateController } from './updater'
 
 /* ------------------------------------------------------------ 冒烟自检 */
 
@@ -35,6 +36,17 @@ import { TrayController } from './tray'
 // 只靠 stdout 经常什么都看不到，"跑没跑起来"都判断不了。
 const SMOKE = process.env['WB_TOKEN_METER_SMOKE'] === '1'
 const SMOKE_EXIT = process.env['WB_TOKEN_METER_SMOKE_EXIT'] === '1'
+
+// 自检各步骤之间全是 await（截图、executeJavaScript）。渲染进程一旦无响应
+// ——实测过的最常见诱因是 Chromium 的网络服务进程崩溃——这些 await 会永久挂起，
+// 进程既不报错也不退出，调用方只能一直等。正常一轮约 40 秒，给到 2 分钟足够宽松。
+const SMOKE_TIMEOUT_MS = 120_000
+
+// 自检时给更新检查注入一个假版本号：既不真去打网络，又能让更新界面被完整渲染到。
+// 必须在 ensureUpdater() 之前设 —— UpdateController 在构造时就把这个值读走了。
+if (SMOKE && !process.env['WB_TOKEN_METER_FAKE_UPDATE']) {
+  process.env['WB_TOKEN_METER_FAKE_UPDATE'] = '9.9.9'
+}
 
 function smoke(name: string, payload: unknown): void {
   if (!SMOKE) return
@@ -61,10 +73,14 @@ smoke('boot', {
 const APP_ID = app.isPackaged ? 'com.tomcato.wb-token-meter' : 'com.tomcato.wb-token-meter.dev'
 const REFRESH_MS = 20_000
 
+/** 发布页 —— 「打开发布页」与更新检查失败时的兜底都指这里 */
+const RELEASE_PAGE = 'https://github.com/FightZhanAng/wb-token-meter/releases'
+
 let mainWindow: BrowserWindow | null = null
 let tray: TrayController | null = null
 let floatWindow: FloatWindow | null = null
 let settingsStore: SettingsStore | null = null
+let updater: UpdateController | null = null
 let isQuitting = false
 let snapshot: Snapshot | null = null
 /** 各数据源各有一份解析缓存 —— 切换数据源不能把对方的增量缓存冲掉 */
@@ -213,6 +229,42 @@ function broadcastSettings(settings: Settings): void {
   floatWindow?.send('settings', settings)
 }
 
+/* ------------------------------------------------------------ 更新 */
+
+function broadcastUpdate(state: UpdateState): void {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('update', state)
+  // 托盘菜单里有版本号与更新动作，状态一变就要重建
+  tray?.notifyRefreshed()
+}
+
+function currentUpdate(): UpdateState {
+  return (
+    updater?.describe() ?? {
+      status: 'unsupported',
+      current: '',
+      latest: '',
+      percent: 0,
+      message: '更新模块未初始化',
+      checkedAt: 0,
+      notes: '',
+      canDownload: false
+    }
+  )
+}
+
+function ensureUpdater(): UpdateController {
+  if (!updater) {
+    updater = new UpdateController({
+      getAutoCheck: () => settingsStore?.settings.autoCheckUpdate ?? DEFAULT_SETTINGS.autoCheckUpdate,
+      getAutoDownload: () =>
+        settingsStore?.settings.autoDownloadUpdate ?? DEFAULT_SETTINGS.autoDownloadUpdate,
+      onChange: (state) => broadcastUpdate(state),
+      releasePage: RELEASE_PAGE
+    })
+  }
+  return updater
+}
+
 /** 改设置 -> 落盘 -> 广播 -> 同步窗口。一处收口，免得漏掉某条链路 */
 function patchSettings(patch: Partial<Settings>): void {
   const before = settingsStore?.settings.source
@@ -228,6 +280,14 @@ function patchSettings(patch: Partial<Settings>): void {
   if (patch.theme) {
     applyTheme(next.theme)
     floatWindow?.syncTheme()
+  }
+  // 更新开关：改 autoDownload 要立刻同步给 electron-updater（开着且有新版待下就马上开始）；
+  // 刚把自动检查打开、且这次开机还没查过，就顺手安排一次
+  if (patch.autoCheckUpdate !== undefined || patch.autoDownloadUpdate !== undefined) {
+    updater?.applySettings()
+    if (patch.autoCheckUpdate === true && currentUpdate().status === 'idle') {
+      updater?.scheduleStartupCheck()
+    }
   }
 }
 
@@ -327,6 +387,13 @@ function bootstrap(): void {
       app.quit()
     },
 
+    /* 版本与更新 */
+    getUpdate: () => currentUpdate(),
+    onCheckUpdate: () => ensureUpdater().check(),
+    onDownloadUpdate: () => ensureUpdater().download(),
+    onInstallUpdate: () => ensureUpdater().install(),
+    onOpenReleasePage: () => ensureUpdater().openReleasePage(),
+
     /* 数据源 */
     getSource: () => currentSource(),
     onSetSource: (kind) => patchSettings({ source: kind }),
@@ -366,12 +433,27 @@ function bootstrap(): void {
   // 按设置决定胶囊是否出现；自检时强制显示，否则测不到
   if (SMOKE || settingsStore.settings.floatEnabled) floatWindow.show()
 
+  // 更新检查安排在数据采集之后：开机那几秒别去抢磁盘和网络
+  ensureUpdater()
+  updater?.scheduleStartupCheck()
+  updater?.startPeriodicCheck()
+
   refresh()
 
   const timer = setInterval(refresh, REFRESH_MS)
   timer.unref?.()
 
   if (SMOKE) {
+    // 看门狗：自检挂死时留下证据并主动退出，而不是让调用方干等
+    const watchdog = setTimeout(() => {
+      smoke('timeout', { limit: SMOKE_TIMEOUT_MS, at: Date.now() })
+      if (SMOKE_EXIT) {
+        isQuitting = true
+        app.quit()
+      }
+    }, SMOKE_TIMEOUT_MS)
+    watchdog.unref?.()
+
     setTimeout(async () => {
       // 无头环境里，截图 + DOM 度量是唯一能确认「界面真的画出来了」的手段 ——
       // 窗口 isVisible() 为 true 也可能是空白（工具环境常见，见项目 skill 坑 8）
@@ -545,6 +627,79 @@ function bootstrap(): void {
           smoke('theme', { before: themeBefore, shots: themeShots })
           patchSettings({ theme: themeBefore })
           await new Promise((resolve) => setTimeout(resolve, 400))
+
+          /* 底栏的版本与更新：点「检查更新」-> 发现新版本 -> 点「下载更新」-> 已就绪。
+             假版本号由模块顶层的 WB_TOKEN_METER_FAKE_UPDATE 注入，全程不走网络。 */
+          const settingsBeforeUpdate = { ...(settingsStore?.settings ?? DEFAULT_SETTINGS) }
+
+          const readFooter = async (): Promise<unknown> =>
+            win.webContents.executeJavaScript(
+              `(() => {
+                 const footer = document.querySelector('.app-footer')
+                 const box = footer ? footer.getBoundingClientRect() : null
+                 return {
+                   version: document.querySelector('.foot-version')?.textContent || '',
+                   state: document.querySelector('.foot-state')?.textContent || '',
+                   status: document.querySelector('.foot-state')?.dataset.status || '',
+                   actions: [...document.querySelectorAll('.foot-actions button')].map((el) => el.textContent.trim()),
+                   switches: [...document.querySelectorAll('.foot-row.switches .switch')].map((el) => ({
+                     label: el.textContent.trim(),
+                     checked: el.querySelector('input') ? el.querySelector('input').checked : null,
+                     disabled: el.querySelector('input') ? el.querySelector('input').disabled : null
+                   })),
+                   // 底栏是固定的一条，必须落在视口内且贴着下沿
+                   footer: box
+                     ? { top: Math.round(box.top), bottom: Math.round(box.bottom), viewport: window.innerHeight }
+                     : null
+                 }
+               })()`
+            )
+
+          const clickFooterButton = async (label: string): Promise<void> => {
+            await win.webContents.executeJavaScript(
+              `(() => {
+                 const btn = [...document.querySelectorAll('.foot-actions button')]
+                   .find((el) => el.textContent.trim() === ${JSON.stringify(label)})
+                 if (btn) btn.click()
+               })()`
+            )
+          }
+
+          const footerIdle = await readFooter()
+          await clickFooterButton('检查更新')
+          await new Promise((resolve) => setTimeout(resolve, 700))
+          const footerAvailable = await readFooter()
+          await clickFooterButton('下载更新')
+          await new Promise((resolve) => setTimeout(resolve, 700))
+          const footerDownloaded = await readFooter()
+          writeFileSync(join(dir, 'window-update.png'), (await win.webContents.capturePage()).toPNG())
+
+          // 开关要真的落到设置文件里，而不是只在界面上动一下
+          const autoCheckWas = settingsStore?.settings.autoCheckUpdate ?? true
+          await win.webContents.executeJavaScript(
+            `(() => {
+               const box = document.querySelector('.foot-row.switches .switch input')
+               if (box) box.click()
+             })()`
+          )
+          await new Promise((resolve) => setTimeout(resolve, 400))
+          const footerAfterToggle = await readFooter()
+
+          smoke('update', {
+            idle: footerIdle,
+            available: footerAvailable,
+            downloaded: footerDownloaded,
+            afterToggle: footerAfterToggle,
+            autoCheck: { was: autoCheckWas, now: settingsStore?.settings.autoCheckUpdate },
+            state: currentUpdate()
+          })
+
+          // 自检动过的设置全部还原，别留给用户
+          patchSettings({
+            autoCheckUpdate: settingsBeforeUpdate.autoCheckUpdate,
+            autoDownloadUpdate: settingsBeforeUpdate.autoDownloadUpdate
+          })
+          await new Promise((resolve) => setTimeout(resolve, 300))
         }
 
         // 桌面胶囊单独截一张，并回报 DOM 度量
@@ -599,6 +754,7 @@ function bootstrap(): void {
         trayCreated: tray !== null,
         float: currentFloatState(),
         settings: settingsStore?.settings ?? null,
+        update: currentUpdate(),
         snapshot: snapshot
           ? {
               kind: snapshot.kind,
@@ -616,6 +772,7 @@ function bootstrap(): void {
             }
           : null
       })
+      clearTimeout(watchdog)
       if (SMOKE_EXIT) {
         isQuitting = true
         app.quit()
@@ -677,3 +834,23 @@ ipcMain.on('float:move', (_event, dx: unknown, dy: unknown) => {
 })
 ipcMain.on('float:open-panel', () => showMainWindow())
 ipcMain.on('float:context-menu', () => tray?.popUp())
+
+/* ---- 版本与更新 ---- */
+
+ipcMain.handle('update:get', () => currentUpdate())
+ipcMain.handle('update:check', () => {
+  ensureUpdater().check()
+  return currentUpdate()
+})
+ipcMain.handle('update:download', () => {
+  ensureUpdater().download()
+  return currentUpdate()
+})
+ipcMain.handle('update:install', () => {
+  ensureUpdater().install()
+  return currentUpdate()
+})
+ipcMain.handle('update:open-page', () => {
+  ensureUpdater().openReleasePage()
+  return RELEASE_PAGE
+})

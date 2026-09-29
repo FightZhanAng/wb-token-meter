@@ -379,6 +379,109 @@ button:disabled {
   flex-direction: column;
 }
 
+/* ------------------------------------------------------------ 底轨 */
+
+/*
+ * 版本与更新固定在窗口底部。滚动区是 .app-body，所以这一行永远看得见 ——
+ * 「我这是哪个版本」正是要找的时候才看的信息，埋进滚动内容里等于藏起来。
+ * 底色和机头同一档，语义上就是仪器的顶轨 / 底轨。
+ */
+.app-footer {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 8px 14px 9px;
+  background: var(--sheet-2);
+  border-top: 1px solid var(--rule);
+}
+
+.foot-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* 版本号用等宽字：数字对齐，一眼能和别的版本号比 */
+.foot-version {
+  flex: none;
+  font-family: var(--font-num);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  color: var(--ink);
+}
+
+.foot-state {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--ink-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 有新版本可装时用记录笔色 —— 那正是「现在要做的事」 */
+.foot-state.alert {
+  color: var(--pen);
+}
+
+.foot-state[data-status='error'] {
+  color: var(--alarm);
+}
+
+.foot-actions {
+  flex: none;
+  display: flex;
+  gap: 6px;
+}
+
+.foot-actions button {
+  font-size: 11px;
+  padding: 3px 9px;
+}
+
+.foot-actions .primary {
+  border-color: var(--pen);
+  color: var(--pen);
+}
+
+.foot-actions .primary:hover:not(:disabled) {
+  background: var(--pen-wash);
+  border-color: var(--pen);
+}
+
+.foot-row.switches {
+  gap: 14px;
+}
+
+.switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--ink-2);
+  cursor: pointer;
+}
+
+/* 自动检查关掉时，下面那个「自动下载」是跟着失效的，得看起来就不同 */
+.switch.muted {
+  color: var(--ink-3);
+}
+
+.switch input[type='checkbox'] {
+  width: 13px;
+  height: 13px;
+  margin: 0;
+  accent-color: var(--pen);
+  cursor: inherit;
+}
+
+.switch input[type='checkbox']:disabled {
+  cursor: default;
+}
+
 /*
  * 一个通道。左边窄栏写通道名、右边放数据，中间那条竖线就是「脊」——
  * 相邻通道的脊首尾相接，整页看起来是一台多通道仪器而不是一叠卡片。

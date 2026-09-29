@@ -13,9 +13,24 @@ OpenCode Go 更特别：它连 token 都不给看，只有订阅额度的占用�
 
 > 非官方第三方工具，与 WorkBuddy、Kimi Code、ZCode、小米、Reasonix、
 > DeepSeek、opencode 官方均无关。
-> 除 OpenCode Go 的额度查询外，所有数据都在本地读取和计算，不修改任何原始文件。
-> 唯一的出站请求是 `GET https://opencode.ai/zen/go/v1/usage`（带本机凭证读来的 key），
-> 只为了拿那三个百分比 —— 不发送任何本地数据。
+> 除 OpenCode Go 的额度查询和更新检查外，所有数据都在本地读取和计算，不修改任何原始文件。
+> 出站请求只有两个：`GET https://opencode.ai/zen/go/v1/usage`（带本机凭证读来的 key，
+> 拿那三个百分比）和更新检查（去本仓库的 Release 拉 `latest.yml`）—— 都不发送任何本地数据。
+
+## 版本与更新
+
+面板底部常驻一条**底轨**（在滚动区之外，始终看得见）：左边是当前版本号，
+中间是更新状态，右边是动作按钮，下面两个开关。托盘菜单里也有版本号和同样的动作。
+
+| 开关 | 默认 | 作用 |
+|---|---|---|
+| 启动时自动检查更新 | 开 | 启动后静默检查一次，之后每 24 小时一次。关掉就只能手动点「检查更新」 |
+| 发现新版本后自动下载 | 关 | 打开后检测到新版本会后台下载，下完提示「重启并安装」；关掉只提示，自己去发布页下 |
+
+安装版可以直接在应用内下载并安装（走 electron-updater 的差分下载）。
+两种形态用不了自动更新，界面会**说明原因**而不是假装「已是最新」：
+开发模式（没有更新配置）与免安装版（portable 没有一个能覆盖的安装目录）。
+这两种情况下底轨只提供「打开发布页」。
 
 ## 下载
 
@@ -35,12 +50,15 @@ OpenCode Go 的额度比例则来自它的在线接口。
 
 | 数据源 | 位置 | 内容 |
 |---|---|---|
-| 会话记录 | `~/.workbuddy/projects/<项目>/<会话id>.jsonl` | 每次模型调用的 `providerData.usage`：输入 / 输出 / 总量 / 缓存命中 / 思考 token，外加模型名与 traceId |
-| 积分明细 | `~/.workbuddy/workbuddy.db` → `session_usage` | `credit_json` = `{traceId: 积分数}`；另有上下文水位 `used / size` |
+| 会话记录 | `~/.workbuddy/projects/<项目>/<会话id>.jsonl` | 每次模型调用的 `providerData.usage`：输入 / 输出 / 总量 / 缓存命中 / 思考 token，外加模型名、traceId 与 conversationRequestId |
+| 积分明细 | `~/.workbuddy/workbuddy.db` → `session_usage` | `credit_json` = `{计费键: 积分数}`；另有上下文水位 `used / size` |
 | 会话元数据 | 同库 `sessions` 表 | 标题、模型、工作目录、状态 |
 
-`providerData.traceId` 是串联三者的钥匙 —— 它同时出现在会话记录和积分明细里，
-所以 token 消耗和积分扣费可以逐回合对上。
+**计费键**以 `conversationRequestId` 为准（缺省时退回 `traceId`）—— 它同时出现在
+会话记录和积分明细里，所以 token 消耗和积分扣费可以逐回合对上。
+这是踩过坑的地方：2026-09 前后 WorkBuddy 把积分明细的 key 从 `traceId` 换成了
+`conversationRequestId`，老版本两者同值、新版本分离；只认 traceId 会出现
+「累计总额对、今日与新会话全 0」。实现见 `collector.ts` 的 `billingKey()`。
 
 ### Kimi Code（只有 token）
 
@@ -257,6 +275,7 @@ pnpm dist          # 打包 Windows 安装包与免安装版到 release/
 | `WB_TOKEN_METER_OPENCODE_KEY` | 直接指定额度查询用的 key（测试用），给了就不读 `auth.json` |
 | `WB_TOKEN_METER_SMOKE=1` | 冒烟自检：把启动状态写到 `%TEMP%\wbtm-smoke\` |
 | `WB_TOKEN_METER_SMOKE_EXIT=1` | 自检报告写完后自动退出 |
+| `WB_TOKEN_METER_FAKE_UPDATE=9.9.9` | 把更新检查钉在一个假版本上，不走网络 —— 自检靠它驱动更新界面 |
 
 启动后**不会弹主窗口** —— 看右下角的托盘图标：单击打开面板，右键出菜单，
 菜单里能控制桌面胶囊与数据源。关窗只是隐藏，要退出得点菜单里的「退出」。
@@ -266,11 +285,16 @@ pnpm dist          # 打包 Windows 安装包与免安装版到 release/
 推一个 `v*` 标签，GitHub Actions 会自动打包并创建 Release：
 
 ```bash
-git tag -a v0.6.0 -m "v0.6.0"
-git push origin v0.6.0
+git tag -a v0.7.0 -m "v0.7.0"
+git push origin v0.7.0
 ```
 
 也可以在仓库的 Actions 页面手动触发 —— 手动跑只把安装包留档成 artifact，不发 Release。
+
+Release 附件里除了两个 exe，还必须带上 **`latest.yml`** 和 **`.blockmap`**：
+应用内的更新检查先去拉 `latest.yml` 才知道远端是什么版本，blockmap 是差分下载用的。
+少了它们，更新检查会报「更新源上找不到版本信息」。这三样由 `electron-builder.yml`
+的 `publish` 段在打包时生成，CI 的 `gh release create` 负责上传。
 
 CI 用 GitHub 官方下载源；本地 `pnpm dist` 默认走 npmmirror（这台机器直连
 GitHub Downloads 会卡在证书吊销检查上）。两边都靠 `ELECTRON_MIRROR` 环境变量切换，
@@ -390,10 +414,10 @@ GitHub Downloads 会卡在证书吊销检查上）。两边都靠 `ELECTRON_MIRR
 
 ## 已知限制
 
-- 少数计费回合（本机实测约 4/47）找不到对应的会话明细，通常是会话已被清理 —— 界面会提示这部分「未归因」积分。
-- WorkBuddy 里带子代理的会话会在会话排行里占两行（主会话与子代理各一条，共用同一个 sessionId），
-  「N 个会话」也因此比实际会话数偏大。两行的 token 不重复计，只是没有合并成一行。
-- 会话记录是 JSONL，体量可能到几 MB。首次扫描本机 25 个会话约 0.6 秒，之后靠文件 mtime 缓存增量跳过。
+- 极少数计费回合找不到对应的会话明细，通常是会话已被清理或 transcript 已被压缩 ——
+  界面会把这部分单独标成「未归因」积分，不并进会话明细（本机实测为 0）。
+- 会话记录是 JSONL，体量可能到几 MB。首次扫描本机 36 个会话、5000+ 次调用约 1.5～4.5 秒，
+  之后靠文件 mtime 缓存增量跳过。
 - `workbuddy.db` 带 `-wal` / `-shm`，且可能被运行中的 WorkBuddy 持有。程序先尝试只读直开，失败就把三件套复制到临时目录再读。
 - Kimi Code 的上下文水位按「会话最后一次用的模型」的 `max_context_size` 算；
   模型不在 `config.toml` 里（例如内置模型）时窗口未知，水位只报已用量、不给百分比。

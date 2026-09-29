@@ -253,6 +253,7 @@ export function collectReasonixSnapshot(options: ReasonixCollectOptions): Snapsh
     const call: CallRecord = {
       // Reasonix 没有要拿 traceId 对账的东西
       traceId: '',
+      conversationRequestId: '',
       sessionId: row.sessionId,
       projectDir: metas.get(row.sessionId)?.workspace || row.sessionId,
       model: row.model,
