@@ -11,6 +11,7 @@ import { collectReasonixSnapshot, type ReasonixParseCache } from '../shared/reas
 import { collectZcodeSnapshot } from '../shared/zcode-collector'
 import type { FloatState, Settings, Snapshot, SourceKind, ThemeMode, UpdateState } from '../shared/types'
 import { FloatWindow } from './float'
+import { ModelsDevCatalog } from './modelsdev'
 import { OpencodeUsage } from './opencode-usage'
 import {
   appIconPath,
@@ -93,6 +94,19 @@ const dshCache: DshParseCache = new Map()
 
 /** OpenCode Go 的额度客户端。懒创建：只有真的切到那个源才会实例化、才会去读 auth.json */
 let opencodeUsage: OpencodeUsage | null = null
+
+/** models.dev 模型目录客户端。懒创建：只有真的切到 ZCode 源才会实例化、才会发请求 */
+let modelsDev: ModelsDevCatalog | null = null
+
+function ensureModelsDev(): ModelsDevCatalog {
+  if (!modelsDev) {
+    modelsDev = new ModelsDevCatalog({
+      cacheFile: join(app.getPath('userData'), 'models-dev-cache.json'),
+      endpoint: process.env['WB_TOKEN_METER_MODELSDEV_URL']
+    })
+  }
+  return modelsDev
+}
 
 /** 当前数据源的数据根目录（「打开数据目录」与采集都认它） */
 function sourceDir(kind: SourceKind): string {
@@ -190,7 +204,16 @@ function refresh(force = false): Snapshot | null {
     if (kind === 'kimi') {
       snapshot = collectKimiSnapshot({ kimiDir: sourceDir(kind), cache: kimiCache })
     } else if (kind === 'zcode') {
-      snapshot = collectZcodeSnapshot({ zcodeDir: sourceDir(kind) })
+      snapshot = collectZcodeSnapshot({ zcodeDir: sourceDir(kind), modelsDevCache: ensureModelsDev().cacheFile })
+      // 远程 provider（opencode-go 系）的模型窗口不落本地 config：后台拉一次
+      // models.dev 目录兜底（目录新鲜期内直接跳过）。拉到了再重采一遍，水位
+      // 立刻跟上 —— 与额度源同一套「先画缓存、到了再广播」的路数。
+      void ensureModelsDev()
+        .pull(force)
+        .then((pulled) => {
+          if (pulled && currentSource() === 'zcode') refresh()
+        })
+        .catch(() => undefined)
     } else if (kind === 'mimo') {
       snapshot = collectMimoSnapshot({ mimoDir: sourceDir(kind), cacheDir: mimoCacheDir() })
     } else if (kind === 'reasonix') {

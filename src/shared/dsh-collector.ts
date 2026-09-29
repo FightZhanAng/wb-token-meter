@@ -124,7 +124,7 @@ function str(value: unknown): string {
 
 /** `session.jsonl.zstd` 是最早的世代（记 0），`session.v4.jsonl.zstd` 记 4 */
 export function sessionLogVersion(name: string): number {
-  const match = /^session(?:\.v(\d+))?\.jsonl\.zstd$/.exec(name)
+  const match = name.match(/^session(?:\.v(\d+))?\.jsonl\.zstd$/)
   if (!match) return -1
   return match[1] ? Number(match[1]) : 0
 }

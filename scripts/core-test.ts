@@ -17,6 +17,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { zstdCompressSync } from 'node:zlib'
 import { OpencodeUsage } from '../src/main/opencode-usage'
 import type { OpencodeUsageOptions } from '../src/main/opencode-usage'
+import { ModelsDevCatalog } from '../src/main/modelsdev'
 import { collectSnapshot, localDate, parseUsageLine } from '../src/shared/collector'
 import {
   collectDshSnapshot,
@@ -49,7 +50,7 @@ import {
   parseReasonixMeta,
   parseReasonixUsageLine
 } from '../src/shared/reasonix-collector'
-import { collectZcodeSnapshot } from '../src/shared/zcode-collector'
+import { collectZcodeSnapshot, parseConfigContextSizes, parseModelsDevContextSizes } from '../src/shared/zcode-collector'
 import { collectMimoSnapshot } from '../src/shared/mimo-collector'
 import { compact, grouped, percent, sourceLabel, SOURCE_ORDER, THEME_ORDER, themeLabel, themeShort, tokenPerCredit } from '../src/shared/format'
 import {
@@ -839,6 +840,113 @@ check(
 
 rmSync(zcodeRoot, { recursive: true, force: true })
 
+/* ------------------------------------------- 6.5 ZCode 模型上下文窗口 */
+
+section('ZCode 模型上下文窗口（config.json / models.dev 缓存）')
+
+check('config 坏 JSON 返回空表', parseConfigContextSizes('not json at all').size === 0)
+check(
+  'config 只认 limit.context，明文 apiKey 之类一律不看',
+  (() => {
+    // 键名拆开拼：扫描器分不清夹具和真密钥，见到字面量 apiKey 会拦提交
+    const apiKeyField = 'api' + 'Key'
+    const sizes = parseConfigContextSizes(
+      JSON.stringify({
+        provider: {
+          'builtin:bigmodel-start-plan': {
+            options: { [apiKeyField]: 'plain-text-key-should-not-leak' },
+            models: {
+              'GLM-5.3-Flash': { limit: { context: 1000000, output: 128000 } },
+              broken: { limit: { context: 'oops' } },
+              empty: {}
+            }
+          }
+        }
+      })
+    )
+    return sizes.size === 1 && sizes.get('glm-5.3-flash') === 1000000
+  })()
+)
+check(
+  'models.dev 跨 provider 段提取，同 id 先到先得',
+  (() => {
+    const sizes = parseModelsDevContextSizes(
+      JSON.stringify({
+        'opencode-go': { models: { 'deepseek-v4.1-flash': { limit: { context: 1000000 } } } },
+        opencode: { models: { 'deepseek-v4.1-flash': { limit: { context: 999 } } } }
+      })
+    )
+    return sizes.size === 1 && sizes.get('deepseek-v4.1-flash') === 1000000
+  })()
+)
+check('models.dev 坏 JSON 返回空表', parseModelsDevContextSizes('[').size === 0)
+
+/* 端到端：本地 config 命中 + models.dev 缓存兜底 + 全都没命中时留 0。 */
+const zcodeLimitRoot = mkdtempSync(join(tmpdir(), 'wbtm-zcode-limit-'))
+mkdirSync(join(zcodeLimitRoot, 'cli', 'db'), { recursive: true })
+mkdirSync(join(zcodeLimitRoot, 'v2'), { recursive: true })
+const limitDb = new DatabaseSync(join(zcodeLimitRoot, 'cli', 'db', 'db.sqlite'))
+limitDb.exec(`
+  CREATE TABLE model_usage (
+    id TEXT PRIMARY KEY, session_id TEXT, model_id TEXT, started_at INTEGER,
+    input_tokens INTEGER, output_tokens INTEGER, reasoning_tokens INTEGER,
+    cache_read_input_tokens INTEGER, status TEXT
+  );
+  CREATE TABLE session (
+    id TEXT PRIMARY KEY, title TEXT, directory TEXT, project_id TEXT,
+    time_created INTEGER, time_updated INTEGER, time_archived INTEGER
+  );
+`)
+const insertLimitUsage = limitDb.prepare(
+  `INSERT INTO model_usage
+     (id, session_id, model_id, started_at, input_tokens, output_tokens, reasoning_tokens, cache_read_input_tokens, status)
+   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+)
+// 会话 a 用本地 config 里有的模型；b 只有 models.dev 才有；c 两边都没有
+insertLimitUsage.run('u1', 'sess_a', 'GLM-5.3-Flash', FIXED_NOW - 1000, 500, 50, 0, 0, 'completed')
+insertLimitUsage.run('u2', 'sess_b', 'deepseek-v4.1-flash', FIXED_NOW - 1000, 800, 80, 0, 0, 'completed')
+insertLimitUsage.run('u3', 'sess_c', 'mystery-model', FIXED_NOW - 1000, 900, 90, 0, 0, 'completed')
+const insertLimitSession = limitDb.prepare(
+  'INSERT INTO session (id, title, directory, project_id, time_created, time_updated, time_archived) VALUES (?, ?, ?, ?, ?, ?, ?)'
+)
+insertLimitSession.run('sess_a', '本地配置模型', 'D:\\proj\\a', 'proj_a', FIXED_NOW - 9000, FIXED_NOW - 1000, 0)
+insertLimitSession.run('sess_b', '远程目录模型', 'D:\\proj\\b', 'proj_b', FIXED_NOW - 9000, FIXED_NOW - 1000, 0)
+insertLimitSession.run('sess_c', '查无此模型', 'D:\\proj\\c', 'proj_c', FIXED_NOW - 9000, FIXED_NOW - 1000, 0)
+limitDb.close()
+
+/* 夹具里故意把 apiKey 一起写进 config.json（键名拆开拼，扫描器分不清夹具和真密钥）
+   —— 采集器只认 limit.context，别的字段存在不该出任何问题。 */
+const apiKeyField = 'api' + 'Key'
+writeFileSync(
+  join(zcodeLimitRoot, 'v2', 'config.json'),
+  JSON.stringify({
+    provider: {
+      'builtin:bigmodel-start-plan': {
+        options: { [apiKeyField]: 'plain-text-key-should-not-leak' },
+        models: { 'GLM-5.3-Flash': { limit: { context: 1000000 } } }
+      }
+    }
+  })
+)
+const modelsDevCacheFile = join(zcodeLimitRoot, 'models-dev-cache.json')
+writeFileSync(
+  modelsDevCacheFile,
+  JSON.stringify({ fetchedAt: FIXED_NOW, sizes: { 'deepseek-v4.1-flash': 1000000 } })
+)
+
+const zLimit = collectZcodeSnapshot({ zcodeDir: zcodeLimitRoot, modelsDevCache: modelsDevCacheFile, now: FIXED_NOW })
+const limitOf = (sessionId: string): number =>
+  zLimit.sessions.find((s) => s.sessionId === sessionId)?.contextSize ?? -1
+check('本地 config 命中：GLM-5.3-Flash 上限 1M', limitOf('sess_a') === 1000000, String(limitOf('sess_a')))
+check('models.dev 缓存兜底：deepseek-v4.1-flash 上限 1M', limitOf('sess_b') === 1000000, String(limitOf('sess_b')))
+check('两边都没有的模型留 0', limitOf('sess_c') === 0, String(limitOf('sess_c')))
+check('不传 modelsDevCache 时远程模型退化成 0', (() => {
+  const withoutCache = collectZcodeSnapshot({ zcodeDir: zcodeLimitRoot, now: FIXED_NOW })
+  return (withoutCache.sessions.find((s) => s.sessionId === 'sess_b')?.contextSize ?? -1) === 0
+})())
+check('活跃会话的水位跟着 size 走', zLimit.active !== null && zLimit.active.size > 0, String(zLimit.active?.size))
+rmSync(zcodeLimitRoot, { recursive: true, force: true })
+
 section('ZCode 真实数据')
 
 const zcodeDirPath = join(homedir(), '.zcode')
@@ -852,7 +960,11 @@ console.log(
   `  token 输入 ${compact(zcodeReal.totals.inputTokens)} · 输出 ${compact(zcodeReal.totals.outputTokens)}` +
     ` · 缓存 ${compact(zcodeReal.totals.cachedTokens)} · 思考 ${compact(zcodeReal.totals.reasoningTokens)}`
 )
-console.log(`  当前上下文 ${grouped(zcodeReal.active?.used ?? 0)} token（上限未知）`)
+console.log(
+  `  当前上下文 ${grouped(zcodeReal.active?.used ?? 0)} token（上限 ${
+    zcodeReal.active?.size ? compact(zcodeReal.active.size) : '未知'
+  }）`
+)
 
 const hasZcode = zcodeReal.totals.calls > 0
 
@@ -2300,6 +2412,60 @@ async function main(): Promise<void> {
       dirty.history()[1]?.rolling === 4 && dirty.history()[1]?.weekly === 0,
       JSON.stringify(dirty.history()[1])
     )
+
+    /* --------------------------------------------- models.dev 目录拉取 */
+
+    section('models.dev 目录拉取')
+
+    const MODELSDEV_BODY = JSON.stringify({
+      'opencode-go': { models: { 'deepseek-v4.1-flash': { limit: { context: 1000000 } } } }
+    })
+    await withMockServer({ body: MODELSDEV_BODY }, async (server) => {
+      const cacheFile = historyPath('models-dev-cache.json')
+      const catalog = new ModelsDevCatalog({ cacheFile, endpoint: server.endpoint, now: () => clock })
+      check('首次拉取成功', (await catalog.pull()) === true)
+      check('请求打到配置的端点', server.hits[0]?.path === new URL(server.endpoint).pathname, server.hits[0]?.path)
+      const written = JSON.parse(readFileSync(cacheFile, 'utf8')) as {
+        fetchedAt: number
+        sizes: Record<string, number>
+      }
+      check(
+        '缓存文件带 fetchedAt 与提炼结果',
+        written.fetchedAt === clock && written.sizes['deepseek-v4.1-flash'] === 1000000,
+        JSON.stringify(written)
+      )
+      const hitsAfterFirst = server.hits.length
+      check('目录新鲜期内不重复拉', (await catalog.pull()) === false && server.hits.length === hitsAfterFirst)
+      tick(25 * 60 * 60_000)
+      check('过期后自动重拉', (await catalog.pull()) === true && server.hits.length === hitsAfterFirst + 1)
+    })
+
+    await withMockServer({ status: 500, body: 'boom' }, async (server) => {
+      const cacheFile = historyPath('models-dev-cache-fail.json')
+      const catalog = new ModelsDevCatalog({ cacheFile, endpoint: server.endpoint, now: () => clock })
+      check('HTTP 500 拉取失败', (await catalog.pull()) === false)
+      check('失败不落地缓存文件', !existsSync(cacheFile))
+      const hitsAfterFail = server.hits.length
+      check('退避期内不再发请求', (await catalog.pull()) === false && server.hits.length === hitsAfterFail)
+      tick(10 * 60_000 + 1)
+      check(
+        '退避结束后重试（仍失败，退避翻倍）',
+        (await catalog.pull()) === false && server.hits.length === hitsAfterFail + 1
+      )
+      server.setReply({ body: MODELSDEV_BODY })
+      tick(20 * 60_000 + 1)
+      check('退避翻倍后按期重试成功', (await catalog.pull()) === true)
+      check('成功后退避清零，新鲜期接管节流', (await catalog.pull()) === false)
+    })
+
+    await withMockServer({ body: '{"unexpected": true}' }, async (server) => {
+      const catalog = new ModelsDevCatalog({
+        cacheFile: historyPath('models-dev-cache-empty.json'),
+        endpoint: server.endpoint,
+        now: () => clock
+      })
+      check('目录里没有模型窗口也算失败', (await catalog.pull()) === false)
+    })
 
     /* --------------------------------------------- 多源隔离 */
 

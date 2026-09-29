@@ -785,8 +785,8 @@ export default function App(): JSX.Element {
   }
 
   const activeRatio = snapshot?.active && snapshot.active.size > 0 ? snapshot.active.used / snapshot.active.size : 0
-  // 模型上限不落本地时（ZCode 走远程 provider）size 是 0：水位只能报已用量，
-  // 硬算一个百分比出来比不显示更糟
+  // 上限查不到时（模型不在本地 config 也不在 models.dev 目录里）size 是 0：
+  // 水位只能报已用量，硬算一个百分比出来比不显示更糟
   const sizeKnown = (snapshot?.active?.size ?? 0) > 0
   const todayTokens = (today?.inputTokens ?? 0) + (today?.outputTokens ?? 0)
   const newTokens = Math.max(0, (today?.inputTokens ?? 0) - (today?.cachedTokens ?? 0))
