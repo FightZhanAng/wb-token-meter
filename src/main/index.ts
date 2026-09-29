@@ -77,6 +77,9 @@ const REFRESH_MS = 20_000
 /** 发布页 —— 「打开发布页」与更新检查失败时的兜底都指这里 */
 const RELEASE_PAGE = 'https://github.com/FightZhanAng/wb-token-meter/releases'
 
+/** 项目主页 —— 标题栏那个 GitHub 图标指这里。写死在主进程，渲染进程传不了任意 URL 进来 */
+const HOME_PAGE = 'https://github.com/FightZhanAng/wb-token-meter'
+
 let mainWindow: BrowserWindow | null = null
 let tray: TrayController | null = null
 let floatWindow: FloatWindow | null = null
@@ -841,6 +844,12 @@ ipcMain.handle('data:open-dir', async () => {
 ipcMain.handle('app:quit', () => {
   isQuitting = true
   app.quit()
+})
+
+/* 只开项目主页，不接受渲染进程传来的地址 —— 免得变成任意 URL 的开口 */
+ipcMain.handle('app:open-home', async () => {
+  await shell.openExternal(HOME_PAGE)
+  return HOME_PAGE
 })
 
 /* ---- 设置与桌面胶囊 ---- */

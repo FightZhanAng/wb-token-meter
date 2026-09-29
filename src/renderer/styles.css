@@ -282,6 +282,23 @@ button:disabled {
   height: 13px;
 }
 
+/* 纯图标按钮：正方形。拉伸到和相邻按钮同高 —— 光靠 padding 撑，
+   14px 图标会比 12px 文字矮一截，一排按钮里就它凹下去 */
+.icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: stretch;
+  padding: 0 7px;
+  color: var(--ink);
+}
+
+.icon-button svg {
+  display: block;
+  width: 14px;
+  height: 14px;
+}
+
 /* ------------------------------------------------ 数据源切换 */
 
 .source-switch {

@@ -6,6 +6,8 @@ const api = {
   getSnapshot: (): Promise<Snapshot> => ipcRenderer.invoke('snapshot:get') as Promise<Snapshot>,
   refresh: (): Promise<Snapshot> => ipcRenderer.invoke('snapshot:refresh') as Promise<Snapshot>,
   openDataDir: (): Promise<string> => ipcRenderer.invoke('data:open-dir') as Promise<string>,
+  /** 在系统浏览器里打开项目主页（地址写死在主进程） */
+  openHome: (): Promise<string> => ipcRenderer.invoke('app:open-home') as Promise<string>,
   quit: (): Promise<void> => ipcRenderer.invoke('app:quit') as Promise<void>,
   /** 订阅主进程推送；返回取消订阅函数 */
   onSnapshot: (handler: (snapshot: Snapshot) => void): (() => void) => {

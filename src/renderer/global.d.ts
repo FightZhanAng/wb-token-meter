@@ -7,6 +7,8 @@ declare global {
       getSnapshot(): Promise<Snapshot>
       refresh(): Promise<Snapshot>
       openDataDir(): Promise<string>
+      /** 在系统浏览器里打开项目主页（地址写死在主进程） */
+      openHome(): Promise<string>
       quit(): Promise<void>
       onSnapshot(handler: (snapshot: Snapshot) => void): () => void
 
