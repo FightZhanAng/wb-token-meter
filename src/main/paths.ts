@@ -100,6 +100,17 @@ export function dshDir(): string {
   return join(homedir(), '.dsh')
 }
 
+/**
+ * Qoder CN 的数据目录（IDE 与 CLI 共用这一份）。
+ * 会话记录在 <dir>/projects/<项目转义名>/<会话id>.jsonl。
+ * 同目录下还有 .auth、.models 等私有文件，采集器只扫 projects/。
+ */
+export function qoderDir(): string {
+  const override = process.env['WB_TOKEN_METER_QODER_DIR']
+  if (override) return override
+  return join(homedir(), '.qoder-cn')
+}
+
 export type RendererPage = 'index' | 'float'
 
 /** 按页面名加载渲染层；开发走 dev server，生产走打包后的 HTML */

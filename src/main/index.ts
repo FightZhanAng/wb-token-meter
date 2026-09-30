@@ -7,6 +7,7 @@ import { collectDshSnapshot, type DshParseCache } from '../shared/dsh-collector'
 import { SOURCE_ORDER, sourceLabel } from '../shared/format'
 import { collectKimiSnapshot, type KimiParseCache } from '../shared/kimi-collector'
 import { collectMimoSnapshot } from '../shared/mimo-collector'
+import { collectQoderSnapshot, type QoderParseCache } from '../shared/qoder-collector'
 import { collectReasonixSnapshot, type ReasonixParseCache } from '../shared/reasonix-collector'
 import { collectZcodeSnapshot } from '../shared/zcode-collector'
 import type {
@@ -31,6 +32,7 @@ import {
   mimoDataDir,
   opencodeDir,
   preloadPath,
+  qoderDir,
   reasonixDir,
   workbuddyDir,
   zcodeDir
@@ -106,6 +108,7 @@ let snapshot: Snapshot | null = null
 /** 各数据源各有一份解析缓存 —— 切换数据源不能把对方的增量缓存冲掉 */
 const workbuddyCache: ParseCache = new Map()
 const kimiCache: KimiParseCache = new Map()
+const qoderCache: QoderParseCache = new Map()
 const reasonixCache: ReasonixParseCache = new Map()
 const dshCache: DshParseCache = new Map()
 
@@ -132,6 +135,7 @@ function sourceDir(kind: SourceKind): string {
   if (kind === 'kimi') return kimiDir()
   if (kind === 'zcode') return zcodeDir()
   if (kind === 'mimo') return mimoDataDir()
+  if (kind === 'qoder') return qoderDir()
   if (kind === 'reasonix') return reasonixDir()
   if (kind === 'dsh') return dshDir()
   if (kind === 'opencode') return opencodeDir()
@@ -267,6 +271,8 @@ function refresh(force = false): Snapshot | null {
         .catch(() => undefined)
     } else if (kind === 'mimo') {
       snapshot = collectMimoSnapshot({ mimoDir: sourceDir(kind), cacheDir: mimoCacheDir() })
+    } else if (kind === 'qoder') {
+      snapshot = collectQoderSnapshot({ qoderDir: sourceDir(kind), cache: qoderCache })
     } else if (kind === 'reasonix') {
       snapshot = collectReasonixSnapshot({ reasonixDir: sourceDir(kind), cache: reasonixCache })
     } else if (kind === 'dsh') {

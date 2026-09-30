@@ -6,6 +6,7 @@ import {
   formatClock,
   hasCredits,
   hasQuota,
+  hasTokens,
   percent,
   relativeTime,
   SOURCE_ORDER,
@@ -87,19 +88,22 @@ export class TrayController {
 
     const now = Date.now()
     const withCredits = hasCredits(snapshot.kind)
+    const withTokens = hasTokens(snapshot.kind)
     const withQuota = hasQuota(snapshot.kind)
     const quota = withQuota ? snapshot.quota : undefined
     const todayTokens = snapshot.today.inputTokens + snapshot.today.outputTokens
     const active = snapshot.active
-    // 进度环报「占了上限的多少」：额度源用 5 小时窗口，
-    // 其余源用活跃会话的上下文水位 —— 那是唯一有明确上限的本地实时指标
+    // 进度环报「占了上限的多少」：额度源用 5 小时窗口，Qoder CN 用会话快照
+    // 自带的水位比例，其余源用活跃会话的上下文水位 —— 那是有明确上限的本地指标
     const rolling = quota ? (windowOf(quota.windows, 'rolling') ?? quota.windows[0] ?? null) : null
     const ratio = withQuota
       ? rolling
         ? Math.min(1, rolling.percent / 100)
         : 0
-      : active && active.size > 0
-        ? Math.min(1, active.used / active.size)
+      : active
+        ? active.size > 0
+          ? Math.min(1, active.used / active.size)
+          : (active.ratio ?? 0)
         : 0
 
     const source = this.cb.getSource()
@@ -142,10 +146,12 @@ export class TrayController {
 
     this.tray.setImage(trayIconImage(ratio))
 
-    // Kimi Code 没有积分，整块收起而不是显示 0 分
-    const todayLine = withCredits
-      ? `今日 ${compact(todayTokens)} token · ${formatCredits(snapshot.today.credits)} 积分`
-      : `今日 ${compact(todayTokens)} token · ${snapshot.today.calls} 次调用`
+    // Qoder CN 没有 token，那一行换成积分；其余源照旧
+    const todayLine = !withTokens
+      ? `今日 ${formatCredits(snapshot.today.credits)} 积分 · ${snapshot.today.calls} 次调用`
+      : withCredits
+        ? `今日 ${compact(todayTokens)} token · ${formatCredits(snapshot.today.credits)} 积分`
+        : `今日 ${compact(todayTokens)} token · ${snapshot.today.calls} 次调用`
 
     const quotaText = `${quotaSummary(quota?.windows ?? [], 'short')}${quota?.stale ? '（旧数据）' : ''}`
 
@@ -153,8 +159,10 @@ export class TrayController {
       ? ['Token 计量器', sourceLabel(snapshot.kind), quotaText].join(' · ')
       : [
           'Token 计量器',
-          `${sourceLabel(snapshot.kind)} · 今日 ${compact(todayTokens)} tok`,
-          ...(withCredits ? [`${formatCredits(snapshot.today.credits)} 积分`] : []),
+          withTokens
+            ? `${sourceLabel(snapshot.kind)} · 今日 ${compact(todayTokens)} tok`
+            : `${sourceLabel(snapshot.kind)} · 今日 ${formatCredits(snapshot.today.credits)} 积分`,
+          ...(withTokens && withCredits ? [`${formatCredits(snapshot.today.credits)} 积分`] : []),
           contextSummary(active)
         ].join(' · ')
     this.tray.setToolTip(tooltip)
@@ -185,11 +193,14 @@ export class TrayController {
             label: active
               ? active.size > 0
                 ? `上下文 ${compact(active.used)} / ${compact(active.size)}（${percent(active.used, active.size)}%）`
-                : `上下文 ${compact(active.used)} token（模型上限未知）`
+                : active.ratio != null
+                  ? `上下文 ${Math.round(active.ratio * 100)}%`
+                  : `上下文 ${compact(active.used)} token（模型上限未知）`
               : '当前无活跃会话',
             enabled: false
           },
-          ...(withCredits
+          // 比价要有 token 才算得出来 —— Qoder CN 只有积分，这一行收起
+          ...(withCredits && withTokens
             ? [
                 {
                   label: `比价 1 积分 ≈ ${compact(safeRate(snapshot))} token`,

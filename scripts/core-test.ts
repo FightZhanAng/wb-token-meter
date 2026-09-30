@@ -46,13 +46,18 @@ import {
   windowOf
 } from '../src/shared/opencode-quota'
 import {
+  collectQoderSnapshot,
+  parseQoderTitleLine,
+  parseQoderUsageLine
+} from '../src/shared/qoder-collector'
+import {
   collectReasonixSnapshot,
   parseReasonixMeta,
   parseReasonixUsageLine
 } from '../src/shared/reasonix-collector'
 import { collectZcodeSnapshot, parseConfigContextSizes, parseModelsDevContextSizes } from '../src/shared/zcode-collector'
 import { collectMimoSnapshot } from '../src/shared/mimo-collector'
-import { compact, grouped, percent, sourceLabel, SOURCE_ORDER, THEME_ORDER, themeLabel, themeShort, tokenPerCredit } from '../src/shared/format'
+import { compact, credits as formatCredits, grouped, percent, sourceLabel, SOURCE_ORDER, THEME_ORDER, themeLabel, themeShort, tokenPerCredit } from '../src/shared/format'
 import {
   compareVersion,
   isNewerVersion,
@@ -1707,6 +1712,243 @@ if (!hasDsh) {
 check('DSH 目录不存在不崩', collectDshSnapshot({ dshDir: join(homedir(), '.dsh-nonexistent') }).sessions.length === 0)
 check('路径为空不崩', collectDshSnapshot({ dshDir: '' }).sessions.length === 0)
 
+/* ---------------------------------------------- 6b. Qoder CN 数据源 */
+
+section('Qoder CN 单行解析')
+
+/** 构造一行 Qoder CN 的 usage 结算行（字段形态按本机实测） */
+const qoderUsageRow = (opts: {
+  requestId: string
+  sessionId: string
+  credits: number
+  ratio?: number
+  time?: string
+  model?: string
+  forkedFrom?: string
+}): string =>
+  JSON.stringify({
+    type: 'assistant',
+    uuid: `u-${opts.requestId}`,
+    timestamp: opts.time ?? '2026-09-30T06:00:00.000Z',
+    message: {
+      id: `m-${opts.requestId}`,
+      role: 'assistant',
+      model: opts.model ?? 'qfmodel',
+      usage: {
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+        credits: opts.credits,
+        original_credits: opts.credits,
+        billable: false,
+        request_id: opts.requestId,
+        context_usage_ratio: opts.ratio ?? 0.1
+      }
+    },
+    sessionId: opts.sessionId,
+    cwd: 'D:\\demo',
+    ...(opts.forkedFrom
+      ? { forkedFrom: { sessionId: opts.forkedFrom, messageUuid: `u-${opts.requestId}` } }
+      : {})
+  })
+
+/** 构造一行真人输入（标题来源）；fork 复制来的带 forkedFrom */
+const qoderUserRow = (text: string, time: string, forkedFrom?: string): string =>
+  JSON.stringify({
+    type: 'user',
+    timestamp: time,
+    humanInput: true,
+    message: { role: 'user', content: [{ type: 'text', text }] },
+    ...(forkedFrom ? { forkedFrom: { sessionId: forkedFrom, messageUuid: 'u-x' } } : {})
+  })
+
+const qoderUsage = parseQoderUsageLine(
+  qoderUsageRow({ requestId: 'req-1', sessionId: 'sess-a', credits: 1.5, ratio: 0.25 })
+)
+check('解析出请求 id 与积分', qoderUsage?.requestId === 'req-1' && qoderUsage?.credits === 1.5)
+check('水位比例带出来', qoderUsage?.contextRatio === 0.25)
+check('模型名带出来', qoderUsage?.model === 'qfmodel')
+
+check(
+  '缺 request_id 的行丢弃',
+  parseQoderUsageLine(
+    JSON.stringify({
+      type: 'assistant',
+      timestamp: '2026-09-30T06:00:00.000Z',
+      message: { model: 'x', usage: { credits: 1 } }
+    })
+  ) === null
+)
+check('非 assistant 行丢弃', parseQoderUsageLine(JSON.stringify({ type: 'user', message: {} })) === null)
+check('坏 JSON 丢弃', parseQoderUsageLine('{"type":"assistant') === null)
+
+const qoderForkUsage = parseQoderUsageLine(
+  qoderUsageRow({ requestId: 'req-2', sessionId: 'sess-b', credits: 0.5, forkedFrom: 'sess-a' })
+)
+check(
+  'fork 复制行归原会话（归属 sessionId 在文件会话之外）',
+  qoderForkUsage?.sessionId === 'sess-a' && qoderForkUsage?.fileSessionId === 'sess-b'
+)
+
+check('标题行取真人输入', parseQoderTitleLine(qoderUserRow('帮我改个 bug', '2026-09-30T06:00:00.000Z')) === '帮我改个 bug')
+check(
+  'fork 复制的 user 行不当标题',
+  parseQoderTitleLine(qoderUserRow('父会话的话', '2026-09-30T06:00:00.000Z', 'sess-a')) === null
+)
+check(
+  '工具结果的 user 行不当标题',
+  parseQoderTitleLine(
+    JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', text: '' }] } })
+  ) === null
+)
+
+section('Qoder CN 目录扫描（临时夹具）')
+
+const qoderFixtureRoot = mkdtempSync(join(tmpdir(), 'wbtm-qoder-'))
+const qoderProject = join(qoderFixtureRoot, 'projects', 'D--demo')
+mkdirSync(qoderProject, { recursive: true })
+
+// 父会话：两次原生请求
+writeFileSync(
+  join(qoderProject, 'aaaa-1111.jsonl'),
+  [
+    qoderUserRow('父会话的第一句话', '2026-09-30T06:00:00.000Z'),
+    qoderUsageRow({ requestId: 'req-1', sessionId: 'aaaa-1111', credits: 1.25, ratio: 0.2, time: '2026-09-30T06:00:05.000Z' }),
+    qoderUsageRow({ requestId: 'req-2', sessionId: 'aaaa-1111', credits: 0.75, ratio: 0.3, time: '2026-09-30T06:10:00.000Z' })
+  ].join('\n') + '\n',
+  'utf8'
+)
+
+// fork 会话：父会话的 req-1 被复制过来（forkedFrom 标记），外加自己的一次请求
+writeFileSync(
+  join(qoderProject, 'bbbb-2222.jsonl'),
+  [
+    qoderUserRow('父会话的第一句话', '2026-09-30T06:00:00.000Z', 'aaaa-1111'),
+    qoderUsageRow({
+      requestId: 'req-1',
+      sessionId: 'bbbb-2222',
+      credits: 1.25,
+      ratio: 0.2,
+      time: '2026-09-30T06:00:05.000Z',
+      forkedFrom: 'aaaa-1111'
+    }),
+    qoderUserRow('fork 会话自己的话', '2026-09-30T06:20:00.000Z'),
+    qoderUsageRow({ requestId: 'req-3', sessionId: 'bbbb-2222', credits: 2.5, ratio: 0.55, time: '2026-09-30T06:20:10.000Z' })
+  ].join('\n') + '\n',
+  'utf8'
+)
+
+const qoderFixture = collectQoderSnapshot({ qoderDir: qoderFixtureRoot, now: FIXED_NOW })
+check('fork 复制的请求只计一次', qoderFixture.totals.calls === 3, `${qoderFixture.totals.calls} 次`)
+check('积分按去重后的请求累加', near(qoderFixture.totals.credits, 1.25 + 0.75 + 2.5), String(qoderFixture.totals.credits))
+check(
+  'token 通道恒为 0',
+  qoderFixture.totals.inputTokens === 0 &&
+    qoderFixture.totals.outputTokens === 0 &&
+    qoderFixture.totals.cachedTokens === 0 &&
+    qoderFixture.totals.reasoningTokens === 0
+)
+check(
+  '每个请求算一次计费回合',
+  qoderFixture.totals.traces === 3 &&
+    qoderFixture.totals.matchedTraces === 3 &&
+    qoderFixture.totals.dbTraces === 3
+)
+check('没有未归因积分', qoderFixture.totals.unattributedCredits === 0)
+
+const qoderParent = qoderFixture.sessions.find((s) => s.sessionId === 'aaaa-1111')
+const qoderFork = qoderFixture.sessions.find((s) => s.sessionId === 'bbbb-2222')
+check(
+  '复制行归父会话、原生行留 fork 会话',
+  (qoderParent?.calls ?? 0) === 2 && (qoderFork?.calls ?? 0) === 1,
+  `父 ${qoderParent?.calls} 次 · fork ${qoderFork?.calls} 次`
+)
+check('积分归属跟着请求走', near(qoderParent?.credits ?? 0, 2) && near(qoderFork?.credits ?? 0, 2.5))
+check('水位取会话最后一次请求', qoderParent?.contextRatio === 0.3 && qoderFork?.contextRatio === 0.55)
+check('标题取本会话第一句话', qoderParent?.title === '父会话的第一句话' && qoderFork?.title === 'fork 会话自己的话')
+check('活跃会话带水位比例', (qoderFixture.active?.ratio ?? 0) > 0)
+check(
+  '会话积分之和 == 全局积分',
+  near(sum(qoderFixture.sessions.map((s) => s.credits)), qoderFixture.totals.credits)
+)
+
+// 追加写入被强杀时尾部会留半行 —— 坏行不能把整本账带崩
+writeFileSync(
+  join(qoderProject, 'cccc-3333.jsonl'),
+  qoderUserRow('坏行会话', '2026-09-30T07:00:00.000Z') +
+    '\n{"type":"assistant","message":{"usage":\n' +
+    qoderUsageRow({ requestId: 'req-4', sessionId: 'cccc-3333', credits: 1, time: '2026-09-30T07:00:05.000Z' }) +
+    '\n',
+  'utf8'
+)
+const qoderBroken = collectQoderSnapshot({ qoderDir: qoderFixtureRoot, now: FIXED_NOW })
+check('截断的半行被丢掉、后续行照读', qoderBroken.totals.calls === 4, `${qoderBroken.totals.calls} 次`)
+
+const qoderFixtureCache = new Map()
+collectQoderSnapshot({ qoderDir: qoderFixtureRoot, cache: qoderFixtureCache })
+const qoderFixtureCacheSize = qoderFixtureCache.size
+collectQoderSnapshot({ qoderDir: qoderFixtureRoot, cache: qoderFixtureCache })
+check(
+  '缓存用上了（重扫不新增、文件数对得上）',
+  qoderFixtureCache.size === qoderFixtureCacheSize && qoderFixtureCacheSize === 3
+)
+
+section('Qoder CN 真实数据')
+
+const qoderDirPath = join(homedir(), '.qoder-cn')
+const qoderStarted = Date.now()
+const qoderReal = collectQoderSnapshot({ qoderDir: qoderDirPath })
+const qoderElapsed = Date.now() - qoderStarted
+
+console.log(`  读取耗时 ${qoderElapsed} ms`)
+console.log(
+  `  会话 ${qoderReal.totals.sessions} 个 · 请求 ${grouped(qoderReal.totals.calls)} 次 · 文件 ${qoderReal.source.files} 个`
+)
+console.log(`  积分 ${formatCredits(qoderReal.totals.credits)} · token 通道恒为 0（服务端只回积分）`)
+
+const hasQoder = qoderReal.totals.calls > 0
+
+if (!hasQoder) {
+  console.log('  skip 未检测到 Qoder CN 数据 —— 真实数据相关断言全部跳过（CI 环境属正常）')
+} else {
+  check('读到请求', qoderReal.totals.calls > 0)
+  check('读取在 15 秒内', qoderElapsed < 15_000, `${qoderElapsed} ms`)
+  check('积分大于 0', qoderReal.totals.credits > 0, formatCredits(qoderReal.totals.credits))
+  check(
+    'token 恒为 0（Qoder CN 只回积分）',
+    qoderReal.totals.inputTokens === 0 &&
+      qoderReal.totals.outputTokens === 0 &&
+      qoderReal.totals.cachedTokens === 0 &&
+      qoderReal.totals.reasoningTokens === 0
+  )
+  check(
+    '每个请求都是一次计费回合',
+    qoderReal.totals.traces === qoderReal.totals.calls &&
+      qoderReal.totals.matchedTraces === qoderReal.totals.calls &&
+      qoderReal.totals.dbTraces === qoderReal.totals.calls
+  )
+  check('没有未归因积分', qoderReal.totals.unattributedCredits === 0)
+  check(
+    '会话积分之和 == 全局积分',
+    near(sum(qoderReal.sessions.map((s) => s.credits)), qoderReal.totals.credits)
+  )
+  check('日积分之和 == 全局积分', near(sum(qoderReal.days.map((d) => d.credits)), qoderReal.totals.credits))
+  check('有活跃会话', qoderReal.active !== null)
+  const qoderRealRatio = qoderReal.active?.ratio ?? 0
+  check('活跃会话带水位比例（0~1）', qoderRealRatio > 0 && qoderRealRatio <= 1, String(qoderRealRatio))
+  check('至少一个会话带标题', qoderReal.sessions.some((s) => s.title.length > 0))
+  check('至少一个会话带水位比例', qoderReal.sessions.some((s) => (s.contextRatio ?? 0) > 0))
+}
+
+check(
+  'Qoder CN 目录不存在不崩',
+  collectQoderSnapshot({ qoderDir: join(homedir(), '.qoder-cn-nonexistent') }).sessions.length === 0
+)
+check('Qoder CN 路径为空不崩', collectQoderSnapshot({ qoderDir: '' }).sessions.length === 0)
+
+rmSync(qoderFixtureRoot, { recursive: true, force: true })
+
 /* ---------------------------------------------- 8. OpenCode Go 数据源 */
 
 /** 实测响应（HTTP 200，239 字节）—— 纯解析与 mock 服务共用这份基准 */
@@ -2469,7 +2711,7 @@ async function main(): Promise<void> {
 
     /* --------------------------------------------- 多源隔离 */
 
-    section('七个数据源互不影响')
+    section('八个数据源互不影响')
 
     const sharedWbCache = new Map()
     const wbBefore = collectSnapshot({ workbuddyDir, cache: sharedWbCache, now: FIXED_NOW })
@@ -2478,6 +2720,8 @@ async function main(): Promise<void> {
     collectKimiSnapshot({ kimiDir, cache: kimiCache, now: FIXED_NOW })
     collectZcodeSnapshot({ zcodeDir: zcodeDirPath, now: FIXED_NOW })
     collectMimoSnapshot({ mimoDir: mimoDataPath, cacheDir: mimoCachePath, now: FIXED_NOW })
+    const qoderCache = new Map()
+    collectQoderSnapshot({ qoderDir: qoderDirPath, cache: qoderCache, now: FIXED_NOW })
     const reasonixCache = new Map()
     collectReasonixSnapshot({ reasonixDir: reasonixDirPath, cache: reasonixCache, now: FIXED_NOW })
     const dshCache = new Map()
@@ -2543,7 +2787,8 @@ async function main(): Promise<void> {
           !key.includes('mimocode') &&
           !key.includes('opencode') &&
           !key.includes('.reasonix') &&
-          !key.includes('.dsh')
+          !key.includes('.dsh') &&
+          !key.includes('.qoder-cn')
       )
     )
     check('Kimi 缓存里没有 WorkBuddy 的文件', [...kimiCache.keys()].every((key) => !key.includes('.workbuddy')))
@@ -2554,22 +2799,26 @@ async function main(): Promise<void> {
      * 「没混进别的源的文件」是唯一还能成立、也唯一还有意义的断言。
      * 硬要求 size > 0 会把 CI 判死（v0.6.0 第一次打标签就是这么挂的）。
      */
+    check('Qoder CN 缓存里没有别的源的文件', [...qoderCache.keys()].every((key) => key.includes('.qoder-cn')))
     check('Reasonix 缓存里没有别的源的文件', [...reasonixCache.keys()].every((key) => key.includes('.reasonix')))
     check('DSH 缓存里没有别的源的文件', [...dshCache.keys()].every((key) => key.includes('.dsh')))
+    check('读到 Qoder CN 数据时缓存确实用上了', !hasQoder || qoderCache.size > 0, `${qoderCache.size} 项`)
     check('读到 Reasonix 数据时缓存确实用上了', !hasReasonix || reasonixCache.size > 0, `${reasonixCache.size} 项`)
     check('读到 DSH 数据时缓存确实用上了', !hasDsh || dshCache.size > 0, `${dshCache.size} 项`)
     check(
-      '七个源的 kind 各自正确',
+      '八个源的 kind 各自正确',
       wbAfter.kind === 'workbuddy' &&
         kimiReal.kind === 'kimi' &&
         zcodeReal.kind === 'zcode' &&
         mimoReal.kind === 'mimo' &&
+        qoderReal.kind === 'qoder' &&
         reasonixReal.kind === 'reasonix' &&
         dshReal.kind === 'dsh' &&
         sourceLabel('opencode') === 'OpenCode Go' &&
+        sourceLabel('qoder') === 'Qoder CN' &&
         sourceLabel('reasonix') === 'Reasonix' &&
         sourceLabel('dsh') === 'DeepSeek Harness' &&
-        SOURCE_ORDER.length === 7,
+        SOURCE_ORDER.length === 8,
       SOURCE_ORDER.join('/')
     )
   } finally {

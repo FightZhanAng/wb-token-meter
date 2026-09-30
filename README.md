@@ -1,17 +1,19 @@
 # Token 计量器
 
-**一个用量面板，同时看得见 [WorkBuddy](https://www.workbuddy.cn/)、Kimi Code、ZCode、
-Xiaomi MiMo、Reasonix、DeepSeek Harness 与 OpenCode Go 的消耗。**
+**一个用量面板，同时看得见 [WorkBuddy](https://www.workbuddy.cn/)、Qoder CN、Kimi Code、
+ZCode、Xiaomi MiMo、Reasonix、DeepSeek Harness 与 OpenCode Go 的消耗。**
 
 WorkBuddy 采用积分制，界面上只显示积分、看不到 token 消耗。但每次模型调用的
 官方 token 数据其实都写在本地磁盘上 —— 这个工具把它读出来，做成常驻托盘的用量面板。
 
+Qoder CN 反过来：积分与上下文水位写在本地，token 一个都不给 ——
+每次调用只留一笔积分，界面就按积分画。
 Kimi Code、ZCode、Xiaomi MiMo、Reasonix 与 DeepSeek Harness 没有积分这一层，
 本地留的正好就是 token 用量本身。
 OpenCode Go 更特别：它连 token 都不给看，只有订阅额度的占用比例，得联网去问。
 面板右上角（或托盘菜单的「数据源」）可以随时切换看哪一个，几边的账本各算各的、互不影响。
 
-> 非官方第三方工具，与 WorkBuddy、Kimi Code、ZCode、小米、Reasonix、
+> 非官方第三方工具，与 WorkBuddy、Qoder、Kimi Code、ZCode、小米、Reasonix、
 > DeepSeek、opencode 官方均无关。
 > 除 OpenCode Go 的额度查询和更新检查外，所有数据都在本地读取和计算，不修改任何原始文件。
 > 出站请求只有两个：`GET https://opencode.ai/zen/go/v1/usage`（带本机凭证读来的 key，
@@ -43,7 +45,8 @@ OpenCode Go 更特别：它连 token 都不给看，只有订阅额度的占用�
 
 ## 数据从哪来
 
-**不需要估算。** 六个源把精确的 token 用量写在本地磁盘上，只是没在界面上展示；
+**不需要估算。** 七个源把精确的用量写在本地磁盘上，只是没在界面上展示 ——
+其中 Qoder CN 能取到的只有积分与上下文水位（服务端不下发 token）；
 OpenCode Go 的额度比例则来自它的在线接口。
 
 ### WorkBuddy（带积分）
@@ -59,6 +62,31 @@ OpenCode Go 的额度比例则来自它的在线接口。
 这是踩过坑的地方：2026-09 前后 WorkBuddy 把积分明细的 key 从 `traceId` 换成了
 `conversationRequestId`，老版本两者同值、新版本分离；只认 traceId 会出现
 「累计总额对、今日与新会话全 0」。实现见 `collector.ts` 的 `billingKey()`。
+
+### Qoder CN（只有积分）
+
+| 数据源 | 位置 | 内容 |
+|---|---|---|
+| 会话记录 | `~/.qoder-cn/projects/<项目转义名>/<会话id>.jsonl` | 每次模型请求一条 `message.usage`：`credits`（积分消耗）、`context_usage_ratio`（上下文水位 0~1）、`request_id`、`billable`，外加模型名与时间 |
+| 会话标题 | 同上，文件里第一条真人输入 | `humanInput` 那段文本（多行会压成一行） |
+
+**它的账本里没有 token** —— 输入 / 输出 / 缓存读 / 缓存写四个字段恒为 0，
+客户端自己的上下文快照也标着 `tokenCountsAvailable: false`：Qoder CN 服务端
+只回积分与水位比例。所以 token 通道（结构卡）整块收起，界面换成一套按积分画的：
+今日积分、14 天积分柱、活跃热力图按积分深浅、模型 / 项目按积分排行，
+上下文仪表直接按 `context_usage_ratio` 画（只报比例，不编 token 绝对值）。
+
+两个坑，都踩过了：
+
+- **分支（fork）会话会把父会话的历史整段复制进自己的 jsonl**。复制行带
+  `forkedFrom`（原会话 id + 原行 uuid），行内 `sessionId` 则被改写成 fork 会话
+  自己 —— 直接相加会把父会话的账重复算一遍（本机实测 154 次请求、约六成积分）。
+  去重按 `usage.request_id` 全局进行，归属认 `forkedFrom.sessionId`。
+- **`billable` 字段的语义未明**。本机 393 行里 false 占 379 行、且都带着非零
+  credits，所以一律入账 —— 待与 Qoder 界面用量页对账后再定口径。
+
+模型名是 `qfmodel` / `dfmodel` 这类内部别名，原样显示。采集只扫 jsonl、
+不读凭证、不联网。
 
 ### Kimi Code（只有 token）
 
@@ -106,8 +134,8 @@ ZCode 是三个源里最好取的一份 —— 用量本身就是一张表，不
   `response.usage` 里有同样的字段），本工具目前不解析它们。
 
 只有 token 的那几个源各扫各的目录、各用各的缓存，聚合共用
-`src/shared/aggregate.ts`；WorkBuddy 那条链路完全独立 ——
-切换数据源不会碰任何一边的数字。
+`src/shared/aggregate.ts`（Qoder CN 也走这条 —— 积分随每次调用逐笔进聚合）；
+WorkBuddy 那条链路完全独立 —— 切换数据源不会碰任何一边的数字。
 
 ### Xiaomi MiMo 桌面端（只有 token）
 
@@ -213,12 +241,12 @@ Go 是 $10/月的订阅，限额按**美元金额**算（5 小时 = 月限额的
 
 请求节流：自动刷新最小间隔 60 秒（轮询本身是 20 秒一次），失败按 60s → 120s → 300s
 退避；托盘与面板上的手动刷新会强制绕过节流。整块逻辑在 `src/main/opencode-usage.ts`，
-与另外六个源完全隔离 —— 网络失败不影响它们的统计。
+与另外七个源完全隔离 —— 网络失败不影响它们的统计。
 
 
 ### 积分口径（仅 WorkBuddy）
 
-积分以数据库记录为**权威口径**，不是用 token 反推的：
+WorkBuddy 的积分以数据库记录为**权威口径**，不是用 token 反推的：
 
 - `credits` —— 数据库里所有计费记录的总和
 - `attributedCredits` —— 其中能对应到本地会话明细的部分
@@ -226,8 +254,9 @@ Go 是 $10/月的订阅，限额按**美元金额**算（5 小时 = 月限额的
 
 界面底部会把最后一项单独列出来，避免总额平白少一截。
 
-Kimi Code 没有积分，这一整块（今日积分、比价、会话行的积分、未归因提示）
-在切到它时会整块收起，而不是显示成 0 分。
+Qoder CN 的积分不走这套 —— 每个请求一笔就写在会话明细里，不需要对账，
+也就没有「未归因」。没有积分的六个源，积分相关的整块（今日积分、比价、
+会话行的积分、未归因提示）在切到它们时会整块收起，而不是显示成 0 分。
 
 ### 两点实测结论
 
@@ -265,6 +294,7 @@ pnpm dist          # 打包 Windows 安装包与免安装版到 release/
 |---|---|
 | `WB_TOKEN_METER_DIR` | 覆盖 WorkBuddy 数据目录，默认 `~/.workbuddy`（便于测试） |
 | `WB_TOKEN_METER_KIMI_DIR` | 覆盖 Kimi Code 数据目录，默认 `~/.kimi-code` |
+| `WB_TOKEN_METER_QODER_DIR` | 覆盖 Qoder CN 数据目录，默认 `~/.qoder-cn` |
 | `WB_TOKEN_METER_ZCODE_DIR` | 覆盖 ZCode 数据目录，默认 `~/.zcode` |
 | `WB_TOKEN_METER_MIMO_DIR` | 覆盖 MiMo 数据目录，默认 `~/.local/share/mimocode` |
 | `WB_TOKEN_METER_MIMO_CACHE_DIR` | 覆盖 MiMo 缓存目录（模型目录在里面），默认 `~/.cache/mimocode` |
@@ -326,8 +356,8 @@ GitHub Downloads 会卡在证书吊销检查上）。两边都靠 `ELECTRON_MIRR
 > 机头分两行：第一行是标题 + 更新时间，右边是**外观循环按钮**
 > （系统 → 浅色 → 深色，点一下就换）与刷新；第二行整行给**数据源切换**。
 > 数据源是这一页的主导航，挤在标题旁边只会把标题压成「Token ...」——
-> 现在横向摆得下四个（`WorkBuddy` / `Kimi Code` / `ZCode` / `MiMo`），
-> 其余三个收在「更多」里；当前源落在「更多」里时，那个按钮会显示它的名字。
+> 现在横向摆得下四个（`WorkBuddy` / `Qoder CN` / `Kimi Code` / `ZCode`），
+> 其余四个收在「更多」里；当前源落在「更多」里时，那个按钮会显示它的名字。
 > 数据源与外观都存进设置文件，重启后还在。
 
 ### 深色主题
@@ -350,16 +380,17 @@ GitHub Downloads 会卡在证书吊销检查上）。两边都靠 `ELECTRON_MIRR
 
 ### 面板上的通道
 
-- **今日** —— token 与积分（没有积分的六个源把第二个大数字换成缓存命中率），
-  下面一行是输入 / 输出 / 调用次数
+- **今日** —— token 与积分（没有积分的六个源把第二个大数字换成缓存命中率；
+  Qoder CN 反过来，大数直接报积分、副行是调用次数），下面一行是输入 / 输出 / 调用次数
 - **上下文** —— 带红线区的仪表：已用量、指针、以及会话的工作目录；
-  模型上限未知时只报已用量
-- **结构** —— 输入 / 缓存命中 / 输出 / 思考 的分布（WorkBuddy / ZCode / MiMo 单列思考，其余四个不单列）
-- **14 天** —— 每日 token 柱状图，**补齐空档**：没有用量的日子画成 0 高度。
+  模型上限未知时只报已用量（Qoder CN 按快照里的水位比例画）
+- **结构** —— 输入 / 缓存命中 / 输出 / 思考 的分布（WorkBuddy / ZCode / MiMo 单列思考，其余源不单列；
+  Qoder CN 没有 token，这张卡整块收起）
+- **14 天** —— 每日 token 柱状图（Qoder CN 画积分），**补齐空档**：没有用量的日子画成 0 高度。
   只画「有数据的那些天」会让柱子等距排列，看起来是条连续时间轴，实际日期却在跳
-- **活跃** —— 近 26 周，GitHub 贡献图那种格子；越深表示当天 token 越多，
+- **活跃** —— 近 26 周，GitHub 贡献图那种格子；越深表示当天用量越多（Qoder CN 按积分），
   今天那一格带一圈记录笔色的边
-- **模型 / 项目** —— 用量排行
+- **模型 / 项目** —— 用量排行（Qoder CN 按积分）
 - **会话** —— 每个会话的 token、积分、调用次数、上下文水位
 
 ![热力图](docs/preview-heat.png)
@@ -368,15 +399,17 @@ GitHub Downloads 会卡在证书吊销检查上）。两边都靠 `ELECTRON_MIRR
 额度水位（5 小时 / 本周 / 本月三条带分区的刻度槽，各带重置时间）、数据来源（接口、凭证、
 上次更新，以及取不到时的提示）、额度消耗趋势（本地采样的折线图）。
 
-托盘图标是一圈进度环：六个本地源显示当前活跃会话的上下文水位，OpenCode Go 显示
-5 小时额度的占用比例，颜色随水位变化；悬停显示今日 token（WorkBuddy 下还有积分）
+托盘图标是一圈进度环：本地源显示当前活跃会话的上下文水位（Qoder CN 用会话快照
+里的水位比例），OpenCode Go 显示 5 小时额度的占用比例，颜色随水位变化；
+悬停显示今日 token（WorkBuddy 下还有积分、Qoder CN 换成今日积分）
 或三个额度百分比；右键菜单可以切换数据源与外观、刷新、控制桌面胶囊、打开数据目录、退出。
 
 关窗即隐藏到托盘，只有菜单里的「退出」才会真正结束进程。
 
 ## 桌面胶囊
 
-常驻桌面的小胶囊，显示今日 token、上下文水位环与积分（没有积分的源换成今日调用次数）；
+常驻桌面的小胶囊，显示今日 token、上下文水位环与积分（没有积分的源换成今日调用次数；
+Qoder CN 大数报今日积分，次数与水位在第二行）；
 切到 OpenCode Go 时换成 5 小时额度环、百分比与重置时间。
 拖动移动并自动记住位置，单击打开主面板。
 
@@ -386,7 +419,7 @@ GitHub Downloads 会卡在证书吊销检查上）。两边都靠 `ELECTRON_MIRR
 
 | 菜单项 | 能改什么 |
 |---|---|
-| 数据源 | WorkBuddy / Kimi Code / ZCode / MiMo / Reasonix / DeepSeek Harness / OpenCode Go |
+| 数据源 | WorkBuddy / Qoder CN / Kimi Code / ZCode / MiMo / Reasonix / DeepSeek Harness / OpenCode Go |
 | 外观 | 跟随系统 / 浅色 / 深色 |
 | 桌面胶囊 | 显示 / 隐藏 |
 | 胶囊尺寸 | 小 / 中 / 大（胶囊本体 152×44、198×56、252×68） |
@@ -414,11 +447,23 @@ GitHub Downloads 会卡在证书吊销检查上）。两边都靠 `ELECTRON_MIRR
 
 ## 已知限制
 
-- 极少数计费回合找不到对应的会话明细，通常是会话已被清理或 transcript 已被压缩 ——
+- WorkBuddy 的极少数计费回合找不到对应的会话明细，通常是会话已被清理或 transcript 已被压缩 ——
   界面会把这部分单独标成「未归因」积分，不并进会话明细（本机实测为 0）。
 - 会话记录是 JSONL，体量可能到几 MB。首次扫描本机 36 个会话、5000+ 次调用约 1.5～4.5 秒，
   之后靠文件 mtime 缓存增量跳过。
 - `workbuddy.db` 带 `-wal` / `-shm`，且可能被运行中的 WorkBuddy 持有。程序先尝试只读直开，失败就把三件套复制到临时目录再读。
+- Qoder CN 本地**没有 token** —— 输入 / 输出 / 缓存四个字段恒为 0（服务端只回积分
+  与上下文水位），所以它的 token 通道（结构卡）整块收起、界面按积分画；
+  这与「读不到」不同，是账本里根本没有。
+- Qoder CN 的上下文只有水位比例、没有 token 绝对值（客户端自己的快照就标着
+  `tokenCountsAvailable: false`），仪表直接按比例画。
+- Qoder CN 的 `billable` 字段语义未明（本机 false 的行也带非零 credits，且占九成），
+  一律入账，尚未与 Qoder 界面用量页对账。
+- Qoder CN 的分支（fork）会话复制父会话历史，靠行内 `forkedFrom` 标记去重；
+  父会话文件被清理后，复制行仍归父会话名下 —— 会看到只有积分、没有标题的会话。
+- Qoder CN 的模型名是 `qfmodel` / `dfmodel` 这类内部别名，原样显示；
+  采集只扫 `~/.qoder-cn/projects/` 下的会话日志，不读 `main.sqlite`
+  （标题与模型窗口在里面，但要处理 WAL 锁）。
 - Kimi Code 的上下文水位按「会话最后一次用的模型」的 `max_context_size` 算；
   模型不在 `config.toml` 里（例如内置模型）时窗口未知，水位只报已用量、不给百分比。
 - ZCode 的上下文上限本机拿不到（远程 provider 的模型目录不落本地），

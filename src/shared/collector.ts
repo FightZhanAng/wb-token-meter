@@ -528,7 +528,7 @@ export function collectSnapshot(options: CollectOptions): Snapshot {
     const projectKey = transcript.projectDir
     let project = projectMap.get(projectKey)
     if (!project) {
-      project = { ...emptyBundle(), projectDir: projectKey, cwd: meta?.cwd ?? '', sessions: 0 }
+      project = { ...emptyBundle(), projectDir: projectKey, cwd: meta?.cwd ?? '', sessions: 0, credits: 0 }
       projectMap.set(projectKey, project)
     }
     project.calls += bundle.calls
@@ -536,6 +536,8 @@ export function collectSnapshot(options: CollectOptions): Snapshot {
     project.outputTokens += bundle.outputTokens
     project.cachedTokens += bundle.cachedTokens
     project.reasoningTokens += bundle.reasoningTokens
+    // 项目维度的积分 = 该会话能对上的那部分（口径同 attributedCredits）
+    project.credits += creditsForSession
     project.sessions += 1
 
     sessionStats.push({

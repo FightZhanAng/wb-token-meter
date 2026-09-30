@@ -20,6 +20,7 @@ import {
   hasCredits,
   hasQuota,
   hasReasoning,
+  hasTokens,
   percent,
   projectLabel,
   relativeTime,
@@ -85,6 +86,8 @@ interface BarRow {
   hint?: string
   /** 子项（缓存命中、思考）：缩进一格，不靠「·」这类符号提示层级 */
   sub?: boolean
+  /** 覆盖默认的 compact 显示：积分带小数，compact 会把它圆成整数 */
+  display?: string
 }
 
 function Bars({ rows }: { rows: BarRow[] }): JSX.Element {
@@ -100,7 +103,7 @@ function Bars({ rows }: { rows: BarRow[] }): JSX.Element {
             <div className="bar-fill" style={{ width: `${(row.value / max) * 100}%`, background: row.color }} />
           </div>
           <div className="bar-value">
-            {compact(row.value)}
+            {row.display ?? compact(row.value)}
             {row.hint ? <em>{row.hint}</em> : null}
           </div>
         </div>
@@ -128,9 +131,13 @@ function Gauge({ ratio }: { ratio: number }): JSX.Element {
 
 const HEAT_WEEKS = 26
 
+/** 热力图按什么量计深浅：token 源用 token，Qoder CN 这种只有积分的用它 */
+type HeatMetric = 'tokens' | 'credits'
+
 interface HeatCell {
   date: string
-  tokens: number
+  /** 按 metric 选定的量（画深浅用） */
+  value: number
   credits: number
   calls: number
   level: number
@@ -152,7 +159,8 @@ function heatLevel(value: number, max: number): number {
  */
 function buildHeatmap(
   days: DayStat[],
-  weeks: number
+  weeks: number,
+  metric: HeatMetric
 ): { cells: HeatCell[]; start: string; end: string; activeDays: number } {
   const byDate = new Map(days.map((day) => [day.date, day]))
   const today = startOfToday()
@@ -168,12 +176,12 @@ function buildHeatmap(
     for (let day = 0; day < 7; day++) {
       const key = dayKeyOf(shiftDays(firstSunday, week * 7 + day))
       const stat = byDate.get(key)
-      const tokens = stat ? stat.inputTokens + stat.outputTokens : 0
-      if (tokens > max) max = tokens
-      if (tokens > 0) activeDays += 1
+      const value = metric === 'credits' ? (stat?.credits ?? 0) : stat ? stat.inputTokens + stat.outputTokens : 0
+      if (value > max) max = value
+      if (value > 0) activeDays += 1
       cells.push({
         date: key,
-        tokens,
+        value,
         credits: stat?.credits ?? 0,
         calls: stat?.calls ?? 0,
         level: 0,
@@ -182,12 +190,23 @@ function buildHeatmap(
     }
   }
 
-  for (const cell of cells) cell.level = heatLevel(cell.tokens, max)
+  for (const cell of cells) cell.level = heatLevel(cell.value, max)
   return { cells, start: dayKeyOf(firstSunday), end: todayKey, activeDays }
 }
 
-function Heatmap({ days, withCredits }: { days: DayStat[]; withCredits: boolean }): JSX.Element {
-  const { cells, start, end, activeDays } = useMemo(() => buildHeatmap(days, HEAT_WEEKS), [days])
+function Heatmap({
+  days,
+  withCredits,
+  metric
+}: {
+  days: DayStat[]
+  withCredits: boolean
+  metric: HeatMetric
+}): JSX.Element {
+  const { cells, start, end, activeDays } = useMemo(
+    () => buildHeatmap(days, HEAT_WEEKS, metric),
+    [days, metric]
+  )
   const todayKey = dayKeyOf(startOfToday())
 
   return (
@@ -207,7 +226,9 @@ function Heatmap({ days, withCredits }: { days: DayStat[]; withCredits: boolean 
               title={
                 cell.future
                   ? cell.date
-                  : `${cell.date} · ${compact(cell.tokens)} token${withCredits ? ` · ${formatCredits(cell.credits)} 积分` : ''} · ${cell.calls} 次调用`
+                  : metric === 'credits'
+                    ? `${cell.date} · ${formatCredits(cell.credits)} 积分 · ${cell.calls} 次调用`
+                    : `${cell.date} · ${compact(cell.value)} token${withCredits ? ` · ${formatCredits(cell.credits)} 积分` : ''} · ${cell.calls} 次调用`
               }
             />
           ))}
@@ -746,6 +767,7 @@ export default function App(): JSX.Element {
   // 显示口径跟着「正在展示的这份数据」走，而不是跟着开关走 ——
   // 切过去但还没拿到新快照的那一瞬间，不该把 WorkBuddy 的积分画到 Kimi Code 上
   const withCredits = hasCredits(snapshot?.kind ?? 'workbuddy')
+  const withTokens = hasTokens(snapshot?.kind ?? 'workbuddy')
   const withReasoning = hasReasoning(snapshot?.kind ?? 'workbuddy')
   // 额度源拿不到 token 明细，面板整块换成额度视图
   const quotaView = hasQuota(snapshot?.kind ?? 'workbuddy')
@@ -779,10 +801,13 @@ export default function App(): JSX.Element {
     const range = Array.from({ length: 14 }, (_, index) => dayKeyOf(shiftDays(today, index - 13)))
     const values = range.map((key) => {
       const stat = byDate.get(key)
+      const tokens = stat ? stat.inputTokens + stat.outputTokens : 0
       return {
         date: key,
-        value: stat ? stat.inputTokens + stat.outputTokens : 0,
-        credits: stat?.credits ?? 0
+        // 没有 token 的源（Qoder CN）柱子画积分 —— 那是它唯一的量
+        value: withTokens ? tokens : (stat?.credits ?? 0),
+        credits: stat?.credits ?? 0,
+        calls: stat?.calls ?? 0
       }
     })
     const max = Math.max(1, ...values.map((item) => item.value))
@@ -793,9 +818,10 @@ export default function App(): JSX.Element {
       value: item.value,
       ratio: item.value / max,
       credits: item.credits,
+      calls: item.calls,
       isToday: index === range.length - 1
     }))
-  }, [snapshot?.days])
+  }, [snapshot?.days, withTokens])
 
   /**
    * 会话排行整块交给一个 useMemo，`.sessions` 下只留**一个**子节点。
@@ -821,11 +847,18 @@ export default function App(): JSX.Element {
               <span>{projectLabel(session.projectDir, session.cwd)}</span>
               <span>{relativeTime(session.lastActivity, now)}</span>
               <span>{session.calls} 次</span>
-              {session.contextSize > 0 ? <span>水位 {percent(session.contextUsed, session.contextSize)}%</span> : null}
+              {session.contextSize > 0 ? (
+                <span>水位 {percent(session.contextUsed, session.contextSize)}%</span>
+              ) : session.contextRatio != null ? (
+                <span>水位 {Math.round(session.contextRatio * 100)}%</span>
+              ) : null}
             </div>
           </div>
           <div className="session-numbers">
-            <div className="session-tokens">{compact(tokens)}</div>
+            <div className="session-tokens">
+              {/* 没有 token 的源这里报调用次数，积分数在下面一行 */}
+              {withTokens ? compact(tokens) : `${session.calls} 次`}
+            </div>
             {withCredits ? (
               <div className="session-credits">{formatCredits(session.credits)} 积分</div>
             ) : null}
@@ -833,7 +866,7 @@ export default function App(): JSX.Element {
         </div>
       )
     })
-  }, [snapshot?.sessions, now, withCredits])
+  }, [snapshot?.sessions, now, withCredits, withTokens])
 
   if (error && !snapshot) {
     return (
@@ -847,10 +880,19 @@ export default function App(): JSX.Element {
     )
   }
 
-  const activeRatio = snapshot?.active && snapshot.active.size > 0 ? snapshot.active.used / snapshot.active.size : 0
+  // 水位比例：优先按 used/size 算（大多数源），Qoder CN 没有 token 绝对值，
+  // 用它快照自带的比例
+  const activeRatio =
+    snapshot?.active == null
+      ? 0
+      : snapshot.active.size > 0
+        ? snapshot.active.used / snapshot.active.size
+        : (snapshot.active.ratio ?? 0)
   // 上限查不到时（模型不在本地 config 也不在 models.dev 目录里）size 是 0：
   // 水位只能报已用量，硬算一个百分比出来比不显示更糟
   const sizeKnown = (snapshot?.active?.size ?? 0) > 0
+  // 只有比例的源（Qoder CN）：仪表照画，读数报百分比
+  const ratioKnown = !sizeKnown && snapshot?.active?.ratio != null
   const todayTokens = (today?.inputTokens ?? 0) + (today?.outputTokens ?? 0)
   const newTokens = Math.max(0, (today?.inputTokens ?? 0) - (today?.cachedTokens ?? 0))
 
@@ -988,34 +1030,47 @@ export default function App(): JSX.Element {
             {/* 今日 —— 正在记录的那个通道 */}
             <Channel name="今日" live>
               <div className="counter">
-                <div className="counter-main">
-                  <div className="headline-value">
-                    {compact(todayTokens)}
-                    <span className="unit">token</span>
-                  </div>
-                  <div className="counter-sub">
-                    输入 {compact(today?.inputTokens ?? 0)} · 输出 {compact(today?.outputTokens ?? 0)} ·{' '}
-                    {today?.calls ?? 0} 次
-                  </div>
-                </div>
-                {withCredits ? (
-                  <div className="counter-side">
+                {!withTokens ? (
+                  /* Qoder CN 只有积分：大数报积分，副行报调用次数 */
+                  <div className="counter-main">
                     <div className="headline-value">
                       {formatCredits(today?.credits ?? 0)}
                       <span className="unit">积分</span>
                     </div>
-                    <div className="counter-sub">1 积分 ≈ {tokenPerCredit(todayTokens, today?.credits ?? 0)} token</div>
+                    <div className="counter-sub">{today?.calls ?? 0} 次调用</div>
                   </div>
                 ) : (
-                  <div className="counter-side">
-                    <div className="headline-value">
-                      {percent(today?.cachedTokens ?? 0, today?.inputTokens ?? 0)}%
-                      <span className="unit">缓存命中</span>
+                  <>
+                    <div className="counter-main">
+                      <div className="headline-value">
+                        {compact(todayTokens)}
+                        <span className="unit">token</span>
+                      </div>
+                      <div className="counter-sub">
+                        输入 {compact(today?.inputTokens ?? 0)} · 输出 {compact(today?.outputTokens ?? 0)} ·{' '}
+                        {today?.calls ?? 0} 次
+                      </div>
                     </div>
-                    <div className="counter-sub">
-                      命中 {compact(today?.cachedTokens ?? 0)} · 新增 {compact(newTokens)}
-                    </div>
-                  </div>
+                    {withCredits ? (
+                      <div className="counter-side">
+                        <div className="headline-value">
+                          {formatCredits(today?.credits ?? 0)}
+                          <span className="unit">积分</span>
+                        </div>
+                        <div className="counter-sub">1 积分 ≈ {tokenPerCredit(todayTokens, today?.credits ?? 0)} token</div>
+                      </div>
+                    ) : (
+                      <div className="counter-side">
+                        <div className="headline-value">
+                          {percent(today?.cachedTokens ?? 0, today?.inputTokens ?? 0)}%
+                          <span className="unit">缓存命中</span>
+                        </div>
+                        <div className="counter-sub">
+                          命中 {compact(today?.cachedTokens ?? 0)} · 新增 {compact(newTokens)}
+                        </div>
+                      </div>
+                    )}
+                  </>
                 )}
               </div>
             </Channel>
@@ -1036,6 +1091,8 @@ export default function App(): JSX.Element {
                         <>
                           {percent(snapshot.active.used, snapshot.active.size)}%
                         </>
+                      ) : ratioKnown ? (
+                        <>{Math.round((snapshot.active.ratio ?? 0) * 100)}%</>
                       ) : (
                         <>
                           {compact(snapshot.active.used)}
@@ -1044,12 +1101,14 @@ export default function App(): JSX.Element {
                       )}
                     </div>
                   </div>
-                  {sizeKnown ? <Gauge ratio={activeRatio} /> : null}
+                  {sizeKnown || ratioKnown ? <Gauge ratio={activeRatio} /> : null}
                   <div className="gauge-foot">
                     <span>
                       {sizeKnown
                         ? `${grouped(snapshot.active.used)} / ${grouped(snapshot.active.size)} token`
-                        : '模型上限未知，只报已用量'}
+                        : ratioKnown
+                          ? '水位比例来自会话快照，token 绝对值不提供'
+                          : '模型上限未知，只报已用量'}
                     </span>
                     <span title={snapshot.active.cwd || undefined}>{snapshot.active.cwd || '—'}</span>
                   </div>
@@ -1059,25 +1118,38 @@ export default function App(): JSX.Element {
               )}
             </Channel>
 
-            {/* Token 结构 */}
-            <Channel
-              name="结构"
-              note={`累计 ${compact((totals?.inputTokens ?? 0) + (totals?.outputTokens ?? 0))} token${
-                withCredits ? ` · ${formatCredits(totals?.credits ?? 0)} 积分` : ''
-              }`}
-            >
-              <Bars rows={structureRows} />
-            </Channel>
+            {/* Token 结构 —— 没有 token 的源（Qoder CN）整块收起 */}
+            {withTokens ? (
+              <Channel
+                name="结构"
+                note={`累计 ${compact((totals?.inputTokens ?? 0) + (totals?.outputTokens ?? 0))} token${
+                  withCredits ? ` · ${formatCredits(totals?.credits ?? 0)} 积分` : ''
+                }`}
+              >
+                <Bars rows={structureRows} />
+              </Channel>
+            ) : null}
 
             {/* 近 14 天 */}
-            <Channel name="14 天" note={`缓存命中占输入 ${percent(totals?.cachedTokens ?? 0, totals?.inputTokens ?? 0)}%`}>
+            <Channel
+              name="14 天"
+              note={
+                withTokens
+                  ? `缓存命中占输入 ${percent(totals?.cachedTokens ?? 0, totals?.inputTokens ?? 0)}%`
+                  : `累计 ${formatCredits(totals?.credits ?? 0)} 积分`
+              }
+            >
               {dayBars.some((day) => day.value > 0) ? (
                 <div className="days">
                   {dayBars.map((day) => (
                     <div
                       className="day-col"
                       key={day.date}
-                      title={`${day.date} · ${compact(day.value)} token${withCredits ? ` · ${formatCredits(day.credits)} 积分` : ''}`}
+                      title={
+                        withTokens
+                          ? `${day.date} · ${compact(day.value)} token${withCredits ? ` · ${formatCredits(day.credits)} 积分` : ''}`
+                          : `${day.date} · ${formatCredits(day.credits)} 积分 · ${day.calls} 次调用`
+                      }
                     >
                       <div
                         className={`day-bar${day.isToday ? ' today' : ''}`}
@@ -1103,7 +1175,11 @@ export default function App(): JSX.Element {
             {/* 活跃热力图 */}
             <Channel name="活跃">
               {(snapshot?.days.length ?? 0) > 0 ? (
-                <Heatmap days={snapshot?.days ?? []} withCredits={withCredits} />
+                <Heatmap
+                  days={snapshot?.days ?? []}
+                  withCredits={withCredits}
+                  metric={withTokens ? 'tokens' : 'credits'}
+                />
               ) : (
                 <div className="empty">暂无数据</div>
               )}
@@ -1113,7 +1189,7 @@ export default function App(): JSX.Element {
             <Channel
               name="模型"
               note={
-                withCredits
+                withCredits && withTokens
                   ? `1 积分 ≈ ${tokenPerCredit((totals?.inputTokens ?? 0) + (totals?.outputTokens ?? 0), totals?.credits ?? 0)} token`
                   : undefined
               }
@@ -1122,9 +1198,14 @@ export default function App(): JSX.Element {
                 <Bars
                   rows={snapshot.models.slice(0, 5).map((model) => ({
                     name: model.model,
-                    value: model.inputTokens + model.outputTokens,
+                    value: withTokens ? model.inputTokens + model.outputTokens : model.credits,
+                    display: withTokens ? undefined : formatCredits(model.credits),
                     color: 'var(--d-rank)',
-                    hint: withCredits ? `${Math.round(model.credits)}分` : `${model.calls} 次`
+                    hint: withCredits
+                      ? withTokens
+                        ? `${Math.round(model.credits)}分`
+                        : `${model.calls} 次`
+                      : `${model.calls} 次`
                   }))}
                 />
               ) : (
@@ -1138,7 +1219,8 @@ export default function App(): JSX.Element {
                 <Bars
                   rows={snapshot.projects.slice(0, 5).map((project) => ({
                     name: projectLabel(project.projectDir, project.cwd),
-                    value: project.inputTokens + project.outputTokens,
+                    value: withTokens ? project.inputTokens + project.outputTokens : project.credits,
+                    display: withTokens ? undefined : formatCredits(project.credits),
                     color: 'var(--d-rank)',
                     hint: `${project.sessions}会话`
                   }))}
@@ -1159,6 +1241,26 @@ export default function App(): JSX.Element {
             >
               <div className="sessions">{sessionRows ?? <div className="empty">暂无会话</div>}</div>
             </Channel>
+
+            {/* 数据来源 —— 没有 token 的源（Qoder CN）在这里交代账本口径 */}
+            {!withTokens && snapshot ? (
+              <Channel name="来源" note="本地读取">
+                <div className="quota-meta">
+                  <span>目录</span>
+                  <code>{snapshot.source.dir}</code>
+                </div>
+                <div className="quota-meta">
+                  <span>账本</span>
+                  <span>
+                    {snapshot.source.files} 个会话文件 · {snapshot.totals.calls} 次请求
+                  </span>
+                </div>
+                <div className="quota-note">
+                  Qoder CN 的账本只回积分与上下文水位，不提供 token 明细 ——
+                  输入 / 输出 / 缓存这些通道没有数据可画。用量全部来自本地会话日志。
+                </div>
+              </Channel>
+            ) : null}
           </>
         )}
 

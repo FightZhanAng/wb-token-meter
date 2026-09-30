@@ -18,6 +18,11 @@ export interface CallRecord {
   outputTokens: number
   cachedTokens: number
   reasoningTokens: number
+  /**
+   * 本次调用的积分消耗。只有 Qoder CN 填这一项 ——
+   * 它的服务端只回积分、不回 token，其余源不填（视作 0）。
+   */
+  credits?: number
 }
 
 export interface TokenBundle {
@@ -40,6 +45,11 @@ export interface SessionStat extends TokenBundle {
   matchedTraces: number
   contextUsed: number
   contextSize: number
+  /**
+   * 上下文水位比例 0..1。只有 Qoder CN 直接拿到比例（会话快照自带
+   * context_usage_ratio），拿不到 token 绝对值时界面按它画水位。
+   */
+  contextRatio?: number
   lastActivity: number
 }
 
@@ -58,6 +68,7 @@ export interface ProjectStat extends TokenBundle {
   projectDir: string
   cwd: string
   sessions: number
+  credits: number
 }
 
 export interface ActiveContext {
@@ -66,6 +77,8 @@ export interface ActiveContext {
   cwd: string
   used: number
   size: number
+  /** 水位比例 0..1；size 未知但拿到了比例时用它（Qoder CN 只有这一项） */
+  ratio?: number
   updatedAt: number
 }
 
@@ -87,11 +100,12 @@ export interface Totals extends TokenBundle {
 
 /**
  * 数据源。各边的账本口径都不同，界面必须知道自己在看哪一本：
- * WorkBuddy 有积分（token 只是副产品），Kimi Code / ZCode / MiMo / Reasonix /
+ * WorkBuddy 有积分（token 只是副产品），Qoder CN 有积分但**没有 token**
+ * （服务端只回积分与上下文水位），Kimi Code / ZCode / MiMo / Reasonix /
  * DeepSeek Harness 只有 token，OpenCode Go 连 token 都没有 ——
  * 只有订阅额度的占用比例，而且还是联网查的。
  */
-export type SourceKind = 'workbuddy' | 'kimi' | 'zcode' | 'mimo' | 'reasonix' | 'dsh' | 'opencode'
+export type SourceKind = 'workbuddy' | 'qoder' | 'kimi' | 'zcode' | 'mimo' | 'reasonix' | 'dsh' | 'opencode'
 
 export interface SnapshotSource {
   /** 数据根目录 */

@@ -33,6 +33,8 @@ export interface SourceSession {
   contextUsed: number
   /** 上下文上限；拿不到就填 0，界面会退化成「只报已用」 */
   contextSize: number
+  /** 水位比例 0..1；拿不到比例（只有 Qoder CN 拿得到）就不填 */
+  contextRatio?: number
   lastActivity: number
   /** 归档会话不参与「当前活跃会话」的评选 */
   archived: boolean
@@ -53,8 +55,9 @@ export interface AggregateOptions {
 /**
  * 把会话列表摊成一张 Snapshot。
  *
- * 这些源都没有积分，所以积分相关的字段一律留 0 —— 界面靠 snapshot.kind
- * 决定这些位置显不显示，显示成 0 分比不显示更糟。
+ * 积分按调用逐笔累加（只有 Qoder CN 的 CallRecord 带 credits，其余源视作 0）——
+ * Qoder CN 的计费回合就写在会话明细里，没有 WorkBuddy 那种独立的计费表，
+ * 所以「计费回合数」直接取调用数、没有未归因一说。
  */
 export function buildSnapshot(sessions: SourceSession[], options: AggregateOptions): Snapshot {
   const { now } = options
@@ -85,10 +88,13 @@ export function buildSnapshot(sessions: SourceSession[], options: AggregateOptio
   for (const session of sessions) {
     const bundle = emptyBundle()
     let lastActivity = session.lastActivity
+    let sessionCredits = 0
 
     for (const call of session.calls) {
       addCall(bundle, call)
       if (call.timestamp > lastActivity) lastActivity = call.timestamp
+      const callCredits = call.credits ?? 0
+      sessionCredits += callCredits
 
       const dayKey = localDate(call.timestamp)
       let day = dayMap.get(dayKey)
@@ -97,7 +103,11 @@ export function buildSnapshot(sessions: SourceSession[], options: AggregateOptio
         dayMap.set(dayKey, day)
       }
       addCall(day, call)
-      if (dayKey === todayKey) addCall(todayBundle, call)
+      day.credits += callCredits
+      if (dayKey === todayKey) {
+        addCall(todayBundle, call)
+        todayBundle.credits += callCredits
+      }
 
       let model = modelMap.get(call.model)
       if (!model) {
@@ -105,6 +115,7 @@ export function buildSnapshot(sessions: SourceSession[], options: AggregateOptio
         modelMap.set(call.model, model)
       }
       addCall(model, call)
+      model.credits += callCredits
     }
 
     totals.calls += bundle.calls
@@ -112,11 +123,12 @@ export function buildSnapshot(sessions: SourceSession[], options: AggregateOptio
     totals.outputTokens += bundle.outputTokens
     totals.cachedTokens += bundle.cachedTokens
     totals.reasoningTokens += bundle.reasoningTokens
+    totals.credits += sessionCredits
     totals.sessions += 1
 
     let project = projectMap.get(session.projectDir)
     if (!project) {
-      project = { ...emptyBundle(), projectDir: session.projectDir, cwd: session.cwd, sessions: 0 }
+      project = { ...emptyBundle(), projectDir: session.projectDir, cwd: session.cwd, sessions: 0, credits: 0 }
       projectMap.set(session.projectDir, project)
     }
     project.calls += bundle.calls
@@ -124,6 +136,7 @@ export function buildSnapshot(sessions: SourceSession[], options: AggregateOptio
     project.outputTokens += bundle.outputTokens
     project.cachedTokens += bundle.cachedTokens
     project.reasoningTokens += bundle.reasoningTokens
+    project.credits += sessionCredits
     project.sessions += 1
 
     const stat: SessionStat = {
@@ -133,11 +146,12 @@ export function buildSnapshot(sessions: SourceSession[], options: AggregateOptio
       projectDir: session.projectDir,
       model: mostFrequentModel(session.calls),
       status: '',
-      credits: 0,
+      credits: sessionCredits,
       totalTraces: 0,
       matchedTraces: 0,
       contextUsed: session.contextUsed,
       contextSize: session.contextSize,
+      contextRatio: session.contextRatio,
       lastActivity,
       ...bundle
     }
@@ -164,12 +178,27 @@ export function buildSnapshot(sessions: SourceSession[], options: AggregateOptio
         cwd: activeSource.cwd,
         used: activeSource.contextUsed,
         size: activeSource.contextSize,
+        ratio: activeSource.contextRatio,
         updatedAt: activeSource.lastActivity
       }
     : null
 
-  const byTokens = (a: { inputTokens: number; outputTokens: number }, b: { inputTokens: number; outputTokens: number }): number =>
-    b.inputTokens + b.outputTokens - (a.inputTokens + a.outputTokens)
+  /*
+   * 排行权重：token 为主，只有积分的源（Qoder CN）按积分排 —— 一个源要么走
+   * token 要么走积分，不会混着比，两边量级差多少都不影响。
+   */
+  const weight = (item: { inputTokens: number; outputTokens: number; credits: number }): number =>
+    item.inputTokens + item.outputTokens + item.credits
+  const byWeight = (a: { inputTokens: number; outputTokens: number; credits: number }, b: { inputTokens: number; outputTokens: number; credits: number }): number =>
+    weight(b) - weight(a)
+
+  // 有积分账本的源（Qoder CN）每个调用就是一次计费回合 —— 它没有 WorkBuddy
+  // 那种独立的计费表，所以没有「未归因」一说，计费回合数直接等于调用数。
+  if (totals.credits > 0) {
+    totals.traces = totals.calls
+    totals.matchedTraces = totals.calls
+    totals.dbTraces = totals.calls
+  }
 
   return {
     kind: options.kind,
@@ -178,8 +207,8 @@ export function buildSnapshot(sessions: SourceSession[], options: AggregateOptio
     today: todayBundle,
     sessions: sessionStats.sort((a, b) => b.lastActivity - a.lastActivity),
     days: [...dayMap.values()].sort((a, b) => (a.date < b.date ? 1 : -1)),
-    models: [...modelMap.values()].sort(byTokens),
-    projects: [...projectMap.values()].sort(byTokens),
+    models: [...modelMap.values()].sort(byWeight),
+    projects: [...projectMap.values()].sort(byWeight),
     active,
     source: {
       dir: options.dir,

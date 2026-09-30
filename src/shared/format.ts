@@ -38,11 +38,23 @@ export function credits(value: number): string {
 
 /**
  * 该数据源是否按积分计量。
- * 只有 WorkBuddy 有积分这一层，其余六个源都没有 —— 所有积分相关的数字、比价、
+ * WorkBuddy 与 Qoder CN 有积分这一层 —— Qoder CN 甚至**只有**积分
+ * （服务端不回 token），其余六个源没有，所有积分相关的数字、比价、
  * 提示都要整块收起来，显示成 0 分比不显示更糟。
  */
 export function hasCredits(kind: SourceKind): boolean {
-  return kind === 'workbuddy'
+  return kind === 'workbuddy' || kind === 'qoder'
+}
+
+/**
+ * 该数据源是否有 token 明细。
+ * 只有 Qoder CN 没有 —— 服务端只回积分和上下文水位，input / output /
+ * cache 四个字段恒为 0（客户端自己都标了 tokenCountsAvailable:false）。
+ * 它的问题不是「暂时读不到」，是账本里根本没有，token 通道要整块收起，
+ * 不能画成一片 0。
+ */
+export function hasTokens(kind: SourceKind): boolean {
+  return kind !== 'qoder'
 }
 
 /**
@@ -66,11 +78,12 @@ export function hasQuota(kind: SourceKind): boolean {
 
 /**
  * 数据源在界面上的顺序 —— 面板分段按钮与托盘菜单共用同一份，免得两边点错位。
- * 按「账本性质」排：先是带积分的，接着是一整排只有 token 的，
- * 最后是唯一联网查额度的那个。
+ * 按「账本性质」排：先是带积分的（WorkBuddy 积分 + token，Qoder CN 只有积分），
+ * 接着是一整排只有 token 的，最后是唯一联网查额度的那个。
  */
 export const SOURCE_ORDER: SourceKind[] = [
   'workbuddy',
+  'qoder',
   'kimi',
   'zcode',
   'mimo',
@@ -82,6 +95,7 @@ export const SOURCE_ORDER: SourceKind[] = [
 /** 数据源显示名 */
 export function sourceLabel(kind: SourceKind): string {
   if (kind === 'workbuddy') return 'WorkBuddy'
+  if (kind === 'qoder') return 'Qoder CN'
   if (kind === 'zcode') return 'ZCode'
   if (kind === 'mimo') return 'MiMo'
   if (kind === 'reasonix') return 'Reasonix'
@@ -112,11 +126,13 @@ export function themeShort(mode: ThemeMode): string {
 /**
  * 上下文水位的一句话摘要。
  * 窗口未知时（size = 0，比如 ZCode 走远程 provider、模型目录不落本地）
- * 只报已用量，不要凭空编一个百分比出来。
+ * 只报已用量，不要凭空编一个百分比出来；Qoder CN 反过来 ——
+ * 没有 token 绝对值但有比例，就按比例报。
  */
-export function contextSummary(active: { used: number; size: number } | null): string {
+export function contextSummary(active: { used: number; size: number; ratio?: number } | null): string {
   if (!active) return '无活跃会话'
   if (active.size > 0) return `上下文 ${percent(active.used, active.size)}%`
+  if (active.ratio != null) return `上下文 ${Math.round(active.ratio * 100)}%`
   return `上下文 ${compact(active.used)} token`
 }
 

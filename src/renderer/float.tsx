@@ -1,6 +1,6 @@
 import { StrictMode, useEffect, useRef, useState, type JSX } from 'react'
 import { createRoot } from 'react-dom/client'
-import { compact, credits as formatCredits, hasCredits, hasQuota, percent } from '@shared/format'
+import { compact, credits as formatCredits, hasCredits, hasQuota, hasTokens, percent } from '@shared/format'
 import { describeReset, quotaWindowLabel, windowOf } from '@shared/opencode-quota'
 import type { QuotaInfo, QuotaWindow, Settings, Snapshot } from '@shared/types'
 import { watchSystemTheme } from './theme'
@@ -144,14 +144,30 @@ function Capsule(): JSX.Element {
   const kind = snapshot?.kind ?? 'workbuddy'
   const todayTokens = (snapshot?.today.inputTokens ?? 0) + (snapshot?.today.outputTokens ?? 0)
   const active = snapshot?.active
-  // Kimi Code 没有积分，第二行换成今日调用次数
+  // Kimi Code 没有积分，第二行换成今日调用次数；
+  // Qoder CN 反过来 —— 只有积分，第一行就报积分
   const withCredits = hasCredits(kind)
+  const withTokens = hasTokens(kind)
 
   // 额度源没有 token 也没有会话，圆环改报 5 小时窗口的占用；
   // 圆环自带的 0.9 / 0.7 配色阈值正好和 quotaLevel 的分档一致，直接复用
   const quota = hasQuota(kind) ? snapshot?.quota : undefined
   const rolling = quota ? (windowOf(quota.windows, 'rolling') ?? quota.windows[0] ?? null) : null
-  const ratio = quota ? (rolling?.percent ?? 0) / 100 : active && active.size > 0 ? active.used / active.size : 0
+  const ratio = quota
+    ? (rolling?.percent ?? 0) / 100
+    : active
+      ? active.size > 0
+        ? active.used / active.size
+        : (active.ratio ?? 0)
+      : 0
+  // 水位角标：size 未知时按 Qoder CN 的比例报
+  const waterMark = active
+    ? active.size > 0
+      ? `${percent(active.used, active.size)}%`
+      : active.ratio != null
+        ? `${Math.round(active.ratio * 100)}%`
+        : ''
+    : ''
   // 快照每 20 秒推一次，重置文案跟着这一次渲染的时间算就够了，不必再挂个计时器
   const now = Date.now()
 
@@ -178,12 +194,23 @@ function Capsule(): JSX.Element {
         ) : (
           <>
             <div className="tokens">
-              {compact(todayTokens)}
-              <em>token</em>
+              {withTokens ? (
+                <>
+                  {compact(todayTokens)}
+                  <em>token</em>
+                </>
+              ) : (
+                <>
+                  {formatCredits(snapshot?.today.credits ?? 0)}
+                  <em>积分</em>
+                </>
+              )}
             </div>
-            <div className={`credits${withCredits ? '' : ' plain'}`}>
-              {active && active.size > 0 ? `${percent(active.used, active.size)}% · ` : ''}
-              {withCredits ? `${formatCredits(snapshot?.today.credits ?? 0)} 分` : `${snapshot?.today.calls ?? 0} 次`}
+            <div className={`credits${withTokens && withCredits ? '' : ' plain'}`}>
+              {waterMark ? `${waterMark} · ` : ''}
+              {withTokens && withCredits
+                ? `${formatCredits(snapshot?.today.credits ?? 0)} 分`
+                : `${snapshot?.today.calls ?? 0} 次`}
             </div>
           </>
         )}
