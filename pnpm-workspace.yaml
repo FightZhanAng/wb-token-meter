@@ -4,3 +4,5 @@
 allowBuilds:
   electron-winstaller: false
   esbuild: false
+  # electron 不在表里：43 起包内没有 install 脚本，二进制由 index.js 首次 require 时懒下载，
+  # 所以既不用批准也拦不住，别把它加回允许列表。

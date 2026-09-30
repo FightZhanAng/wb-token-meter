@@ -28,13 +28,6 @@
     "typescript": "^5.9.3",
     "vite": "^8.2.0"
   },
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "electron",
-      "electron-builder",
-      "esbuild"
-    ]
-  },
   "dependencies": {
     "electron-updater": "^6.8.9"
   }
