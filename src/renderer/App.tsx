@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, type JSX, type ReactNode } from 'react'
 import type {
+  AppInfo,
   DayStat,
   QuotaInfo,
   QuotaWindow,
@@ -35,6 +36,13 @@ import { describeReset, quotaLevel, quotaWindowLabel } from '@shared/opencode-qu
 import { updateBusy, updateNeedsAttention, updateStatusText } from '@shared/update'
 
 /* ------------------------------------------------------------ 小工具 */
+
+/** node 的平台名翻成用户认得的写法；其余原样返回，够用了 */
+function platformLabel(platform: string): string {
+  if (platform === 'win32') return 'Windows'
+  if (platform === 'darwin') return 'macOS'
+  return platform
+}
 
 function levelOf(ratio: number): 'safe' | 'warn' | 'danger' {
   if (ratio >= 0.9) return 'danger'
@@ -493,7 +501,7 @@ function SourceSwitch({
       </button>
       {open ? (
         <>
-          <div className="source-backdrop" onClick={() => setOpen(false)} />
+          <div className="menu-backdrop" onClick={() => setOpen(false)} />
           <div className="source-menu" role="menu">
             {tail.map((kind) => (
               <button
@@ -569,6 +577,12 @@ export default function App(): JSX.Element {
   const [update, setUpdate] = useState<UpdateState | null>(null)
   const [autoCheck, setAutoCheck] = useState(true)
   const [autoDownload, setAutoDownload] = useState(false)
+  /**
+   * 「关于」只有两个会露脸的形态：下拉菜单、版本弹窗。
+   * 合成一个状态就不用管「菜单没关又开弹窗」这种组合 —— 打开弹窗时菜单自然收掉了。
+   */
+  const [about, setAbout] = useState<'closed' | 'menu' | 'version'>('closed')
+  const [appInfo, setAppInfo] = useState<AppInfo | null>(null)
 
   const load = useCallback(async (force: boolean) => {
     const api = window.meter
@@ -650,6 +664,7 @@ export default function App(): JSX.Element {
         })
         .catch(() => undefined)
       void api.getUpdate().then(setUpdate).catch(() => undefined)
+      void api.getAppInfo().then(setAppInfo).catch(() => undefined)
       const offSnapshot = api.onSnapshot((next) => setSnapshot(next))
       const offSettings = api.onSettings((settings) => {
         setSource(settings.source)
@@ -670,6 +685,29 @@ export default function App(): JSX.Element {
       return
     }
   }, [load])
+
+  // 弹层都能用 Esc 收掉 —— 菜单和弹窗都是「看一眼就关」的东西，
+  // 逼用户把鼠标跑回去点遮罩或关闭按钮不值当
+  useEffect(() => {
+    if (about === 'closed') return
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') setAbout('closed')
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [about])
+
+  /** 「关于 → 退出」：和托盘里那一项走同一条 IPC（先置 isQuitting 再退出） */
+  const quitApp = useCallback(async () => {
+    const api = window.meter
+    if (!api) return
+    setAbout('closed')
+    try {
+      await api.quit()
+    } catch (cause) {
+      setError(String(cause))
+    }
+  }, [])
 
   /** 更新按钮的统一入口 —— 主进程会把最新状态回抛，顺便也广播给托盘 */
   const runUpdateAction = useCallback(async (action: 'check' | 'download' | 'install' | 'page') => {
@@ -830,43 +868,109 @@ export default function App(): JSX.Element {
   const updateWorking = updateBusy(updateState.status)
   const updateAlerts = updateNeedsAttention(updateState.status)
 
+  // 「关于 → 版本」弹窗的内容。主进程还没答话时先摆省略号，不留空行
+  const aboutRows: Array<[string, string]> = [
+    [
+      '运行模式',
+      appInfo ? (appInfo.packaged ? '安装版（支持自动更新）' : '开发模式（更新检查在打包后才生效）') : '…'
+    ],
+    ['运行环境', appInfo ? `Electron ${appInfo.electron} · Chromium ${appInfo.chrome}` : '…'],
+    ['Node', appInfo ? appInfo.node : '…'],
+    ['系统', appInfo ? `${platformLabel(appInfo.platform)} ${appInfo.arch}` : '…'],
+    ['配置文件', appInfo?.settingsFile || '…']
+  ]
+
   return (
     <div className="app">
       <header className="app-header">
-        <div className="app-header-main">
-          <div className="app-title">Token 计量器</div>
-          <div className="app-subtitle">
-            {snapshot
-              ? `更新于 ${formatClock(snapshot.generatedAt)} · ${relativeTime(snapshot.generatedAt, now)}`
-              : '正在读取…'}
+        {/*
+         * 纯窗口 chrome：整条只负责拖窗，右端就是系统三键（最小化 / 最大化 / 关闭）的位置。
+         * 应用自己的标题和按钮一律放到下面一行 —— 跟三键同处一行，一旦系统换了缩放
+         * 或者加了别的东西，两边就会互相压。
+         * 左角只留一个「关于」：菜单栏就该待在标题栏里，它是这一格唯一的东西，
+         * 和三键分处两头，谁也压不到谁。
+         */}
+        <div className="app-caption">
+          <div className="app-about">
+            <button
+              type="button"
+              className="about-entry"
+              aria-haspopup="menu"
+              aria-expanded={about === 'menu'}
+              onClick={() => setAbout(about === 'menu' ? 'closed' : 'menu')}
+            >
+              关于
+            </button>
+            {about === 'menu' ? (
+              <>
+                <div className="menu-backdrop" onClick={() => setAbout('closed')} />
+                <div className="about-menu" role="menu">
+                  <button type="button" role="menuitem" onClick={() => setAbout('version')}>
+                    版本
+                    <span className="menu-hint">v{appInfo?.version || updateState.current || '—'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    disabled={updateWorking}
+                    onClick={() => {
+                      setAbout('closed')
+                      void runUpdateAction('check')
+                    }}
+                  >
+                    检查更新
+                    <span className="menu-hint" title={updateState.message || undefined}>
+                      {updateStatusText(updateState)}
+                    </span>
+                  </button>
+                  <span className="menu-rule" aria-hidden="true" />
+                  <button type="button" role="menuitem" onClick={() => void quitApp()}>
+                    退出
+                  </button>
+                </div>
+              </>
+            ) : null}
+          </div>
+          <div className="app-caption-guard" aria-hidden="true" />
+        </div>
+        <div className="app-id-row">
+          <div className="app-header-main">
+            <div className="app-title">Token 计量器</div>
+            <div className="app-subtitle">
+              {snapshot
+                ? `更新于 ${formatClock(snapshot.generatedAt)} · ${relativeTime(snapshot.generatedAt, now)}`
+                : '正在读取…'}
+            </div>
+          </div>
+          <div className="header-actions">
+            <button
+              type="button"
+              className="icon-button"
+              title="打开项目主页（GitHub）"
+              aria-label="打开项目主页（GitHub）"
+              onClick={() => void openHome()}
+            >
+              <GitHubGlyph />
+            </button>
+            <button
+              type="button"
+              className="theme-toggle"
+              title={`外观：${themeLabel(theme)}（点击切换）`}
+              aria-label={`外观：${themeLabel(theme)}，点击切换`}
+              onClick={() => void cycleTheme()}
+            >
+              <ThemeGlyph mode={theme} />
+              {themeShort(theme)}
+            </button>
+            <button type="button" disabled={busy} onClick={() => void load(true)}>
+              {busy ? '刷新中…' : '刷新'}
+            </button>
           </div>
         </div>
-        <div className="header-actions">
-          <button
-            type="button"
-            className="icon-button"
-            title="打开项目主页（GitHub）"
-            aria-label="打开项目主页（GitHub）"
-            onClick={() => void openHome()}
-          >
-            <GitHubGlyph />
-          </button>
-          <button
-            type="button"
-            className="theme-toggle"
-            title={`外观：${themeLabel(theme)}（点击切换）`}
-            aria-label={`外观：${themeLabel(theme)}，点击切换`}
-            onClick={() => void cycleTheme()}
-          >
-            <ThemeGlyph mode={theme} />
-            {themeShort(theme)}
-          </button>
-          <button type="button" disabled={busy} onClick={() => void load(true)}>
-            {busy ? '刷新中…' : '刷新'}
-          </button>
-        </div>
         {/* 数据源单独占一行：它是这一页的主导航，挤在标题旁边只会把标题压成省略号 */}
-        <SourceSwitch value={source} disabled={busy} onChange={(kind) => void switchSource(kind)} />
+        <div className="app-nav">
+          <SourceSwitch value={source} disabled={busy} onChange={(kind) => void switchSource(kind)} />
+        </div>
       </header>
 
       <div className="app-body">
@@ -1148,6 +1252,43 @@ export default function App(): JSX.Element {
           </label>
         </div>
       </footer>
+
+      {/*
+        「关于 → 版本」：一个盖住整页的弹层。刻意做成应用自己的样式而不是系统对话框 ——
+        系统对话框是另一套外皮，跟这块记录纸摆在一起像两个程序。
+      */}
+      {about === 'version' ? (
+        <div className="about-layer" role="dialog" aria-modal="true" aria-label="关于 Token 计量器">
+          <div className="menu-backdrop" onClick={() => setAbout('closed')} />
+          <div className="about-card">
+            <div className="about-head">
+              <span className="about-name">Token 计量器</span>
+              <span className="about-number">v{appInfo?.version || updateState.current || '—'}</span>
+            </div>
+            <div className="about-rows">
+              {aboutRows.map(([label, value]) => (
+                <div className="about-row" key={label}>
+                  <span className="about-key">{label}</span>
+                  <span
+                    className={`about-value${label === '配置文件' ? ' path' : ''}`}
+                    title={value}
+                  >
+                    {value}
+                  </span>
+                </div>
+              ))}
+            </div>
+            <div className="about-actions">
+              <button type="button" className="ghost" onClick={() => void runUpdateAction('page')}>
+                打开发布页
+              </button>
+              <button type="button" className="primary" onClick={() => setAbout('closed')}>
+                关闭
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   )
 }

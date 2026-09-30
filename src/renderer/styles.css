@@ -59,6 +59,8 @@
 
   --focus: #2c5c7a;
   --menu-shadow: 0 10px 26px rgba(22, 33, 30, 0.18);
+  /* 弹层背后压暗一层。比透明更清楚「这是盖在上面的东西」，也不会糊掉下面的读数 */
+  --scrim: rgba(22, 33, 30, 0.32);
 
   --gutter: 84px;
   --font-ui: Bahnschrift, 'DIN Alternate', 'Segoe UI Variable Text', 'Segoe UI',
@@ -112,6 +114,8 @@
 
   --focus: #5b9bc4;
   --menu-shadow: 0 10px 26px rgba(0, 0, 0, 0.5);
+  /* 深色下压暗要更狠，否则和背景分不出来 */
+  --scrim: rgba(0, 0, 0, 0.55);
 }
 
 * {
@@ -186,22 +190,22 @@ body {
 /* ------------------------------------------------------------ 机头 */
 
 /*
- * 机头分两行：第一行是身份（标题 + 更新时间）和两个动作（外观、刷新），
- * 第二行整行给数据源。
+ * 机头分三行：第一行是**纯窗口 chrome**（可拖拽 + 系统三键的占位，见 .app-caption），
+ * 第二行是身份（标题 + 更新时间）和三个动作（GitHub、外观、刷新），
+ * 第三行整行给数据源。
  *
  * 挤成一行时，「DeepSeek Harness」这种长名字会把标题压成「Token ...」——
  * 标题是这个工具的名字，不该为了省一行而变成省略号；
  * 而数据源本来就是这一页的主导航，独占一行反而更清楚。
+ *
+ * 这一层的左右内边距必须是 0：.app-caption-guard 的宽度按百分比算，
+ * 这层只要有内边距，算出来的留白就少算同样多，系统三键就会压到右下角之外。
  */
 .app-header {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  grid-template-areas:
-    'main actions'
-    'sources sources';
-  align-items: center;
-  gap: 9px 10px;
-  padding: 11px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 0 0 11px;
   /* 机头比纸面深一档，像仪器的顶轨 */
   background: var(--sheet-2);
   border-bottom: 1px solid var(--rule);
@@ -209,12 +213,76 @@ body {
 }
 
 /*
+ * 标题栏本体：**只有窗口 chrome** —— 整条可拖窗，右端留给系统三键，
+ * 应用自己的标题和按钮在下面 .app-id-row 那一行，两者不共处一行。
+ * 高度直接取系统的标题栏高度（和主进程 CAPTION_HEIGHT 是同一个数）；
+ * 非 Windows 没有这个环境变量，兜底 0 —— 那边有原生边框，这条本来就该消失。
+ */
+.app-caption {
+  display: flex;
+  min-height: env(titlebar-area-height, 0px);
+  -webkit-app-region: drag;
+}
+
+/*
+ * 系统三键（最小化 / 最大化 / 关闭）的占位，宽度 = 窗口宽 - 标题栏可用宽度。
+ * 三键宽度随 DPI 缩放变，写死 138px 在 125% 的屏上就会错位，只能问系统要；
+ * 系统没给（没启用覆盖层）时两个默认值相减得 0，这块自动消失。
+ */
+.app-caption-guard {
+  flex: none;
+  margin-left: auto;
+  width: calc(100% - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100%));
+}
+
+/*
+ * 标题栏左角：只有「关于」一个入口。它是菜单栏的位置，所以别给它加内边距、
+ * 别做成圆角按钮 —— 按钮吃满整条标题栏的高度，跟原生的菜单标签一个样子。
+ * 整块标 no-drag，否则点下去就成了拖窗口。
+ */
+.app-about {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  padding-left: 12px;
+  -webkit-app-region: no-drag;
+}
+
+.about-entry {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 10px;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: var(--ink-2);
+  font-size: 12px;
+}
+
+.about-entry:hover:not(:disabled),
+.about-entry[aria-expanded='true'] {
+  background: var(--paper);
+  color: var(--ink);
+}
+
+/*
+ * 身份（标题 + 更新时间）+ 动作（GitHub、外观、刷新）这一行。
+ * 它在标题栏下面，所以系统三键压不到它，左右内边距可以正常给。
+ */
+.app-id-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 14px;
+}
+
+/*
  * 七个数据源的名字加起来很宽，左侧这块必须能收缩：
- * 不给 min-width: 0，flex/grid 子项不会小于内容宽度，窗口收到最小尺寸时
+ * 不给 min-width: 0，flex 子项不会小于内容宽度，窗口收到最小尺寸时
  * 顶栏就会被撑破。副标题同理，超长就省略号。
  */
 .app-header-main {
-  grid-area: main;
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
 }
@@ -237,10 +305,19 @@ body {
 }
 
 .header-actions {
-  grid-area: actions;
+  flex: none;
   display: flex;
   align-items: center;
   gap: 8px;
+  /* 按钮得能点，不能跟着标题栏一起拖 */
+  -webkit-app-region: no-drag;
+}
+
+/* 数据源那一行：左边距给在这里，理由同 .app-header-main。
+   用 flex 而不是块级：里面的胶囊要按内容收窄，块级子元素会拉满整行 */
+.app-nav {
+  display: flex;
+  padding: 0 14px;
 }
 
 button {
@@ -302,7 +379,6 @@ button:disabled {
 /* ------------------------------------------------ 数据源切换 */
 
 .source-switch {
-  grid-area: sources;
   position: relative;
   display: flex;
   /* 窄窗下按钮多到放不下时整块折行，而不是把机头顶破 */
@@ -312,7 +388,6 @@ button:disabled {
   border-radius: 2px;
   background: var(--paper);
   border: 1px solid var(--rule);
-  justify-self: start;
 }
 
 .source-switch button {
@@ -345,21 +420,22 @@ button:disabled {
   opacity: 0.7;
 }
 
-/* 展开时铺一层透明遮罩，点别处就收起 —— 比监听 document 少一处清理 */
-.source-backdrop {
+/*
+ * 下拉弹层：数据源的「更多」和标题栏左角的「关于」共用这一套皮 ——
+ * 展开时铺一层透明遮罩，点别处就收起，比监听 document 少一处清理。
+ */
+.menu-backdrop {
   position: fixed;
   inset: 0;
   z-index: 30;
 }
 
-.source-menu {
+.source-menu,
+.about-menu {
   position: absolute;
-  top: calc(100% + 5px);
-  right: 0;
   z-index: 31;
   display: flex;
   flex-direction: column;
-  min-width: 132px;
   padding: 4px;
   border: 1px solid var(--rule);
   border-radius: 2px;
@@ -367,8 +443,21 @@ button:disabled {
   box-shadow: var(--menu-shadow);
 }
 
-.source-menu button {
-  text-align: left;
+.source-menu {
+  top: calc(100% + 5px);
+  right: 0;
+  min-width: 132px;
+}
+
+/* 「关于」在标题栏左角，菜单自然贴在整条标题栏的下沿（.app-about 撑满那条的高度） */
+.about-menu {
+  top: 100%;
+  left: 0;
+  min-width: 186px;
+}
+
+.source-menu button,
+.about-menu button {
   padding: 5px 9px;
   border-radius: 1px;
   border-color: transparent;
@@ -376,7 +465,21 @@ button:disabled {
   color: var(--ink-2);
 }
 
-.source-menu button:hover:not(:disabled) {
+.source-menu button {
+  text-align: left;
+}
+
+/* 菜单项带右侧提示（版本号 / 更新状态），所以左右分头对齐 */
+.about-menu button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  text-align: left;
+}
+
+.source-menu button:hover:not(:disabled),
+.about-menu button:hover:not(:disabled) {
   background: var(--paper);
 }
 
@@ -384,6 +487,125 @@ button:disabled {
   background: var(--pen-wash);
   color: var(--pen);
   box-shadow: none;
+}
+
+.menu-hint {
+  flex: none;
+  max-width: 118px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--ink-3);
+}
+
+/* 分隔线：靠颜色分档，不用一整块背景 */
+.menu-rule {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--rule-soft);
+}
+
+/* ------------------------------------------------ 关于 · 版本弹窗 */
+
+.about-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* 这里的遮罩要压暗页面，所以是唯一带底色的 .menu-backdrop；
+   层级必须压在卡片下面（上面那条 .menu-backdrop 的 z-index 是给下拉菜单用的） */
+.about-layer .menu-backdrop {
+  z-index: 0;
+  background: var(--scrim);
+}
+
+/*
+ * 弹窗也是记录纸：纸底、细线、方角，靠一条横线分区 —— 不做阴影浮起的「卡牌感」。
+ * 它盖在整页上面，所以不进 .app-caption 那条拖拽区，文字可以正常选中复制。
+ */
+.about-card {
+  position: relative;
+  z-index: 1;
+  width: min(370px, calc(100% - 36px));
+  padding: 15px 16px 13px;
+  border: 1px solid var(--rule);
+  border-radius: 2px;
+  background: var(--sheet);
+  box-shadow: var(--menu-shadow);
+}
+
+.about-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--rule-soft);
+}
+
+.about-name {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+/* 版本号是这一弹窗的主角，给它记录笔色 —— 和「今日」「当前数据源」同一套语义 */
+.about-number {
+  font-family: var(--font-num);
+  font-size: 13px;
+  color: var(--pen);
+}
+
+.about-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 11px 0 13px;
+}
+
+.about-row {
+  display: grid;
+  grid-template-columns: 62px minmax(0, 1fr);
+  gap: 10px;
+  align-items: baseline;
+  font-size: 12px;
+}
+
+.about-key {
+  color: var(--ink-3);
+}
+
+.about-value {
+  color: var(--ink);
+  word-break: break-all;
+}
+
+/* 路径要能被选中复制，所以用等宽字体、并且不禁用选择 */
+.about-value.path {
+  font-family: var(--font-num);
+  font-size: 11.5px;
+  color: var(--ink-2);
+  user-select: text;
+}
+
+.about-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.about-actions .primary {
+  border-color: var(--pen);
+  color: var(--pen);
+}
+
+.about-actions .primary:hover:not(:disabled) {
+  background: var(--pen-wash);
+  border-color: var(--pen);
 }
 
 /* ------------------------------------------------------------ 纸面 */

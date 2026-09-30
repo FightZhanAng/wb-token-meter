@@ -1,4 +1,4 @@
-import type { Settings, Snapshot, UpdateState } from '../shared/types'
+import type { AppInfo, Settings, Snapshot, UpdateState } from '../shared/types'
 
 declare global {
   interface Window {
@@ -10,6 +10,8 @@ declare global {
       /** 在系统浏览器里打开项目主页（地址写死在主进程） */
       openHome(): Promise<string>
       quit(): Promise<void>
+      /** 「关于 → 版本」弹窗用的版本号与运行环境 */
+      getAppInfo(): Promise<AppInfo>
       onSnapshot(handler: (snapshot: Snapshot) => void): () => void
 
       /** 桌面胶囊：拖动走单向消息，高频且不需要回值 */

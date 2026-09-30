@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { Settings, Snapshot, UpdateState } from '../shared/types'
+import type { AppInfo, Settings, Snapshot, UpdateState } from '../shared/types'
 
 const api = {
   /* 用量数据 */
@@ -9,6 +9,8 @@ const api = {
   /** 在系统浏览器里打开项目主页（地址写死在主进程） */
   openHome: (): Promise<string> => ipcRenderer.invoke('app:open-home') as Promise<string>,
   quit: (): Promise<void> => ipcRenderer.invoke('app:quit') as Promise<void>,
+  /** 「关于 → 版本」弹窗用的版本号与运行环境 */
+  getAppInfo: (): Promise<AppInfo> => ipcRenderer.invoke('app:info') as Promise<AppInfo>,
   /** 订阅主进程推送；返回取消订阅函数 */
   onSnapshot: (handler: (snapshot: Snapshot) => void): (() => void) => {
     const listener = (_event: unknown, snapshot: Snapshot): void => handler(snapshot)

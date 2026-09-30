@@ -198,6 +198,23 @@ export interface UpdateState {
   canDownload: boolean
 }
 
+/**
+ * 「关于 → 版本」弹窗要的东西：这个应用是什么版本、跑在什么环境上。
+ * 全部由主进程回答 —— 渲染层拿不到 app.getVersion() / process.versions。
+ */
+export interface AppInfo {
+  version: string
+  /** 打包版还是开发模式。更新检查只在打包版里生效，这句必须显式告诉用户 */
+  packaged: boolean
+  electron: string
+  chrome: string
+  node: string
+  platform: string
+  arch: string
+  /** 设置文件位置 —— 「我的配置存在哪」是最常被问的一句 */
+  settingsFile: string
+}
+
 /* ------------------------------------------------------------ 外观 */
 
 /**

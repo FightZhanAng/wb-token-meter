@@ -9,7 +9,15 @@ import { collectKimiSnapshot, type KimiParseCache } from '../shared/kimi-collect
 import { collectMimoSnapshot } from '../shared/mimo-collector'
 import { collectReasonixSnapshot, type ReasonixParseCache } from '../shared/reasonix-collector'
 import { collectZcodeSnapshot } from '../shared/zcode-collector'
-import type { FloatState, Settings, Snapshot, SourceKind, ThemeMode, UpdateState } from '../shared/types'
+import type {
+  AppInfo,
+  FloatState,
+  Settings,
+  Snapshot,
+  SourceKind,
+  ThemeMode,
+  UpdateState
+} from '../shared/types'
 import { FloatWindow } from './float'
 import { ModelsDevCatalog } from './modelsdev'
 import { OpencodeUsage } from './opencode-usage'
@@ -80,6 +88,14 @@ const RELEASE_PAGE = 'https://github.com/FightZhanAng/wb-token-meter/releases'
 /** 项目主页 —— 标题栏那个 GitHub 图标指这里。写死在主进程，渲染进程传不了任意 URL 进来 */
 const HOME_PAGE = 'https://github.com/FightZhanAng/wb-token-meter'
 
+/**
+ * Windows 自绘标题栏条的高度（px）—— 这条里只放窗口 chrome（拖拽 + 系统三键），
+ * 应用自己的标题和按钮在下面一行，所以它按系统caption 的尺寸给就够：
+ * 三键本身是 32px 高（这个值不随 DPI 变，因为 CSS px 和系统缩放同步走），
+ * 留一点余量给悬停高亮。必须和 styles.css 里 .app-caption 的高度对上。
+ */
+const CAPTION_HEIGHT = 36
+
 let mainWindow: BrowserWindow | null = null
 let tray: TrayController | null = null
 let floatWindow: FloatWindow | null = null
@@ -133,6 +149,8 @@ function currentSource(): SourceKind {
  */
 function applyTheme(mode: ThemeMode): void {
   nativeTheme.themeSource = mode
+  // caption 的两块颜色都不归 CSS 管，主题换档后要主进程自己刷一遍
+  syncTitleBarOverlay()
 }
 
 function currentTheme(): ThemeMode {
@@ -146,6 +164,36 @@ function currentTheme(): ThemeMode {
  */
 function windowBackground(): string {
   return nativeTheme.shouldUseDarkColors ? '#0E1618' : '#EDF0EC'
+}
+
+/**
+ * 自绘标题栏（Windows 的 Window Controls Overlay）。
+ *
+ * 用系统原生边框时，caption 是 DWM 画的：只要用户开着「在标题栏和窗口边框上
+ * 显示强调色」，它就永远是强调色 —— 应用请求深色也没用，CSS 更是够不着
+ * （caption 不在渲染层里）。想让它跟着主题走，只能自己接管：
+ * 收掉原生边框，改用 titleBarOverlay，把 caption 的颜色显式给出来。
+ *
+ * color 用全透明（渲染层自己画，底色由 .app-caption 的 --sheet-2 决定），
+ * symbolColor 必须跟着明暗给，否则浅色主题下会剩三个白按钮挂在那里。
+ */
+function titleBarOverlay(): { color: string; symbolColor: string; height: number } {
+  return {
+    color: '#00000000',
+    symbolColor: nativeTheme.shouldUseDarkColors ? '#E3ECE8' : '#16211E',
+    height: CAPTION_HEIGHT
+  }
+}
+
+/** 主题一变，caption 的符号色要跟着换；窗口没建好、或不是 Windows，就什么都不做 */
+function syncTitleBarOverlay(): void {
+  if (process.platform !== 'win32') return
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  try {
+    mainWindow.setTitleBarOverlay(titleBarOverlay())
+  } catch {
+    /* 覆盖层没启用（比如某些自检窗口）就跳过 —— 装饰性的事不该打断刷新 */
+  }
 }
 
 function ensureOpencodeUsage(): OpencodeUsage {
@@ -353,6 +401,11 @@ function ensureMainWindow(): BrowserWindow {
     backgroundColor: windowBackground(),
     icon: appIconPath(),
     autoHideMenuBar: true,
+    // Windows 上自己接管标题栏：原生 caption 会被系统强调色染色，且不随主题变。
+    // 别处（macOS 开发时）保持原生边框不动，traffic lights 还得留着。
+    ...(process.platform === 'win32'
+      ? { titleBarStyle: 'hidden' as const, titleBarOverlay: titleBarOverlay() }
+      : {}),
     webPreferences: {
       preload: preloadPath(),
       sandbox: false,
@@ -454,6 +507,7 @@ function bootstrap(): void {
   nativeTheme.on('updated', () => {
     floatWindow?.syncTheme()
     mainWindow?.setBackgroundColor(windowBackground())
+    syncTitleBarOverlay()
   })
 
   // 按设置决定胶囊是否出现；自检时强制显示，否则测不到
@@ -600,12 +654,25 @@ function bootstrap(): void {
             `(() => {
                const header = document.querySelector('.app-header')
                const actions = document.querySelector('.header-actions')
+               const caption = document.querySelector('.app-caption')
+               const guard = document.querySelector('.app-caption-guard')
+               const rect = (el) => (el ? el.getBoundingClientRect() : null)
+               const actionsRect = rect(actions)
+               const guardRect = rect(guard)
+               const captionRect = rect(caption)
                return {
                  viewportWidth: window.innerWidth,
                  headerClientWidth: header ? header.clientWidth : -1,
                  headerScrollWidth: header ? header.scrollWidth : -1,
-                 actionsWidth: actions ? Math.round(actions.getBoundingClientRect().width) : -1,
-                 subtitle: document.querySelector('.app-subtitle')?.textContent || ''
+                 actionsWidth: actionsRect ? Math.round(actionsRect.width) : -1,
+                 subtitle: document.querySelector('.app-subtitle')?.textContent || '',
+                 // 自绘标题栏：标题栏那条只放窗口 chrome，guardWidth 是留给系统三键的
+                 // 宽度，0 就是环境变量没拿到（三键会压到应用内容上）；
+                 // actionsBelowCaption 必须为 true —— 应用的按钮不能跑进标题栏那条
+                 captionHeight: captionRect ? Math.round(captionRect.height) : -1,
+                 guardWidth: guardRect ? Math.round(guardRect.width) : -1,
+                 actionsBelowCaption:
+                   actionsRect && captionRect ? Math.round(actionsRect.top) >= Math.round(captionRect.bottom) : true
                }
              })()`
           )
@@ -653,6 +720,59 @@ function bootstrap(): void {
           smoke('theme', { before: themeBefore, shots: themeShots })
           patchSettings({ theme: themeBefore })
           await new Promise((resolve) => setTimeout(resolve, 400))
+
+          /* 标题栏左角的「关于」：菜单三项 -> 版本弹窗 -> 关闭。
+             版本号与运行环境是主进程答的，所以这里连 IPC 一起验了。 */
+          await win.webContents.executeJavaScript(
+            `(() => { document.querySelector('.about-entry')?.click() })()`
+          )
+          await new Promise((resolve) => setTimeout(resolve, 250))
+          const aboutMenu = await win.webContents.executeJavaScript(
+            `(() => {
+               const menu = document.querySelector('.about-menu')
+               return {
+                 open: !!menu,
+                 items: [...(menu ? menu.querySelectorAll('button') : [])].map((el) => el.textContent.trim())
+               }
+             })()`
+          )
+          writeFileSync(join(dir, 'window-about-menu.png'), (await win.webContents.capturePage()).toPNG())
+
+          await win.webContents.executeJavaScript(
+            `(() => {
+               const btn = [...document.querySelectorAll('.about-menu button')]
+                 .find((el) => el.textContent.trim().startsWith('版本'))
+               if (btn) btn.click()
+             })()`
+          )
+          await new Promise((resolve) => setTimeout(resolve, 300))
+          const aboutDialog = await win.webContents.executeJavaScript(
+            `(() => {
+               const card = document.querySelector('.about-card')
+               return {
+                 open: !!card,
+                 version: document.querySelector('.about-number')?.textContent || '',
+                 rows: [...(card ? card.querySelectorAll('.about-row') : [])].map((el) => el.textContent.trim()),
+                 actions: [...(card ? card.querySelectorAll('.about-actions button') : [])].map((el) =>
+                   el.textContent.trim()
+                 )
+               }
+             })()`
+          )
+          writeFileSync(join(dir, 'window-about-version.png'), (await win.webContents.capturePage()).toPNG())
+
+          await win.webContents.executeJavaScript(
+            `(() => {
+               const btn = [...document.querySelectorAll('.about-actions button')]
+                 .find((el) => el.textContent.trim() === '关闭')
+               if (btn) btn.click()
+             })()`
+          )
+          await new Promise((resolve) => setTimeout(resolve, 200))
+          const aboutClosed = await win.webContents.executeJavaScript(
+            `(() => !document.querySelector('.about-card') && !document.querySelector('.about-menu'))()`
+          )
+          smoke('about', { menu: aboutMenu, dialog: aboutDialog, closed: aboutClosed })
 
           /* 底栏的版本与更新：点「检查更新」-> 发现新版本 -> 点「下载更新」-> 已就绪。
              假版本号由模块顶层的 WB_TOKEN_METER_FAKE_UPDATE 注入，全程不走网络。 */
@@ -845,6 +965,21 @@ ipcMain.handle('app:quit', () => {
   isQuitting = true
   app.quit()
 })
+
+/* 「关于 → 版本」弹窗：版本号与运行环境只有主进程知道，渲染层问一次就够 */
+ipcMain.handle(
+  'app:info',
+  (): AppInfo => ({
+    version: app.getVersion(),
+    packaged: app.isPackaged,
+    electron: process.versions.electron ?? '',
+    chrome: process.versions.chrome ?? '',
+    node: process.versions.node ?? '',
+    platform: process.platform,
+    arch: process.arch,
+    settingsFile: settingsStore?.dataFile ?? ''
+  })
+)
 
 /* 只开项目主页，不接受渲染进程传来的地址 —— 免得变成任意 URL 的开口 */
 ipcMain.handle('app:open-home', async () => {
