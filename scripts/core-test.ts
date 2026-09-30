@@ -57,6 +57,23 @@ import {
 } from '../src/shared/reasonix-collector'
 import { collectZcodeSnapshot, parseConfigContextSizes, parseModelsDevContextSizes } from '../src/shared/zcode-collector'
 import { collectMimoSnapshot } from '../src/shared/mimo-collector'
+import {
+  CAPSULE_SOLID_BG,
+  CAPSULE_THEME_ORDER,
+  capsuleThemeLabel,
+  capsuleThemeShort,
+  resolveCapsuleTheme
+} from '../src/shared/capsule'
+import {
+  CAPSULE_SIZES,
+  CARD_GAP,
+  defaultCapsulePosition,
+  expandedWindowSizeOf,
+  FLOAT_CARD,
+  floatWindowBounds,
+  SHADOW_PAD,
+  windowSizeOf
+} from '../src/shared/layout'
 import { compact, credits as formatCredits, grouped, percent, sourceLabel, SOURCE_ORDER, THEME_ORDER, themeLabel, themeShort, tokenPerCredit } from '../src/shared/format'
 import {
   compareVersion,
@@ -518,56 +535,241 @@ function cssTokenBlock(css: string, selector: string): { tokens: Set<string>; va
 }
 
 const rendererDir = join(process.cwd(), 'src', 'renderer')
+const readCss = (file: string): string => readFileSync(join(rendererDir, file), 'utf8')
 
-for (const [label, file, minOverrides] of [
-  ['面板', 'styles.css', 20],
-  ['胶囊', 'float.css', 10]
-] as const) {
-  const css = readFileSync(join(rendererDir, file), 'utf8')
-  const light = cssTokenBlock(css, ':root {')
-  const dark = cssTokenBlock(css, ":root[data-theme='dark'] {")
-
-  check(`${label}：浅色块定义了令牌`, light.tokens.size >= minOverrides, `${light.tokens.size} 个`)
-  check(
-    `${label}：深色块确实换掉了整套配色`,
-    dark.tokens.size >= minOverrides,
-    `${dark.tokens.size} 个覆盖`
+/**
+ * 一套令牌必须同时满足的四条不变量。
+ *
+ * 覆盖块漏掉一个变量是这套设计最容易犯、又最难一眼看出来的错：CSS 变量会从
+ * :root 继承下去，漏掉的那个不会报错，只会在那一档下继续用另一档的值 ——
+ * 表现为「某一块在深色里特别刺眼」，但没人知道该去改哪一行。
+ */
+function checkTokens(
+  label: string,
+  css: string,
+  base: ReturnType<typeof cssTokenBlock>,
+  over: ReturnType<typeof cssTokenBlock>,
+  min: number
+): void {
+  const missing = [...new Set([...css.matchAll(/var\((--[a-z0-9-]+)/g)].map((m) => m[1]))].filter(
+    (name) => !base.tokens.has(name)
   )
+  check(`${label}：基础块定义了令牌`, base.tokens.size >= min, `${base.tokens.size} 个`)
+  check(`${label}：覆盖块确实换掉了整套配色`, over.tokens.size >= min, `${over.tokens.size} 个覆盖`)
   check(
-    `${label}：深色块只覆盖、不发明令牌`,
-    [...dark.tokens].every((name) => light.tokens.has(name)),
-    [...dark.tokens].filter((name) => !light.tokens.has(name)).join(', ') || '无'
+    `${label}：覆盖块只覆盖、不发明令牌`,
+    [...over.tokens].every((name) => base.tokens.has(name)),
+    [...over.tokens].filter((name) => !base.tokens.has(name)).join(', ') || '无'
   )
+  check(`${label}：var() 用到的令牌基础块都定义了`, missing.length === 0, missing.join(', ') || '无')
   check(
-    `${label}：var() 用到的令牌浅色块都定义了`,
-    [...css.matchAll(/var\((--[a-z0-9-]+)/g)].every((match) => light.tokens.has(match[1])),
-    [...new Set([...css.matchAll(/var\((--[a-z0-9-]+)/g)].map((m) => m[1]))]
-      .filter((name) => !light.tokens.has(name))
-      .join(', ') || '无'
+    `${label}：纸面与墨色确实不同`,
+    base.values.get('--paper') !== over.values.get('--paper') && base.values.get('--ink') !== over.values.get('--ink'),
+    `${base.values.get('--paper')} / ${over.values.get('--paper')}`
   )
-  check(
-    `${label}：两套主题的纸面与墨色确实不同`,
-    light.values.get('--paper') !== dark.values.get('--paper') && light.values.get('--ink') !== dark.values.get('--ink'),
-    `${light.values.get('--paper')} / ${dark.values.get('--paper')}`
-  )
-
-  if (file === 'styles.css') {
-    /*
-     * 窗口底色是创建参数，只能由主进程给（见 main/index.ts 的 windowBackground）。
-     * 它和 --paper 对不上的表现是「窗口冒出来时先闪一下另一种颜色」，
-     * 所以这两个值必须逐字节相等。
-     */
-    const mainSource = readFileSync(join(process.cwd(), 'src', 'main', 'index.ts'), 'utf8')
-    for (const mode of ['light', 'dark'] as const) {
-      const paper = mode === 'light' ? light.values.get('--paper') : dark.values.get('--paper')
-      check(
-        `窗口底色（${mode}）与 --paper 一致`,
-        Boolean(paper) && mainSource.toUpperCase().includes(paper!.toUpperCase()),
-        String(paper)
-      )
-    }
-  }
 }
+
+const panelCss = readCss('styles.css')
+const panelLight = cssTokenBlock(panelCss, ':root {')
+const panelDark = cssTokenBlock(panelCss, ":root[data-theme='dark'] {")
+checkTokens('面板', panelCss, panelLight, panelDark, 20)
+
+/*
+ * 窗口底色是创建参数，只能由主进程给（见 main/index.ts 的 windowBackground）。
+ * 它和 --paper 对不上的表现是「窗口冒出来时先闪一下另一种颜色」，
+ * 所以这两个值必须逐字节相等。
+ */
+const mainSource = readFileSync(join(process.cwd(), 'src', 'main', 'index.ts'), 'utf8')
+for (const [mode, block] of [
+  ['light', panelLight],
+  ['dark', panelDark]
+] as const) {
+  const paper = block.values.get('--paper')
+  check(
+    `窗口底色（${mode}）与 --paper 一致`,
+    Boolean(paper) && mainSource.toUpperCase().includes(paper!.toUpperCase()),
+    String(paper)
+  )
+}
+
+/*
+ * 胶囊是一条**独立的轴**：面板只有「跟随系统 / 浅色 / 深色」，胶囊是贴在别人
+ * 桌面上的一块牌子，自己有四套皮。所以这里对的是 data-capsule，不是 data-theme。
+ */
+const capsuleCss = readCss('float.css')
+const capsuleBase = cssTokenBlock(capsuleCss, ':root {')
+const capsuleThemes = new Map<string, ReturnType<typeof cssTokenBlock>>()
+capsuleThemes.set('paper', capsuleBase)
+for (const theme of ['ink', 'amber', 'carbon']) {
+  const block = cssTokenBlock(capsuleCss, `:root[data-capsule='${theme}'] {`)
+  checkTokens(`胶囊 · ${theme}`, capsuleCss, capsuleBase, block, 10)
+  capsuleThemes.set(theme, block)
+}
+
+/**
+ * 面板与胶囊是同一台仪器：同名的基础色必须**逐字节相同**。
+ * 各调各的迟早会跑偏，而「面板深色 + 胶囊深靛」摆在一起就是两块不同的黑。
+ */
+const SHARED_TOKENS = [
+  '--paper',
+  '--sheet',
+  '--ink',
+  '--ink-2',
+  '--ink-3',
+  '--pen',
+  '--warn',
+  '--alarm',
+  '--d-in',
+  '--d-cache',
+  '--d-out',
+  '--track'
+]
+for (const name of SHARED_TOKENS) {
+  const paper = capsuleThemes.get('paper')!.values.get(name)
+  const ink = capsuleThemes.get('ink')!.values.get(name)
+  check(
+    `浅色面板与 paper 胶囊共用 ${name}`,
+    panelLight.values.get(name) === paper,
+    `${panelLight.values.get(name)} / ${paper}`
+  )
+  check(`深色面板与 ink 胶囊共用 ${name}`, panelDark.values.get(name) === ink, `${panelDark.values.get(name)} / ${ink}`)
+}
+
+/*
+ * 实心底色模式下窗口底色是主进程设的（CSS 够不着），表在 shared/capsule.ts。
+ * 它必须等于同名主题的 --sheet，否则胶囊四周会多出一圈异色。
+ */
+for (const theme of ['paper', 'ink', 'amber', 'carbon'] as const) {
+  const sheet = capsuleThemes.get(theme)!.values.get('--sheet')
+  check(
+    `${theme} 的实心底色与 --sheet 一致`,
+    sheet?.toUpperCase() === CAPSULE_SOLID_BG[theme].toUpperCase(),
+    `${sheet} / ${CAPSULE_SOLID_BG[theme]}`
+  )
+}
+
+/* ------------------------------------------------ 4c. 桌面胶囊 */
+
+section('胶囊主题')
+
+check('五档顺序固定', CAPSULE_THEME_ORDER.join('/') === 'auto/paper/ink/amber/carbon', CAPSULE_THEME_ORDER.join('/'))
+check(
+  'auto 跟随面板：深色解析成 ink、浅色解析成 paper',
+  resolveCapsuleTheme('auto', true) === 'ink' && resolveCapsuleTheme('auto', false) === 'paper'
+)
+check(
+  '固定档位不受系统深浅影响',
+  resolveCapsuleTheme('amber', true) === 'amber' &&
+    resolveCapsuleTheme('amber', false) === 'amber' &&
+    resolveCapsuleTheme('carbon', true) === 'carbon',
+  `${resolveCapsuleTheme('amber', false)}`
+)
+check(
+  '每档都有全名与短名',
+  CAPSULE_THEME_ORDER.every((theme) => capsuleThemeLabel(theme).length > 0 && capsuleThemeShort(theme).length > 0),
+  CAPSULE_THEME_ORDER.map((theme) => capsuleThemeLabel(theme)).join('/')
+)
+check(
+  '实心底色表恰好覆盖四个固定档',
+  Object.keys(CAPSULE_SOLID_BG).length === 4 &&
+    (['paper', 'ink', 'amber', 'carbon'] as const).every((theme) => /^#[0-9A-F]{6}$/.test(CAPSULE_SOLID_BG[theme])),
+  Object.values(CAPSULE_SOLID_BG).join(' ')
+)
+
+section('胶囊几何')
+
+const screen: { x: number; y: number; width: number; height: number } = { x: 0, y: 0, width: 1920, height: 1040 }
+const medium = CAPSULE_SIZES.medium
+
+/*
+ * 这一整段守的是一件事：**展开只是把窗口撑大，胶囊在屏幕上不许动**。
+ * 位置由「胶囊的角落」反推（floatWindowBounds），收起 / 展开 / 贴边共用同一条算法，
+ * 所以来回切必须幂等 —— 一旦哪次算歪了，用户点几下胶囊就会看着它慢慢爬走。
+ */
+const rest = defaultCapsulePosition('medium', screen, 28)
+check(
+  '默认落点在右下角',
+  rest.x + medium.width === screen.width - 28 && rest.y + medium.height === screen.height - 28,
+  `${rest.x},${rest.y}`
+)
+
+const here = { x: 1000, y: 600 }
+const collapsed = floatWindowBounds({ size: 'medium', capsule: here, expanded: false, workArea: screen })
+check(
+  '收起时窗口比胶囊四周各大 SHADOW_PAD',
+  collapsed.bounds.width === windowSizeOf('medium').width &&
+    collapsed.bounds.x === here.x - SHADOW_PAD &&
+    collapsed.bounds.y === here.y - SHADOW_PAD,
+  `${collapsed.bounds.x},${collapsed.bounds.y} ${collapsed.bounds.width}x${collapsed.bounds.height}`
+)
+check('收起时胶囊落在原处', collapsed.capsule.x === here.x && collapsed.capsule.y === here.y)
+
+const opened = floatWindowBounds({ size: 'medium', capsule: here, expanded: true, workArea: screen })
+check(
+  '展开时窗口高 = 卡片 + 缝 + 胶囊（四周仍是 SHADOW_PAD）',
+  opened.bounds.height === medium.height + CARD_GAP + FLOAT_CARD.height + SHADOW_PAD * 2 &&
+    opened.bounds.height === expandedWindowSizeOf('medium').height,
+  `${opened.bounds.width}x${opened.bounds.height}`
+)
+check('展开时窗口比胶囊宽（卡片比胶囊宽）', opened.bounds.width > collapsed.bounds.width, String(opened.bounds.width))
+check('展开时胶囊原地不动', opened.capsule.x === here.x && opened.capsule.y === here.y)
+check('上方空间够就朝上展开', opened.side === 'up')
+check('窗口在右半屏时胶囊贴右侧', opened.alignRight)
+check('卡片与胶囊贴同一侧', opened.bounds.x + opened.bounds.width - SHADOW_PAD - medium.width === here.x)
+
+const backAgain = floatWindowBounds({ size: 'medium', capsule: opened.capsule, expanded: false, workArea: screen })
+check(
+  '展开再收起，胶囊回到原处（幂等）',
+  backAgain.capsule.x === here.x && backAgain.capsule.y === here.y && backAgain.bounds.width === collapsed.bounds.width,
+  `${backAgain.capsule.x},${backAgain.capsule.y}`
+)
+
+const atTop = floatWindowBounds({ size: 'medium', capsule: { x: 1000, y: 4 }, expanded: true, workArea: screen })
+check('上方装不下就翻到下方', atTop.side === 'down', atTop.side)
+check('翻到下方时胶囊仍在原处', atTop.capsule.y === 4, String(atTop.capsule.y))
+
+const atLeft = floatWindowBounds({ size: 'medium', capsule: { x: 20, y: 500 }, expanded: true, workArea: screen })
+check('窗口在左半屏时胶囊贴左侧', atLeft.alignRight === false)
+check('卡片往右长，胶囊不动', atLeft.capsule.x === 20, String(atLeft.capsule.x))
+
+const pinned = floatWindowBounds({ size: 'large', capsule: { x: 1910, y: 1030 }, expanded: true, workArea: screen })
+check(
+  '贴死在右下角时内容被收进工作区（只允许压出 SHADOW_PAD 那圈阴影留白）',
+  pinned.bounds.x >= screen.x - SHADOW_PAD &&
+    pinned.bounds.y >= screen.y - SHADOW_PAD &&
+    pinned.bounds.x + pinned.bounds.width <= screen.x + screen.width + SHADOW_PAD &&
+    pinned.bounds.y + pinned.bounds.height <= screen.y + screen.height + SHADOW_PAD,
+  `${pinned.bounds.x},${pinned.bounds.y} ${pinned.bounds.width}x${pinned.bounds.height}`
+)
+check(
+  '贴边收紧后卡片本身仍然整块在屏幕里',
+  pinned.bounds.x + SHADOW_PAD >= screen.x &&
+    pinned.bounds.y + SHADOW_PAD >= screen.y &&
+    pinned.bounds.x + pinned.bounds.width - SHADOW_PAD <= screen.x + screen.width &&
+    pinned.bounds.y + pinned.bounds.height - SHADOW_PAD <= screen.y + screen.height
+)
+check('最宽的一档胶囊也不会把卡片撑破', expandedWindowSizeOf('large').width >= CAPSULE_SIZES.large.width + SHADOW_PAD * 2)
+
+section('胶囊接线')
+
+const floatSource = readFileSync(join(process.cwd(), 'src', 'renderer', 'float.tsx'), 'utf8')
+check(
+  '单击胶囊走的是展开卡片，不是直接开面板',
+  floatSource.includes('toggleFloatCard') && floatSource.includes('collapseFloatCard'),
+  'toggleFloatCard'
+)
+check('卡片里有打开面板的入口', floatSource.includes('openPanel'))
+check('拖动时先收起卡片', floatSource.indexOf('collapseFloatCard') < floatSource.indexOf('moveFloat(dx, dy)'))
+check('胶囊主题写在 data-capsule 上（不是 data-theme）', floatSource.includes('dataset.capsule'))
+check(
+  'preload 暴露了卡片接口',
+  ['float:toggle-card', 'float:collapse-card', 'float:state'].every((channel) => preloadSource.includes(channel))
+)
+check('胶囊主题由启动参数带进渲染进程', preloadSource.includes('--wbm-capsule-theme'))
+check(
+  '托盘菜单能切胶囊主题',
+  readFileSync(join(process.cwd(), 'src', 'main', 'tray.ts'), 'utf8').includes('onSetFloatTheme')
+)
 
 /* ---------------------------------------------- 5. Kimi Code 数据源 */
 

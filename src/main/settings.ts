@@ -10,8 +10,9 @@ import {
   writeFileSync
 } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { CAPSULE_THEME_ORDER } from '../shared/capsule'
 import { SOURCE_ORDER, THEME_ORDER } from '../shared/format'
-import type { FloatPosition, Settings, SourceKind, ThemeMode } from '../shared/types'
+import type { CapsuleTheme, FloatPosition, Settings, SourceKind, ThemeMode } from '../shared/types'
 
 export const DEFAULT_SETTINGS: Settings = {
   source: 'workbuddy',
@@ -21,6 +22,7 @@ export const DEFAULT_SETTINGS: Settings = {
   autoCheckUpdate: true,
   autoDownloadUpdate: false,
   floatEnabled: true,
+  floatTheme: 'auto',
   floatOpacity: 0.94,
   floatSize: 'medium',
   floatAlwaysOnTop: true,
@@ -54,12 +56,18 @@ function isThemeMode(value: unknown): value is ThemeMode {
   return typeof value === 'string' && (THEME_ORDER as readonly string[]).includes(value)
 }
 
+/** 胶囊主题白名单，跟着 CAPSULE_THEME_ORDER 走 —— 加一档不用回来改这里 */
+function isCapsuleTheme(value: unknown): value is CapsuleTheme {
+  return typeof value === 'string' && (CAPSULE_THEME_ORDER as readonly string[]).includes(value)
+}
+
 /** 逐字段校验：配置文件被手改坏时只回退那一个字段，不要整体重置 */
 function parseSettings(raw: unknown): Settings {
   const input = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
   const size = input.floatSize
   const source = input.source
   const theme = input.theme
+  const floatTheme = input.floatTheme
   return {
     source: isSourceKind(source) ? source : DEFAULT_SETTINGS.source,
     theme: isThemeMode(theme) ? theme : DEFAULT_SETTINGS.theme,
@@ -71,6 +79,7 @@ function parseSettings(raw: unknown): Settings {
         : DEFAULT_SETTINGS.autoDownloadUpdate,
     floatEnabled:
       typeof input.floatEnabled === 'boolean' ? input.floatEnabled : DEFAULT_SETTINGS.floatEnabled,
+    floatTheme: isCapsuleTheme(floatTheme) ? floatTheme : DEFAULT_SETTINGS.floatTheme,
     floatOpacity: clampNumber(input.floatOpacity, 0.3, 1, DEFAULT_SETTINGS.floatOpacity),
     floatSize: size === 'small' || size === 'medium' || size === 'large' ? size : DEFAULT_SETTINGS.floatSize,
     floatAlwaysOnTop:

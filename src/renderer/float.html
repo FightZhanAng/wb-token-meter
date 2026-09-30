@@ -5,10 +5,20 @@
     <meta name="color-scheme" content="light dark" />
     <title>Token 计量器</title>
     <script>
-      /* 与 index.html 同一套：外观必须在样式表之前落定，否则深色下会闪一帧白 */
-      document.documentElement.dataset.theme = matchMedia('(prefers-color-scheme: dark)').matches
-        ? 'dark'
-        : 'light'
+      /*
+       * 胶囊主题的**兜底**。
+       *
+       * 正常路径是 preload 从启动参数里读出档位、在样式表之前写到 <html> 上
+       * （见 preload/index.ts）—— 那一步比这里更早，所以首帧就是对的颜色。
+       * 这段只在 preload 没跑成 / 参数丢了时兜一下：按系统深浅选一套，
+       * 至少不会在深色桌面上先闪一块白。
+       */
+      if (!document.documentElement.dataset.capsule) {
+        document.documentElement.dataset.capsuleTheme = 'auto'
+        document.documentElement.dataset.capsule = matchMedia('(prefers-color-scheme: dark)').matches
+          ? 'ink'
+          : 'paper'
+      }
     </script>
   </head>
   <body>

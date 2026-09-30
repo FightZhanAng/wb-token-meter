@@ -38,6 +38,25 @@ import { updateBusy, updateNeedsAttention, updateStatusText } from '@shared/upda
 
 /* ------------------------------------------------------------ 小工具 */
 
+/**
+ * 深色主题的氛围层：一层 3.5% 的颗粒（透明度全在 CSS 里，浅色下是 0）。
+ *
+ * 用内联 SVG 的 feTurbulence 而不是 data-URI 背景图：噪音本来就是画出来的，
+ * 没必要为此引一份外部资源；而且 `default-src 'self'` 一旦收紧，data: 是第一个被挡的。
+ * 这一层不接收任何事件，也不进无障碍树 —— 它只是材料。
+ */
+function Grain(): JSX.Element {
+  return (
+    <svg className="grain" aria-hidden="true" focusable="false">
+      <filter id="wbtm-grain">
+        <feTurbulence type="fractalNoise" baseFrequency="0.85" numOctaves="2" stitchTiles="stitch" />
+        <feColorMatrix type="saturate" values="0" />
+      </filter>
+      <rect width="100%" height="100%" filter="url(#wbtm-grain)" />
+    </svg>
+  )
+}
+
 /** node 的平台名翻成用户认得的写法；其余原样返回，够用了 */
 function platformLabel(platform: string): string {
   if (platform === 'win32') return 'Windows'
@@ -924,6 +943,7 @@ export default function App(): JSX.Element {
 
   return (
     <div className="app">
+      <Grain />
       <header className="app-header">
         {/*
          * 纯窗口 chrome：整条只负责拖窗，右端就是系统三键（最小化 / 最大化 / 关闭）的位置。

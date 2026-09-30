@@ -2,6 +2,7 @@ import { app, BrowserWindow, ipcMain, nativeTheme, shell } from 'electron'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { CAPSULE_THEME_ORDER } from '../shared/capsule'
 import { collectSnapshot, type ParseCache } from '../shared/collector'
 import { collectDshSnapshot, type DshParseCache } from '../shared/dsh-collector'
 import { SOURCE_ORDER, sourceLabel } from '../shared/format'
@@ -12,6 +13,7 @@ import { collectReasonixSnapshot, type ReasonixParseCache } from '../shared/reas
 import { collectZcodeSnapshot } from '../shared/zcode-collector'
 import type {
   AppInfo,
+  CapsuleTheme,
   FloatState,
   Settings,
   Snapshot,
@@ -38,7 +40,7 @@ import {
   zcodeDir
 } from './paths'
 import { DEFAULT_SETTINGS, SettingsStore } from './settings'
-import { TrayController } from './tray'
+import { TrayController, type MenuChoice } from './tray'
 import { UpdateController } from './updater'
 
 /* ------------------------------------------------------------ 冒烟自检 */
@@ -163,11 +165,11 @@ function currentTheme(): ThemeMode {
 
 /**
  * 窗口底色是**创建参数**，CSS 管不到它，只能主进程给。
- * 这两个值必须和 styles.css 的 --paper 对上（深色 #0E1618 / 浅色 #EDF0EC），
- * 否则窗口冒出来的那一帧会先闪一下另一种颜色。
+ * 这两个值必须和 styles.css 的 --paper 对上（深色 #0B0E16 / 浅色 #EDF0EC），
+ * 否则窗口冒出来的那一帧会先闪一下另一种颜色。core-test 盯着这一对。
  */
 function windowBackground(): string {
-  return nativeTheme.shouldUseDarkColors ? '#0E1618' : '#EDF0EC'
+  return nativeTheme.shouldUseDarkColors ? '#0B0E16' : '#EDF0EC'
 }
 
 /**
@@ -184,7 +186,9 @@ function windowBackground(): string {
 function titleBarOverlay(): { color: string; symbolColor: string; height: number } {
   return {
     color: '#00000000',
-    symbolColor: nativeTheme.shouldUseDarkColors ? '#E3ECE8' : '#16211E',
+    // 必须和 styles.css 深色块的 --ink 对上（深色 #E9ECF6 / 浅色 #16211E），
+    // 差一档就是「深色主题下三个惨白的按钮挂在机头上」
+    symbolColor: nativeTheme.shouldUseDarkColors ? '#E9ECF6' : '#16211E',
     height: CAPTION_HEIGHT
   }
 }
@@ -314,7 +318,7 @@ function broadcastSettings(settings: Settings): void {
 function broadcastUpdate(state: UpdateState): void {
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('update', state)
   // 托盘菜单里有版本号与更新动作，状态一变就要重建
-  tray?.notifyRefreshed()
+  tray?.refresh()
 }
 
 function currentUpdate(): UpdateState {
@@ -352,7 +356,7 @@ function patchSettings(patch: Partial<Settings>): void {
   if (!next) return
   broadcastSettings(next)
   floatWindow?.syncFromSettings()
-  tray?.notifyRefreshed()
+  tray?.refresh()
   // 换数据源要立刻重采一次，否则界面会停在旧数据源上直到下一次轮询
   if (patch.source && patch.source !== before) refresh()
   // 外观同理：themeSource 一变，两个窗口的 prefers-color-scheme 立刻跟着走，
@@ -361,6 +365,8 @@ function patchSettings(patch: Partial<Settings>): void {
     applyTheme(next.theme)
     floatWindow?.syncTheme()
   }
+  // 胶囊换装：令牌是 CSS 的事，广播 settings 就够了；主进程只管实心底色那一份
+  if (patch.floatTheme) floatWindow?.syncTheme()
   // 更新开关：改 autoDownload 要立刻同步给 electron-updater（开着且有新版待下就马上开始）；
   // 刚把自动检查打开、且这次开机还没查过，就顺手安排一次
   if (patch.autoCheckUpdate !== undefined || patch.autoDownloadUpdate !== undefined) {
@@ -377,11 +383,21 @@ function setFloatEnabled(enabled: boolean): void {
   broadcastSettings(next)
   if (enabled) floatWindow?.show()
   else floatWindow?.hide()
-  tray?.notifyRefreshed()
+  tray?.refresh()
 }
 
 function currentFloatState(): FloatState {
-  return floatWindow?.describe() ?? { created: false, visible: false, loaded: false, bounds: null }
+  return (
+    floatWindow?.describe() ?? {
+      created: false,
+      visible: false,
+      loaded: false,
+      expanded: false,
+      side: 'up',
+      alignRight: true,
+      bounds: null
+    }
+  )
 }
 
 /* ------------------------------------------------------------ 窗口 */
@@ -462,7 +478,7 @@ function bootstrap(): void {
     onOpenMain: () => showMainWindow(),
     onRefresh: () => {
       refresh(true)
-      tray?.notifyRefreshed()
+      tray?.refresh()
     },
     onOpenDataDir: () => {
       void shell.openPath(sourceDir(currentSource()))
@@ -490,6 +506,8 @@ function bootstrap(): void {
     /* 桌面胶囊 */
     getFloatEnabled: () => settingsStore?.settings.floatEnabled ?? false,
     onToggleFloat: (enabled) => setFloatEnabled(enabled),
+    getFloatTheme: () => settingsStore?.settings.floatTheme ?? DEFAULT_SETTINGS.floatTheme,
+    onSetFloatTheme: (theme) => patchSettings({ floatTheme: theme }),
     getFloatAlwaysOnTop: () => settingsStore?.settings.floatAlwaysOnTop ?? true,
     onToggleFloatAlwaysOnTop: (enabled) => patchSettings({ floatAlwaysOnTop: enabled }),
     getFloatSize: () => settingsStore?.settings.floatSize ?? 'medium',
@@ -500,7 +518,7 @@ function bootstrap(): void {
     onToggleFloatSolid: (solid) => patchSettings({ floatSolidBackground: solid }),
     onResetFloatPosition: () => {
       floatWindow?.resetPosition()
-      tray?.notifyRefreshed()
+      tray?.refresh()
     }
   })
   tray.create()
@@ -887,11 +905,142 @@ function bootstrap(): void {
                  tokens: document.querySelector('.tokens')?.textContent || '',
                  credits: document.querySelector('.credits')?.textContent || '',
                  capsuleSize: el ? [el.clientWidth, el.clientHeight] : null,
-                 viewport: [window.innerWidth, window.innerHeight]
+                 viewport: [window.innerWidth, window.innerHeight],
+                 theme: document.documentElement.dataset.capsule || ''
                }
              })()`
           )
           smoke('float-dom', metrics)
+
+          /*
+           * 展开卡片的端到端自检。
+           *
+           * 必须派发真的 pointerdown / pointerup 而不是 el.click()：
+           * 单击是渲染层自己用一对指针事件判出来的（拖动与单击共用一套），
+           * 合成的 click 事件根本走不到那段逻辑 —— 那样测出来的只是「能改状态」，
+           * 测不到「点一下胶囊真的会展开」。
+           */
+          const clickCapsule = `(() => {
+             const el = document.querySelector('.capsule')
+             if (!el) return false
+             const box = el.getBoundingClientRect()
+             const at = {
+               bubbles: true, cancelable: true, button: 0, pointerId: 1, isPrimary: true,
+               clientX: box.left + 8, clientY: box.top + box.height / 2,
+               screenX: 200, screenY: 200
+             }
+             el.dispatchEvent(new PointerEvent('pointerdown', at))
+             el.dispatchEvent(new PointerEvent('pointerup', at))
+             return true
+           })()`
+
+          const collapsedBounds = floatWin.getBounds()
+          await floatWin.webContents.executeJavaScript(clickCapsule)
+          await new Promise((resolve) => setTimeout(resolve, 700))
+
+          const cardImage = await floatWin.webContents.capturePage()
+          writeFileSync(join(dir, 'float-card.png'), cardImage.toPNG())
+          const cardDom = await floatWin.webContents.executeJavaScript(
+            `(() => {
+               const card = document.querySelector('.card')
+               const el = document.querySelector('.capsule')
+               return {
+                 card: !!card,
+                 side: card ? card.dataset.side : '',
+                 align: card ? card.dataset.align : '',
+                 cardSize: card ? [card.clientWidth, card.clientHeight] : null,
+                 source: document.querySelector('.card-src')?.textContent || '',
+                 hero: document.querySelector('.hero-value')?.textContent || '',
+                 cells: [...document.querySelectorAll('.cell')].map((el) => el.textContent),
+                 gauge: document.querySelector('.gauge-num')?.textContent || '',
+                 bars: document.querySelectorAll('.spark i').length,
+                 barHeights: [...document.querySelectorAll('.spark i')].map((el) => el.style.height || '0'),
+                 cardScroll: card ? [card.clientHeight, card.scrollHeight] : null,
+                 /*
+                  * 分项高度 —— FLOAT_CARD.height 是写死的，改它之前得知道这 234px
+                  * 到底被谁吃掉了。cardScroll 只能告诉你「溢出多少」，告诉不了
+                  * 「哪一段变胖了」；字体度量一变就在这儿看得出来。
+                  */
+                 sections: card
+                   ? [...card.children].map((node) => [
+                       node.className,
+                       Math.round(node.getBoundingClientRect().height)
+                     ])
+                   : null,
+                 actions: [...document.querySelectorAll('.card-foot button')].map((el) => el.textContent),
+                 capsuleSize: el ? [el.clientWidth, el.clientHeight] : null,
+                 viewport: [window.innerWidth, window.innerHeight]
+               }
+             })()`
+          )
+          smoke('float-card', {
+            expanded: currentFloatState().expanded,
+            side: currentFloatState().side,
+            before: collapsedBounds,
+            after: floatWin.getBounds(),
+            dom: cardDom
+          })
+
+          // 收起：卡片再点一次胶囊就该回去，且胶囊的位置不能漂
+          await floatWin.webContents.executeJavaScript(clickCapsule)
+          await new Promise((resolve) => setTimeout(resolve, 500))
+          smoke('float-collapse', {
+            expanded: currentFloatState().expanded,
+            before: floatWin.getBounds(),
+            capsuleAt: [collapsedBounds.x, collapsedBounds.y]
+          })
+
+          /*
+           * 每个胶囊主题各截两张：收起态的胶囊、展开态的卡片。
+           * 主题是**独立于面板**的一条轴，所以这里不看 prefers-color-scheme，
+           * 只看 data-capsule 有没有被解析成对应那一档。
+           *
+           * 卡片也必须一起看：它和胶囊用的是同一份令牌，但「胶囊颜色对了」
+           * 推不出「卡片也对了」—— 卡片上一堆底色、分隔线、刻度槽的搭配只有
+           * 亲眼看截图才判得出来，而它恰恰是展开后用户盯着的那一块。
+           * 顺手把每档的 cardScroll 记下来：溢出对主题无关，但换主题会换掉
+           * 字体外的所有东西，多一列冗余的证词不亏。
+           */
+          const themeBefore = settingsStore?.settings.floatTheme ?? 'auto'
+          const themes: Array<{
+            theme: CapsuleTheme
+            resolved: string
+            cardScroll: number[] | null
+            menu: MenuChoice[]
+            menuAgree: boolean
+          }> = []
+          for (const theme of CAPSULE_THEME_ORDER) {
+            patchSettings({ floatTheme: theme })
+            /*
+             * 立刻把菜单读出来，**不给下一次快照留重建的机会** —— 这一条要测的正是
+             * 「设置一变就重建」。菜单里那几项标题带着当前档位（「胶囊主题：深靛」），
+             * 子菜单里还有一个被勾中的项，两个说法必须一致。
+             * 不一致的表现是：圆点被系统挪到了新档位、标题还停在旧档位。
+             */
+            const menu = tray?.describeChoices() ?? []
+            const menuAgree = menu
+              .filter((entry) => entry.label.includes('：'))
+              .every((entry) => entry.label.split('：')[1] === entry.checked)
+            await new Promise((resolve) => setTimeout(resolve, 400))
+            const resolved = await floatWin.webContents.executeJavaScript(
+              `document.documentElement.dataset.capsule || ''`
+            )
+            writeFileSync(join(dir, `float-${theme}.png`), (await floatWin.webContents.capturePage()).toPNG())
+
+            // 点一下展开、再点一下收起 —— 同一个 clickCapsule 脚本就能来回切
+            await floatWin.webContents.executeJavaScript(clickCapsule)
+            await new Promise((resolve) => setTimeout(resolve, 600))
+            writeFileSync(join(dir, `float-card-${theme}.png`), (await floatWin.webContents.capturePage()).toPNG())
+            const cardScroll = await floatWin.webContents.executeJavaScript(
+              `(() => { const c = document.querySelector('.card'); return c ? [c.clientHeight, c.scrollHeight] : null })()`
+            )
+            await floatWin.webContents.executeJavaScript(clickCapsule)
+            await new Promise((resolve) => setTimeout(resolve, 400))
+            themes.push({ theme, resolved, cardScroll, menu, menuAgree })
+          }
+          smoke('float-theme', { before: themeBefore, themes })
+          patchSettings({ floatTheme: themeBefore })
+          await new Promise((resolve) => setTimeout(resolve, 300))
         }
       } catch (error) {
         smoke('capture-error', { message: String(error) })
@@ -1005,7 +1154,15 @@ ipcMain.handle('settings:update', (_event, patch: Partial<Settings>) => {
 ipcMain.on('float:move', (_event, dx: unknown, dy: unknown) => {
   floatWindow?.moveBy(Number(dx) || 0, Number(dy) || 0)
 })
-ipcMain.on('float:open-panel', () => showMainWindow())
+// 单击胶囊 = 展开 / 收起悬浮卡片（不再直接开面板，那一步挪到卡片里）
+ipcMain.on('float:toggle-card', () => floatWindow?.toggleExpand())
+ipcMain.on('float:collapse-card', () => floatWindow?.setExpanded(false))
+ipcMain.handle('float:state', () => currentFloatState())
+ipcMain.on('float:open-panel', () => {
+  // 进面板前先把卡片收掉：留着它只会和主窗口抢眼球
+  floatWindow?.setExpanded(false)
+  showMainWindow()
+})
 ipcMain.on('float:context-menu', () => tray?.popUp())
 
 /* ---- 版本与更新 ---- */

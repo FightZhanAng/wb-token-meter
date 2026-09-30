@@ -1,51 +1,136 @@
 /*
- * 桌面胶囊 —— 记录仪贴在桌面上的那枚小铭牌。
+ * 桌面胶囊 —— 记录仪贴在桌面上的那枚小铭牌，以及它展开出来的那张卡片。
  *
  * 面板是「一张纸」，胶囊是「一块牌子」：所以它保留胶囊形（999px）而不是
  * 面板那套 0/1/2px 的直角分档。它悬在别人的桌面上，需要一眼看出是个独立的东西。
  *
  * 独立入口必须自带一份令牌 —— styles.css 管不到这里。
+ *
+ * ── 主题是另一条轴 ──
+ * 面板主题跟着 nativeTheme 走（跟随系统 / 浅色 / 深色），胶囊不跟：它贴在别人的
+ * 桌面上，用户常常想让它和面板不一样。所以这里用 `data-capsule` 而不是 `data-theme`，
+ * 一共四套：paper（记录纸）/ ink（深靛）/ amber（琥珀夜光）/ carbon（碳黑）。
+ * 属性由 preload 在样式表之前写好（见 preload/index.ts），首帧就是对的颜色。
+ *
+ * ink 与 paper 里那 11 个基础色（--paper/--sheet/--ink/--ink-2/--ink-3/--pen/
+ * --warn/--alarm/--d-in/--d-out/--track）必须和 styles.css 的深色块 / 浅色块
+ * **逐字节相同** —— 两个窗口是同一台仪器，各调各的迟早会跑偏。core-test 盯着这一条。
  */
 :root {
   color-scheme: light;
 
   --paper: #edf0ec;
+  /* 实心底色模式下的窗口底色，必须等于 shared/capsule.ts 的 CAPSULE_SOLID_BG.paper */
   --sheet: #f6f8f5;
   --ink: #16211e;
   --ink-2: #5a6a64;
   --ink-3: #8d9c96;
   --pen: #c4442a;
   --warn: #b8801a;
+  --warn-zone: rgba(184, 128, 26, 0.16);
   --alarm: #a8271b;
+  --alarm-zone: rgba(168, 39, 27, 0.16);
   --d-in: #2c5c7a;
+  --d-cache: #a6c2d2;
+  --d-out: #1d6b4f;
   --track: #dde3dd;
 
-  --capsule-bg: rgba(246, 248, 245, 0.94);
+  /* 胶囊与卡片的皮：这两样是「盖在桌面上的」才有的，不跟面板共用 */
+  --capsule-bg: rgba(246, 248, 245, 0.93);
   --capsule-line: rgba(22, 33, 30, 0.16);
-  --capsule-shadow: 0 4px 10px rgba(22, 33, 30, 0.22);
+  --capsule-shadow: 0 4px 10px rgba(22, 33, 30, 0.2);
+  --card-bg: rgba(246, 248, 245, 0.97);
+  --card-line: rgba(22, 33, 30, 0.12);
 
   --font-ui: Bahnschrift, 'DIN Alternate', 'Segoe UI Variable Text', 'Segoe UI',
     'Microsoft YaHei UI', 'Microsoft YaHei', sans-serif;
   --font-num: Consolas, 'Cascadia Mono', ui-monospace, monospace;
+  --ease: cubic-bezier(0.16, 1, 0.3, 1);
 }
 
-:root[data-theme='dark'] {
+/* 深靛 —— 和面板的深色同一套色，只是底色带透明度、让桌面透一点过来 */
+:root[data-capsule='ink'] {
   color-scheme: dark;
 
-  --paper: #0e1618;
-  --sheet: #131e21;
-  --ink: #e3ece8;
-  --ink-2: #93a5a0;
-  --ink-3: #667872;
-  --pen: #ff6b4a;
-  --warn: #e0a83c;
-  --alarm: #e5484d;
-  --d-in: #5b9bc4;
-  --track: #223033;
+  --paper: #0b0e16;
+  --sheet: #111726;
+  --ink: #e9ecf6;
+  --ink-2: #9aa3bd;
+  --ink-3: #7f89a8;
+  --pen: #ff6a3a;
+  --warn: #e6b23f;
+  --warn-zone: rgba(230, 178, 63, 0.16);
+  --alarm: #ff5560;
+  --alarm-zone: rgba(255, 85, 96, 0.18);
+  --d-in: #4f9bd8;
+  --d-cache: #33566b;
+  --d-out: #3fb08a;
+  --track: #202941;
 
-  --capsule-bg: rgba(19, 30, 33, 0.94);
-  --capsule-line: rgba(227, 236, 232, 0.18);
-  --capsule-shadow: 0 4px 10px rgba(0, 0, 0, 0.5);
+  --capsule-bg: rgba(17, 23, 38, 0.92);
+  --capsule-line: rgba(233, 236, 246, 0.16);
+  --capsule-shadow: 0 4px 10px rgba(0, 0, 0, 0.6);
+  --card-bg: rgba(17, 23, 38, 0.97);
+  --card-line: rgba(233, 236, 246, 0.13);
+}
+
+/*
+ * 琥珀夜光 —— 老仪表那块发琥珀光的屏。
+ * 整套只有一个色相，连数据色都收进琥珀里：这一档要的就是「一色的仪表」，
+ * 掺进蓝绿就不是夜光了。
+ */
+:root[data-capsule='amber'] {
+  color-scheme: dark;
+
+  --paper: #100d06;
+  --sheet: #12100b;
+  --ink: #f6e7c6;
+  --ink-2: #c2a878;
+  --ink-3: #948058;
+  --pen: #ffb020;
+  --warn: #e0892c;
+  --warn-zone: rgba(224, 137, 44, 0.18);
+  --alarm: #ff6b3d;
+  --alarm-zone: rgba(255, 107, 61, 0.2);
+  --d-in: #f0b53c;
+  --d-cache: #7a5f22;
+  --d-out: #b8862b;
+  --track: #2a2214;
+
+  --capsule-bg: rgba(18, 16, 11, 0.93);
+  --capsule-line: rgba(246, 231, 198, 0.18);
+  --capsule-shadow: 0 4px 10px rgba(0, 0, 0, 0.6);
+  --card-bg: rgba(18, 16, 11, 0.97);
+  --card-line: rgba(246, 231, 198, 0.14);
+}
+
+/*
+ * 碳黑 —— 唯一不带色相的一档。跟任何壁纸摆在一起都不打架，
+ * 代价是也没有任何性格，所以它排在最后，当作「别烦我」的选项。
+ */
+:root[data-capsule='carbon'] {
+  color-scheme: dark;
+
+  --paper: #131415;
+  --sheet: #141618;
+  --ink: #e8eaec;
+  --ink-2: #9ea4aa;
+  --ink-3: #7b8187;
+  --pen: #ff5f4d;
+  --warn: #d8a531;
+  --warn-zone: rgba(216, 165, 49, 0.16);
+  --alarm: #ff5560;
+  --alarm-zone: rgba(255, 85, 96, 0.18);
+  --d-in: #8ab4d8;
+  --d-cache: #5c6b74;
+  --d-out: #7fb79b;
+  --track: #24282b;
+
+  --capsule-bg: rgba(20, 22, 24, 0.93);
+  --capsule-line: rgba(232, 234, 236, 0.16);
+  --capsule-shadow: 0 4px 10px rgba(0, 0, 0, 0.6);
+  --card-bg: rgba(20, 22, 24, 0.97);
+  --card-line: rgba(232, 234, 236, 0.13);
 }
 
 /*
@@ -65,18 +150,18 @@ body,
 }
 
 body {
+  /*
+   * 四周那圈留白（给 box-shadow 留绘制空间）由 float.tsx 按 layout.ts 的
+   * SHADOW_PAD 写进内联样式 —— 窗口尺寸就是按同一个常数算的。
+   * 别在这儿再写一个具体数字：抄的那份迟早和主进程漂开，
+   * 表现是阴影被窗口边界切平、胶囊外面像糊了一层底色。
+   */
   background: transparent;
   font-family: var(--font-ui);
   font-size: 12.5px;
   color: var(--ink);
   overflow: hidden;
   -webkit-font-smoothing: antialiased;
-  /*
-   * 给 box-shadow 留绘制空间。这个值必须和 shared/layout.ts 的 SHADOW_PAD 一致：
-   * 窗口尺寸按「胶囊 + 2×SHADOW_PAD」算，少了这层 padding 阴影会被窗口边界裁掉，
-   * 只剩右下方向的半截，看起来就像胶囊外面糊了一圈底色。
-   */
-  padding: 12px;
 }
 
 .boot {
@@ -88,12 +173,28 @@ body {
   color: var(--ink-3);
 }
 
+/* ------------------------------------------------ 胶囊 + 卡片这一摞 */
+
+/*
+ * 展开时卡片在上、胶囊在下（data-side='down' 时靠 column-reverse 翻过来）。
+ * 两个子元素的高度都由 float.tsx 从布局常数写死 —— 这里不能给 height: 100%，
+ * 否则两个都会去抢整摞的高度。
+ */
+.float-stack {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.float-stack[data-side='down'] {
+  flex-direction: column-reverse;
+}
+
 .capsule {
+  flex: none;
   display: flex;
   align-items: center;
   gap: 10px;
-  width: 100%;
-  height: 100%;
   padding: 0 14px 0 10px;
   border-radius: 999px;
   background: var(--capsule-bg);
@@ -103,6 +204,12 @@ body {
    * 12px（SHADOW_PAD），差的 2px 只是最淡的边缘，看不出来。
    * 但别再往上调 —— 原来的 0 8px 20px 触达 28px，主阴影直接被窗口边界切平，
    * 露出一条直边，看起来就像胶囊外面糊了层底色。
+   *
+   * **四套主题的 --capsule-shadow 必须共用同一组几何**（4px / 10px），只改颜色与
+   * 透明度：窗口留白是 SHADOW_PAD 一个常数，哪一档的触达超出去，那一档就在窗口
+   * 底边被切出一道硬边 —— 浅色下几乎看不出来，深色下会明显一条，因为深色的阴影
+   * 本来就画得更实。实测：深靛那档用 0 6px 16px 时，窗口最后一行还剩 31/255 的
+   * 不透明度（纸面那档已经衰减到 3/255），也就是被切了。
    */
   box-shadow: var(--capsule-shadow);
   cursor: grab;
@@ -114,12 +221,35 @@ body {
   cursor: grabbing;
 }
 
-/* 不透明降级模式：窗口本身已是实底矩形，胶囊就不要再画圆角和阴影了 */
-.capsule.solid {
+/* 卡片展开着：胶囊戴一圈记录笔色的细边，一眼能看出「这块牌子现在是按下去的状态」 */
+.capsule.open {
+  border-color: color-mix(in srgb, var(--pen) 46%, var(--capsule-line));
+}
+
+/*
+ * 不透明降级模式：窗口本身已是实底矩形，胶囊和卡片就不要再画圆角与阴影了，
+ * 靠一条细线把两层的分界交代出来。
+ */
+.float-stack.solid .capsule {
   border-radius: 2px;
   border: none;
   box-shadow: none;
   background: var(--sheet);
+}
+
+.float-stack.solid .card {
+  border: none;
+  border-radius: 2px;
+  box-shadow: none;
+  background: var(--sheet);
+}
+
+.float-stack.solid[data-side='up'] .card {
+  border-bottom: 1px solid var(--track);
+}
+
+.float-stack.solid[data-side='down'] .card {
+  border-top: 1px solid var(--track);
 }
 
 .ring {
@@ -184,5 +314,491 @@ body {
 @media (max-height: 50px) {
   .tokens {
     font-size: 14px;
+  }
+}
+
+/* ------------------------------------------------------------ 卡片 */
+
+.card {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  /* 段落之间靠 5px 的缝与两条分隔线分区，不加卡片背景块 —— 和面板同一套语法 */
+  gap: 5px;
+  padding: 9px 10px;
+  border: 1px solid var(--card-line);
+  border-radius: 2px;
+  background: var(--card-bg);
+  box-shadow: var(--capsule-shadow);
+  overflow: hidden;
+  /* 卡片上的数字要能选中复制 —— 胶囊是一块牌子，卡片是一张能拿走的纸条 */
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* 入场从胶囊那一角长出来：朝上展开就从右下角起、朝左贴就从左下角起 */
+.card[data-side='up'][data-align='right'] {
+  transform-origin: 100% 100%;
+}
+
+.card[data-side='up'][data-align='left'] {
+  transform-origin: 0 100%;
+}
+
+.card[data-side='down'][data-align='right'] {
+  transform-origin: 100% 0;
+}
+
+.card[data-side='down'][data-align='left'] {
+  transform-origin: 0 0;
+}
+
+.card-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--card-line);
+}
+
+/* 正在记录的那个点：和面板 .ch.live 的小方块是同一个记号 */
+.card-head .live {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  background: var(--pen);
+}
+
+.card-src {
+  flex: 1;
+  min-width: 0;
+  font-size: 11.5px;
+  font-weight: 600;
+  /* 行高写死：卡片高度是个常数，字高飘一格就得回来改窗口尺寸 */
+  line-height: 18px;
+  letter-spacing: 0.01em;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.card-icon {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  height: 18px;
+  padding: 0 5px;
+  border: 1px solid transparent;
+  border-radius: 2px;
+  background: transparent;
+  color: var(--ink-3);
+  cursor: pointer;
+}
+
+.card-icon:hover:not(:disabled) {
+  border-color: var(--card-line);
+  background: var(--track);
+  color: var(--ink);
+}
+
+.card-icon svg {
+  display: block;
+  width: 10px;
+  height: 10px;
+}
+
+.card-icon.theme {
+  font-size: 10px;
+  padding: 0 6px;
+}
+
+/* 主题色块：左半是这一档的纸、右半是它的记录笔 —— 一眼看出这套配色长什么样 */
+.card-icon .swatch {
+  display: block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 1px solid var(--card-line);
+  background: linear-gradient(90deg, var(--sheet) 0 50%, var(--pen) 50% 100%);
+}
+
+.card-hero {
+  display: flex;
+  /*
+   * 底对齐，不是基线对齐：右侧那两行小字会把行盒撑到 40px ——
+   * 基线对齐时大数字（26px）的下缘要够到小字第一行的基线，第二行再往下挂，
+   * 白多出 10px。换成底对齐正好 30px，读数与小字的下沿齐平，也不难看。
+   */
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.hero-main {
+  display: flex;
+  align-items: baseline;
+  min-width: 0;
+}
+
+/*
+ * 大读数用界面字而不是等宽字：Consolas 的 0 带斜杠，26px 下就是个刺眼的「Ø」。
+ * 这里也只有单个数字要对齐，等宽没有意义。
+ */
+.hero-value {
+  font-family: var(--font-ui);
+  font-variant-numeric: tabular-nums lining-nums;
+  font-size: 26px;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: -0.02em;
+  color: var(--ink);
+  white-space: nowrap;
+}
+
+.hero-value em {
+  font-size: 13px;
+  font-style: normal;
+  font-weight: 500;
+  letter-spacing: 0;
+  color: var(--ink-2);
+  margin-left: 1px;
+}
+
+.hero-unit {
+  flex: none;
+  margin-left: 5px;
+  font-size: 10px;
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+
+.hero-side {
+  flex: none;
+  max-width: 46%;
+  text-align: right;
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
+  font-size: 10.5px;
+  line-height: 15px;
+  color: var(--warn);
+  /*
+   * 两行都不许换行：卡片高度是常数，这里一换行就多出 15px，
+   * 底下几段会被 .card 的 overflow: hidden 裁掉（内容盒不会自己长）。
+   */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hero-side .muted {
+  color: var(--ink-3);
+}
+
+/* 三格明细：输入 / 输出 / 缓存，或额度源的三个窗口 */
+.card-rows {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
+  gap: 8px;
+  padding: 6px 0;
+  border-top: 1px solid var(--card-line);
+  border-bottom: 1px solid var(--card-line);
+}
+
+.cell {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.cell-k {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  line-height: 13px;
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+
+/* 明细前面那枚小色块：和面板「结构」通道里几根条的颜色是同一套语义 */
+.cell-k .dot {
+  flex: none;
+  display: block;
+  width: 6px;
+  height: 6px;
+  border-radius: 1px;
+}
+
+.cell-v {
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  line-height: 15px;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cell-v.danger {
+  color: var(--alarm);
+}
+
+.card-k {
+  flex: none;
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  color: var(--ink-3);
+}
+
+.card-gauge {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.gauge-line {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+/*
+ * 刻度槽：70% / 90% 两条分界印在槽上，永远看得见 ——
+ * 和面板上那把仪表是同一套读法，「红」说的是指针进了红线区。
+ */
+.gauge-bar {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  height: 8px;
+  border-radius: 1px;
+  background-color: var(--track);
+  background-image: linear-gradient(
+    90deg,
+    transparent 0 70%,
+    var(--warn-zone) 70% 90%,
+    var(--alarm-zone) 90% 100%
+  );
+  overflow: hidden;
+}
+
+.gauge-fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  min-width: 2px;
+  background: color-mix(in srgb, var(--ink) 24%, transparent);
+  transition: width 0.26s ease-out;
+}
+
+.gauge-needle {
+  position: absolute;
+  top: -1px;
+  bottom: -1px;
+  width: 2px;
+  background: var(--ink);
+  transition: left 0.26s ease-out, background-color 0.26s ease-out;
+}
+
+.gauge-bar[data-level='warn'] .gauge-needle {
+  background: var(--warn);
+}
+
+.gauge-bar[data-level='danger'] .gauge-needle {
+  background: var(--alarm);
+}
+
+.gauge-num {
+  flex: none;
+  min-width: 34px;
+  text-align: right;
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 14px;
+  color: var(--ink);
+}
+
+.gauge-note {
+  font-size: 10px;
+  line-height: 13px;
+  color: var(--ink-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.card-spark {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  /* 卡片高度是写死的，多出来的那几像素给到这里 —— 柱子与底栏一起贴着下沿 */
+  margin-top: auto;
+}
+
+.spark {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  /*
+   * 24px 是这张卡片上唯一一处「把余量花在数据上」的地方：窗口高度是个常数，
+   * 内容算下来总会剩两三像素，而这余量全被 .card-spark 的 margin-top: auto
+   * 收进上面那条缝里 —— 缝比别人宽一截，看着就像排版坏了。加高它，余量就变成刻度。
+   * （20px 时 100% 的柱子只能画到 19px，几乎看不出高低。）
+   */
+  height: 24px;
+  /* 基线：柱子坐在纸上一条实线上，比悬空的柱子稳 */
+  border-bottom: 1px solid var(--track);
+}
+
+.spark i {
+  flex: 1;
+  min-width: 0;
+  border-radius: 1px 1px 0 0;
+  background: var(--d-in);
+}
+
+/*
+ * 那天没有用量：只留一道 2px 的底线。
+ * 不画成 0 —— 卡片上就这么 7 根柱子，一片空白分不清「没数据」和「没干活」。
+ */
+.spark i.zero {
+  height: 2px;
+  background: var(--track);
+}
+
+/* 今天那根用记录笔色 —— 全界面唯一的「现在」标记之一 */
+.spark i.today {
+  background: var(--pen);
+}
+
+.spark i.zero.today {
+  background: var(--pen);
+}
+
+.card-foot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--card-line);
+}
+
+.foot-time {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
+  font-size: 10px;
+  color: var(--ink-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.card-foot button {
+  flex: none;
+  font: inherit;
+  font-size: 10.5px;
+  line-height: 14px;
+  padding: 2px 7px;
+  border: 1px solid var(--card-line);
+  border-radius: 2px;
+  background: transparent;
+  color: var(--ink-2);
+  cursor: pointer;
+}
+
+.card-foot button:hover:not(:disabled) {
+  border-color: var(--ink-3);
+  color: var(--ink);
+}
+
+.card-foot button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.card-foot .primary {
+  border-color: var(--pen);
+  color: var(--pen);
+}
+
+.card-foot .primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--pen) 14%, transparent);
+  border-color: var(--pen);
+}
+
+.card-foot .ghost {
+  background: transparent;
+}
+
+/* ------------------------------------------------------------ 动效 */
+
+/*
+ * 一次编排好的入场：卡片先弹出来，里面的六段再按 40ms 错峰跟上。
+ * 只有一个编排时刻，没有零散的微交互。
+ */
+@keyframes card-pop {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.96);
+  }
+}
+
+@keyframes card-row {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .card {
+    animation: card-pop 200ms var(--ease) both;
+  }
+
+  .card > * {
+    animation: card-row 260ms var(--ease) both;
+    animation-delay: 30ms;
+  }
+
+  .card > *:nth-child(2) {
+    animation-delay: 70ms;
+  }
+
+  .card > *:nth-child(3) {
+    animation-delay: 110ms;
+  }
+
+  .card > *:nth-child(4) {
+    animation-delay: 150ms;
+  }
+
+  .card > *:nth-child(5) {
+    animation-delay: 190ms;
+  }
+
+  .card > *:nth-child(6) {
+    animation-delay: 230ms;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.001ms !important;
+    animation-duration: 0.001ms !important;
   }
 }

@@ -69,53 +69,96 @@
 }
 
 /*
- * 深色 = 暗房里的同一台仪器：机壳是深青灰（不是 #0B0B0B），
- * 纸面比机壳略亮，记录笔提亮到在深底上仍然抓眼。
+ * 深色 = 暗房里的同一台仪器。
+ *
+ * 不是把浅色反相，也不是「深灰 + 蓝紫渐变」那一套：机壳取的是**深靛墨**
+ * （#0B0E16，带一点靛的青，不是纯黑也不是发绿的灰），纸面比机壳亮一档，
+ * 顶轨 / 底轨再暗一档 —— 三层高度靠明度区分，和浅色那边一样。
+ * 记录笔提亮成琥珀朱（#FF6A3A），在靛底上是全页最亮的一点，
+ * 「只有被测量的东西才有颜色」这条在深色下反而更清楚。
+ *
+ * 前 11 个基础色与 float.css 的 `data-capsule='ink'` 逐字节相同：
+ * 面板和胶囊是同一台仪器，各调各的迟早会跑偏（core-test 盯着）。
  */
 :root[data-theme='dark'] {
   color-scheme: dark;
 
-  --paper: #0e1618;
-  --sheet: #131e21;
-  --sheet-2: #0a1113;
-  --track: #223033;
+  --paper: #0b0e16;
+  --sheet: #111726;
+  --sheet-2: #070a10;
+  --track: #202941;
 
-  --ink: #e3ece8;
-  --ink-2: #93a5a0;
-  --ink-3: #667872;
-  --rule: #2b3b3e;
-  --rule-soft: #1f2c2f;
+  --ink: #e9ecf6;
+  --ink-2: #9aa3bd;
+  --ink-3: #7f89a8;
+  --rule: #232b3f;
+  --rule-soft: #171d2c;
 
-  --pen: #ff6b4a;
-  --pen-wash: rgba(255, 107, 74, 0.14);
+  --pen: #ff6a3a;
+  --pen-wash: rgba(255, 106, 58, 0.13);
 
-  --warn: #e0a83c;
-  --warn-zone: rgba(224, 168, 60, 0.16);
-  --alarm: #e5484d;
-  --alarm-zone: rgba(229, 72, 77, 0.18);
+  --warn: #e6b23f;
+  --warn-zone: rgba(230, 178, 63, 0.16);
+  --alarm: #ff5560;
+  --alarm-zone: rgba(255, 85, 96, 0.18);
 
-  --d-in: #5b9bc4;
+  --d-in: #4f9bd8;
   --d-cache: #33566b;
-  --d-out: #4faa83;
-  --d-think: #d8a94a;
-  --d-rank: #7d9aab;
-  --d-day: #3d6a86;
-  --heat-1: #1d2f38;
-  --heat-2: #2b4c5e;
-  --heat-3: #3f7896;
-  --heat-4: #6fb2d4;
+  --d-out: #3fb08a;
+  --d-think: #dba54a;
+  --d-rank: #7d93bd;
+  --d-day: #41688f;
+  /*
+   * 热力图四档：明度必须**单调递增**，而且第 1 档要比 --track（当天没用量）
+   * 更亮一点。原来第 1 档比刻度槽还暗，于是「用了一点点」看起来比
+   * 「完全没用」更空 —— 在一张 11px 的格子上，这个方向反了就是读不出来。
+   */
+  --heat-1: #26365a;
+  --heat-2: #33517f;
+  --heat-3: #4076ad;
+  --heat-4: #6fb0e0;
 
-  --notice-bg: #2a2415;
-  --notice-line: #4a3f22;
-  --notice-ink: #e0c88a;
-  --fatal-bg: #2c1715;
-  --fatal-line: #552a24;
-  --fatal-ink: #f0a79c;
+  --notice-bg: #2a2210;
+  --notice-line: #4a3c1c;
+  --notice-ink: #e6c887;
+  --fatal-bg: #2b1518;
+  --fatal-line: #55252b;
+  --fatal-ink: #ffa79c;
 
-  --focus: #5b9bc4;
-  --menu-shadow: 0 10px 26px rgba(0, 0, 0, 0.5);
+  --focus: #6aa9e6;
+  --menu-shadow: 0 12px 30px rgba(0, 0, 0, 0.62);
   /* 深色下压暗要更狠，否则和背景分不出来 */
-  --scrim: rgba(0, 0, 0, 0.55);
+  --scrim: rgba(4, 6, 12, 0.62);
+}
+
+/*
+ * 深色专属的氛围层 —— 浅色下这一页什么都没有，记录纸本身就是材料。
+ *
+ * 深色不一样：一整块靛墨平铺到底会显得「空」，像没人来过。所以补两样，
+ * 都是 10% 上下的量，只为把平面托起来，绝不能盖过数据：
+ *   1) 机头往下透出来的一层背光（像仪器内部亮着）；
+ *   2) 四角压暗的暗角，把视线收回中间那几条通道上。
+ * 刻意不铺任何网格：这一页的格线只该出现在热力图里，那里格子本身就是数据。
+ */
+:root[data-theme='dark'] body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(120% 42% at 50% -8%, rgba(96, 138, 220, 0.12), transparent 70%),
+    radial-gradient(92% 46% at 50% 110%, rgba(6, 9, 20, 0.72), transparent 72%);
+}
+
+/*
+ * 颗粒：给平面一点材料感。3.5% 是上限 —— 再多就成了「脏屏幕」，
+ * 而且会和热力图那种 11px 的小格子互相干扰。
+ * 这一层由 App.tsx 的 <Grain /> 画（内联 SVG 的 feTurbulence），
+ * 浅色下 opacity 归零，等于不存在。
+ */
+:root[data-theme='dark'] .grain {
+  opacity: 0.035;
 }
 
 * {
@@ -169,6 +212,26 @@ body {
   outline-offset: 1px;
 }
 
+/* 选中底色跟着记录笔走 —— 默认那抹蓝和这套配色不是一路的 */
+::selection {
+  background: color-mix(in srgb, var(--pen) 30%, transparent);
+}
+
+/*
+ * 颗粒层（App.tsx 的 <Grain />）。平时是透明的，只有深色主题把它调到 3.5%：
+ * 浅色那边是一张纸，纸本身就有纹理；深色那边是一块靛墨，不加点颗粒就是死平的。
+ * z-index 2 = 压在内容之上（颗粒本来就是盖在整幅画面上的），但绝不接收事件。
+ */
+.grain {
+  position: fixed;
+  inset: 0;
+  z-index: 2;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  opacity: 0;
+}
+
 /* 静态兜底文案：React 挂载前那一瞬间显示的东西 */
 .boot {
   font-size: 12.5px;
@@ -181,7 +244,13 @@ body {
   color: var(--ink-3);
 }
 
+/*
+ * 整页压在氛围层之上。深色的背光 / 暗角是 body::before（fixed、z-index 0），
+ * 内容是静态流所以默认会被盖住 —— 得把这一层显式抬起来。
+ */
 .app {
+  position: relative;
+  z-index: 1;
   display: flex;
   flex-direction: column;
   height: 100%;

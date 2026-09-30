@@ -1,6 +1,13 @@
 import { BrowserWindow, nativeTheme, screen } from 'electron'
-import { windowSizeOf } from '../shared/layout'
-import type { FloatPosition, FloatState, Settings } from '../shared/types'
+import { capsuleSolidBackground } from '../shared/capsule'
+import {
+  CAPSULE_SIZES,
+  defaultCapsulePosition,
+  floatWindowBounds,
+  type Box,
+  type Point
+} from '../shared/layout'
+import type { FloatCardSide, FloatPosition, FloatState, Settings } from '../shared/types'
 import { hardenWindow, loadRenderer } from './paths'
 
 /** 默认摆在右下角时离屏幕边缘的距离 */
@@ -11,30 +18,35 @@ const VISIBLE_FALLBACK_MS = 700
 const POSITION_FLUSH_MS = 400
 
 /**
- * 「实心底色」模式下窗口自己的底色。透明模式用全透明。
- * 必须和 float.css 的 --sheet 对上（深色 #131E21 / 浅色 #F6F8F5）——
- * 这两个值只在主进程用得到（窗口底色是创建参数，CSS 管不着），
- * 对不上的表现是胶囊四周多出一圈异色。
+ * 实心底色模式下窗口自己的底色。
+ * 透明模式用全透明；不透明模式必须和 float.css 里同名主题的 --sheet 对上
+ * —— 对不上的表现是胶囊四周多出一圈异色（见 shared/capsule.ts 的表）。
  */
-function capsuleBackground(solid: boolean): string {
-  if (!solid) return '#00000000'
-  return nativeTheme.shouldUseDarkColors ? '#131E21' : '#F6F8F5'
+function capsuleBackground(settings: Settings): string {
+  if (!settings.floatSolidBackground) return '#00000000'
+  return capsuleSolidBackground(settings.floatTheme, nativeTheme.shouldUseDarkColors)
 }
 
 /**
  * 桌面常驻胶囊。
  *
- * 与「弹出式提醒浮窗」的区别：这个是常驻的，不自动隐藏，
- * 拖动改变位置并记住，单击（不是拖动）打开主面板。
+ * 与「弹出式提醒浮窗」的区别：这个是常驻的，不自动隐藏，拖动改变位置并记住。
+ * **单击展开一张信息更丰富的悬浮卡片**，卡片里的「打开面板」才进主窗口 ——
+ * 胶囊上那一点点面积放不下多少东西，把所有细节都塞进面板等于每次只想知道
+ * 一个数字都要开一次窗口。
  *
- * 三个绕不过去的取舍：
+ * 四个绕不过去的取舍：
  * 1) `transparent` 是**创建参数**，运行期改不了。想在不透明 / 透明之间切换，
  *    只能销毁重建窗口 —— 好在窗口本来就是按需创建的。
  * 2) 透明窗口不做逐像素命中测试，整块矩形都会挡住下面窗口的点击。
- *    所以胶囊要小（最大档也才 252x68），并且提供不透明降级模式。
+ *    所以胶囊要小（最大档也才 252x68），并且提供不透明降级模式；
+ *    展开的卡片也只在点开的那几秒里存在。
  * 3) 拖动与单击必须分开：用 pointer capture 自己实现拖动，
  *    判定「移动距离小于阈值」才算点击。用 CSS 的 -webkit-app-region: drag
- *    会把 click 事件整个吃掉，那样就没法「点击打开面板」了。
+ *    会把 click 事件整个吃掉，那样就没法「点击展开卡片」了。
+ * 4) 展开**不新建窗口**，只是把同一个窗口撑大，并让胶囊在里面原地不动。
+ *    窗口位置由「胶囊在屏幕上的位置」(origin) 反推，收起/展开共用一套算法，
+ *    所以来回切是幂等的，不会一格一格地漂。
  */
 export class FloatWindow {
   private win: BrowserWindow | null = null
@@ -47,6 +59,16 @@ export class FloatWindow {
   /** 创建时用的底色模式，用来判断是否需要重建窗口 */
   private createdSolid: boolean | null = null
 
+  /**
+   * 胶囊在屏幕上的位置（左上角）—— **唯一真相**。
+   * 窗口摆在哪儿是它算出来的；窗口被贴边收紧后，结果又写回这里。
+   */
+  private origin: Point | null = null
+  private expanded = false
+  private side: FloatCardSide = 'up'
+  /** 胶囊贴窗口哪一侧。渲染层要它才能把卡片和胶囊对齐，所以得算一处、报一处 */
+  private alignRight = true
+
   constructor(
     private readonly preload: string,
     private readonly readSettings: () => Settings,
@@ -57,16 +79,31 @@ export class FloatWindow {
     return this.win
   }
 
+  get isExpanded(): boolean {
+    return this.expanded
+  }
+
   /** 供自检回报，别让它变成黑盒 */
   describe(): FloatState {
     const win = this.win
     if (!win || win.isDestroyed()) {
-      return { created: false, visible: false, loaded: false, bounds: null }
+      return {
+        created: false,
+        visible: false,
+        loaded: false,
+        expanded: this.expanded,
+        side: this.side,
+        alignRight: this.alignRight,
+        bounds: null
+      }
     }
     return {
       created: true,
       visible: win.isVisible(),
       loaded: this.loaded,
+      expanded: this.expanded,
+      side: this.side,
+      alignRight: this.alignRight,
       bounds: win.getBounds()
     }
   }
@@ -76,15 +113,12 @@ export class FloatWindow {
 
     const settings = this.readSettings()
     const solid = settings.floatSolidBackground
-    const { width, height } = windowSizeOf(settings.floatSize)
 
     const win = new BrowserWindow({
-      width,
-      height,
       frame: false,
       // 不透明模式是「透明窗口在当前环境不可见」时的逃生通道
       transparent: !solid,
-      backgroundColor: capsuleBackground(solid),
+      backgroundColor: capsuleBackground(settings),
       resizable: false,
       movable: true,
       minimizable: false,
@@ -99,7 +133,13 @@ export class FloatWindow {
         preload: this.preload,
         sandbox: false,
         contextIsolation: true,
-        nodeIntegration: false
+        nodeIntegration: false,
+        /*
+         * 胶囊主题不能靠页面自己去问 —— 问一轮 IPC 回来时首帧早就画完了，
+         * 浅色的那一帧会先闪一下（胶囊是不透明小窗，闪一下特别明显）。
+         * 用启动参数把它带进渲染进程，preload 在样式表之前就能落到 <html> 上。
+         */
+        additionalArguments: [`--wbm-capsule-theme=${settings.floatTheme}`]
       }
     })
 
@@ -124,6 +164,16 @@ export class FloatWindow {
       console.error(`[float] did-fail-load code=${code} ${description}`)
     })
 
+    /*
+     * 点开卡片之后点到别处就收起来 —— 这是「悬浮卡片」该有的手感，
+     * 也是唯一不需要用户去够关闭按钮的收起方式。
+     * 只认焦点的丢失：胶囊本身是 showInactive 弹出来的，没焦点可丢，
+     * 所以这条不会在它刚出现时误触发。
+     */
+    win.on('blur', () => {
+      if (this.expanded) this.setExpanded(false)
+    })
+
     win.on('closed', () => {
       this.win = null
       this.loaded = false
@@ -135,7 +185,11 @@ export class FloatWindow {
     loadRenderer(win, 'float')
     this.win = win
     this.createdSolid = solid
-    this.place(win)
+
+    // 位置：优先用记住的胶囊位置，但它得还在某块屏幕上
+    const saved = settings.floatPosition
+    this.origin = saved && this.isReachable(saved) ? saved : null
+    this.applyPlacement()
     return win
   }
 
@@ -156,6 +210,8 @@ export class FloatWindow {
   }
 
   hide(): void {
+    // 藏起来之前先收起卡片：下次露面时总该是那个干净的小胶囊
+    this.setExpanded(false)
     if (this.win && !this.win.isDestroyed()) this.win.hide()
   }
 
@@ -168,6 +224,29 @@ export class FloatWindow {
     }
     this.show()
     return true
+  }
+
+  /**
+   * 展开 / 收起卡片。窗口尺寸跟着换，但胶囊在屏幕上的位置不变 ——
+   * 视觉上是卡片从胶囊旁边长出来，而不是胶囊跳到了别处。
+   */
+  setExpanded(next: boolean): void {
+    if (this.expanded === next) return
+    const before = this.origin
+    this.expanded = next
+    const { capsule } = this.applyPlacement()
+    this.send('float:expanded', { expanded: this.expanded, side: this.side, alignRight: this.alignRight })
+    // 只有贴边收紧真的把胶囊挪动了才落盘 —— 正常情况下展开不动胶囊，不必写盘
+    if (before && (before.x !== capsule.x || before.y !== capsule.y)) {
+      this.onMoved({ x: capsule.x, y: capsule.y })
+    }
+  }
+
+  toggleExpand(): boolean {
+    const win = this.ensure()
+    if (!win.isVisible()) this.show()
+    this.setExpanded(!this.expanded)
+    return this.expanded
   }
 
   /**
@@ -185,11 +264,8 @@ export class FloatWindow {
     const win = this.win
     if (!win || win.isDestroyed()) return
 
-    const { width, height } = windowSizeOf(settings.floatSize)
-    const bounds = win.getBounds()
-    if (bounds.width !== width || bounds.height !== height) {
-      win.setBounds({ x: bounds.x, y: bounds.y, width, height })
-    }
+    // 尺寸档位变了要重算窗口（展开态下卡片也跟着换），位置由 origin 推
+    this.applyPlacement()
     win.setAlwaysOnTop(settings.floatAlwaysOnTop, 'floating')
     win.setOpacity(clampOpacity(settings.floatOpacity))
   }
@@ -202,49 +278,30 @@ export class FloatWindow {
     const win = this.win
     if (!win || win.isDestroyed()) return
     if (!this.readSettings().floatSolidBackground) return
-    win.setBackgroundColor(capsuleBackground(true))
+    win.setBackgroundColor(capsuleBackground(this.readSettings()))
   }
 
-  /**
-   * 把胶囊挪到 (x, y)，尺寸按当前设置写死。
-   *
-   * 不能用 setPosition：它内部是「读回当前尺寸再写回」，Win11（150% 缩放）上每调用
-   * 一次窗口就宽高各 +1（复现数据：222x81 连续 100 次后变成 322x181），拖拽时
-   * pointermove 一秒钟几十帧，几秒就把胶囊撑大。显式 setBounds 固定尺寸则完全稳定。
-   */
-  private moveTo(x: number, y: number): void {
-    const win = this.win
-    if (!win || win.isDestroyed()) return
-    const { width, height } = windowSizeOf(this.readSettings().floatSize)
-    win.setBounds({ x: Math.round(x), y: Math.round(y), width, height })
-  }
-
-  /** 拖动窗口：由渲染层送来增量位移 */
+  /** 拖动窗口：由渲染层送来增量位移。位移作用在**胶囊**上，窗口位置再推出来 */
   moveBy(dx: number, dy: number): void {
     const win = this.win
     if (!win || win.isDestroyed()) return
-    const [x, y] = win.getPosition()
-    this.moveTo(x + dx, y + dy)
+    const origin = this.origin ?? { x: 0, y: 0 }
+    this.origin = { x: origin.x + dx, y: origin.y + dy }
+    this.applyPlacement()
 
     if (this.positionTimer) clearTimeout(this.positionTimer)
     this.positionTimer = setTimeout(() => {
-      if (win.isDestroyed()) return
-      const [px, py] = win.getPosition()
-      this.onMoved({ x: px, y: py })
+      if (win.isDestroyed() || !this.origin) return
+      this.onMoved({ x: Math.round(this.origin.x), y: Math.round(this.origin.y) })
     }, POSITION_FLUSH_MS)
   }
 
   /** 把胶囊放回默认的右下角 */
   resetPosition(): void {
     const win = this.ensure()
-    const { workArea } = screen.getPrimaryDisplay()
-    const { width, height } = windowSizeOf(this.readSettings().floatSize)
-    this.moveTo(
-      workArea.x + workArea.width - width - MARGIN,
-      workArea.y + workArea.height - height - MARGIN
-    )
-    const [px, py] = win.getPosition()
-    this.onMoved({ x: px, y: py })
+    this.origin = null
+    const { capsule } = this.applyPlacement()
+    if (!win.isDestroyed()) this.onMoved({ x: capsule.x, y: capsule.y })
   }
 
   send(channel: string, ...args: unknown[]): void {
@@ -268,6 +325,54 @@ export class FloatWindow {
     this.createdSolid = null
   }
 
+  /**
+   * 按 origin 与当前展开状态把窗口摆好，并把（可能被贴边收紧过的）结果写回 origin。
+   * 返回胶囊的最终落点，调用方拿它决定要不要落盘。
+   */
+  private applyPlacement(): { capsule: Point; side: FloatCardSide } {
+    const settings = this.readSettings()
+    const workArea = this.workArea()
+    const origin = this.origin ?? defaultCapsulePosition(settings.floatSize, workArea, MARGIN)
+    const placement = floatWindowBounds({
+      size: settings.floatSize,
+      capsule: origin,
+      expanded: this.expanded,
+      workArea
+    })
+
+    this.origin = placement.capsule
+    this.side = placement.side
+    this.alignRight = placement.alignRight
+
+    const win = this.win
+    if (win && !win.isDestroyed()) {
+      /*
+       * 不能用 setPosition：它内部是「读回当前尺寸再写回」，Win11（150% 缩放）上每调用
+       * 一次窗口就宽高各 +1（复现数据：222x81 连续 100 次后变成 322x181），拖拽时
+       * pointermove 一秒钟几十帧，几秒就把胶囊撑大。显式 setBounds 固定尺寸则完全稳定。
+       */
+      win.setBounds(placement.bounds)
+    }
+    return { capsule: placement.capsule, side: placement.side }
+  }
+
+  /** 胶囊在哪块屏幕上，窗口就按哪块屏幕算边界（拖到副屏也要能贴边） */
+  private workArea(): Box {
+    const point = this.origin ?? { x: 0, y: 0 }
+    return screen.getDisplayNearestPoint({ x: Math.round(point.x), y: Math.round(point.y) }).workArea
+  }
+
+  /** 拔掉外接显示器后，别把胶囊恢复到看不见的地方去 */
+  private isReachable(position: Point): boolean {
+    const { width, height } = CAPSULE_SIZES[this.readSettings().floatSize]
+    return screen.getAllDisplays().some((display) => {
+      const area = display.workArea
+      const overlapX = Math.min(position.x + width, area.x + area.width) - Math.max(position.x, area.x)
+      const overlapY = Math.min(position.y + height, area.y + area.height) - Math.max(position.y, area.y)
+      return overlapX > 60 && overlapY > 30
+    })
+  }
+
   private present(win: BrowserWindow): void {
     const settings = this.readSettings()
     win.setAlwaysOnTop(settings.floatAlwaysOnTop, 'floating')
@@ -281,32 +386,6 @@ export class FloatWindow {
       // 透明窗口在部分环境 showInactive 后不可见，回退到带焦点的 show()
       win.show()
     }, VISIBLE_FALLBACK_MS)
-  }
-
-  /** 优先用记住的位置，但要在屏幕还是接着的才用 */
-  private place(win: BrowserWindow): void {
-    const saved = this.readSettings().floatPosition
-    if (saved && this.isReachable(win, saved)) {
-      this.moveTo(saved.x, saved.y)
-      return
-    }
-    const { workArea } = screen.getPrimaryDisplay()
-    const { width, height } = windowSizeOf(this.readSettings().floatSize)
-    this.moveTo(
-      workArea.x + workArea.width - width - MARGIN,
-      workArea.y + workArea.height - height - MARGIN
-    )
-  }
-
-  /** 拔掉外接显示器后，别把胶囊恢复到看不见的地方去 */
-  private isReachable(win: BrowserWindow, position: FloatPosition): boolean {
-    const { width, height } = win.getBounds()
-    return screen.getAllDisplays().some((display) => {
-      const area = display.workArea
-      const overlapX = Math.min(position.x + width, area.x + area.width) - Math.max(position.x, area.x)
-      const overlapY = Math.min(position.y + height, area.y + area.height) - Math.max(position.y, area.y)
-      return overlapX > 60 && overlapY > 30
-    })
   }
 }
 

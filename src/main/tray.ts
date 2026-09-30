@@ -1,4 +1,5 @@
 import { Menu, Tray, type MenuItemConstructorOptions } from 'electron'
+import { CAPSULE_THEME_ORDER, capsuleThemeLabel } from '../shared/capsule'
 import {
   compact,
   contextSummary,
@@ -15,9 +16,15 @@ import {
   themeLabel
 } from '../shared/format'
 import { describeReset, quotaSummary, quotaWindowLabel, windowOf } from '../shared/opencode-quota'
-import type { FloatSize, Snapshot, SourceKind, ThemeMode, UpdateState } from '../shared/types'
+import type { CapsuleTheme, FloatSize, Snapshot, SourceKind, ThemeMode, UpdateState } from '../shared/types'
 import { updateStatusText } from '../shared/update'
 import { trayIconImage } from './paths'
+
+/** 自检用：一个子菜单的「标题档位」与「被勾中的那一项」 */
+export interface MenuChoice {
+  label: string
+  checked: string
+}
 
 export interface TrayCallbacks {
   onOpenMain(): void
@@ -43,6 +50,8 @@ export interface TrayCallbacks {
   /* 桌面胶囊 */
   getFloatEnabled(): boolean
   onToggleFloat(enabled: boolean): void
+  getFloatTheme(): CapsuleTheme
+  onSetFloatTheme(theme: CapsuleTheme): void
   getFloatAlwaysOnTop(): boolean
   onToggleFloatAlwaysOnTop(enabled: boolean): void
   getFloatSize(): FloatSize
@@ -58,9 +67,21 @@ const SIZE_LABELS: Record<FloatSize, string> = { small: '小', medium: '中', la
 const SIZE_ORDER: FloatSize[] = ['small', 'medium', 'large']
 const OPACITY_OPTIONS = [1, 0.9, 0.8, 0.7, 0.5]
 
+/**
+ * 档位表里必须含当前值，否则那一列圆点**一个都不亮** —— 默认的 0.94 就不在这张表里。
+ * 不在表里就把它插进「从大到小」的位置，而不是把 0.94 写死进档位表：写死只救得了
+ * 这一个值，插进去对所有值都成立（设置文件被手改过也一样）。
+ */
+function opacityOptions(current: number): number[] {
+  if (OPACITY_OPTIONS.some((value) => Math.abs(value - current) < 0.01)) return OPACITY_OPTIONS
+  return [...OPACITY_OPTIONS, current].sort((a, b) => b - a)
+}
+
 export class TrayController {
   private tray: Tray | null = null
   private menu: Menu | null = null
+  /** 最近一份快照 —— refresh() 要靠它重建，等不起下一次轮询 */
+  private last: Snapshot | null = null
   private signature = ''
 
   constructor(private readonly cb: TrayCallbacks) {}
@@ -72,9 +93,34 @@ export class TrayController {
     this.tray.on('right-click', () => this.tray?.popUpContextMenu(this.menu ?? undefined))
   }
 
-  /** 手动刷新后强制重建菜单，让「更新于」立刻反映出来 */
-  notifyRefreshed(): void {
+  /**
+   * 立刻用最近一份快照重建菜单。
+   *
+   * **光清签名是不够的。** 设置类改动（胶囊主题 / 外观 / 数据源…）一个数据字段都不动，
+   * 只改菜单标题和勾选态，而下一份快照最多要等 20 秒；更要命的是子菜单里那些
+   * `type: 'radio'` 的圆点是**系统自己挪的** —— 点完立刻再打开，圆点已经在新档位上、
+   * 标题还停在旧档位，同一条菜单里两个说法打架，看起来就是「选中项对不上」。
+   */
+  refresh(): void {
+    if (!this.last) return
     this.signature = ''
+    this.update(this.last)
+  }
+
+  /**
+   * 自检用：把菜单里那几个「标题带着当前档位」的子菜单报出来。
+   *
+   * 标题里 `：` 后面那一段必须等于子菜单里被勾中的那一项 —— 这两样分开来各自
+   * 都「看着对」，只有它们打架才说明菜单落后于设置，而那正好是要盯的东西。
+   */
+  describeChoices(): MenuChoice[] {
+    const choices: MenuChoice[] = []
+    for (const item of this.menu?.items ?? []) {
+      if (!item.submenu) continue
+      const picked = item.submenu.items.find((entry) => entry.checked)
+      choices.push({ label: item.label, checked: picked?.label ?? '' })
+    }
+    return choices
   }
 
   /** 在鼠标当前位置弹出菜单 —— 胶囊上右键时用 */
@@ -84,6 +130,8 @@ export class TrayController {
   }
 
   update(snapshot: Snapshot): void {
+    // 先存下来：菜单没建出来（托盘还没就绪）也得留着给 refresh() 用
+    this.last = snapshot
     if (!this.tray) return
 
     const now = Date.now()
@@ -110,6 +158,7 @@ export class TrayController {
     const theme = this.cb.getTheme()
     const update = this.cb.getUpdate()
     const floatEnabled = this.cb.getFloatEnabled()
+    const floatTheme = this.cb.getFloatTheme()
     const floatSize = this.cb.getFloatSize()
     const floatOpacity = this.cb.getFloatOpacity()
     const floatOnTop = this.cb.getFloatAlwaysOnTop()
@@ -122,7 +171,12 @@ export class TrayController {
           .join(',')}`
       : ''
 
-    // 只在可见内容真的变了时才重建菜单，免得每 20 秒白干一次
+    /*
+     * 签名里含 generatedAt，而菜单上印着「更新于 21:52（刚刚）」—— 相对时间每轮都得
+     * 跟着走，所以它挡不住轮询本身（每 20 秒确实会重建一次）。它挡的是**同一份快照
+     * 被重复喂进来**：设置变更、更新状态变化这些路径都拿最近那份快照重建，没有它就会
+     * 连着重来好几遍。
+     */
     const signature = [
       snapshot.kind,
       todayTokens,
@@ -136,6 +190,7 @@ export class TrayController {
       theme,
       `${update.status}:${update.current}:${update.latest}:${Math.round(update.percent)}`,
       floatEnabled,
+      floatTheme,
       floatSize,
       floatOpacity.toFixed(2),
       floatOnTop,
@@ -248,8 +303,26 @@ export class TrayController {
         checked: floatEnabled,
         click: (item) => this.cb.onToggleFloat(item.checked)
       },
+      /*
+       * 胶囊主题不跟面板走 —— 面板只有三档（跟随系统 / 浅色 / 深色），
+       * 而贴在桌面上的那块牌子本身就有好几个风格可挑，所以单开一项。
+       * 菜单标题带当前档位：这个子菜单里点一下之后菜单就没了，
+       * 不带就得再展开一次才知道自己现在在哪一档。
+       */
       {
-        label: '胶囊尺寸',
+        label: `胶囊主题：${capsuleThemeLabel(floatTheme)}`,
+        enabled: floatEnabled,
+        submenu: CAPSULE_THEME_ORDER.map((theme) => ({
+          label: capsuleThemeLabel(theme),
+          type: 'radio' as const,
+          checked: floatTheme === theme,
+          click: () => this.cb.onSetFloatTheme(theme)
+        }))
+      },
+      /* 尺寸与不透明度也照上面三项的规矩，标题里带上当前档位 —— 子菜单点一下就没了，
+         不带就得再展开一次才知道自己现在在哪一档 */
+      {
+        label: `胶囊尺寸：${SIZE_LABELS[floatSize]}`,
         enabled: floatEnabled,
         submenu: SIZE_ORDER.map((size) => ({
           label: SIZE_LABELS[size],
@@ -259,9 +332,9 @@ export class TrayController {
         }))
       },
       {
-        label: '胶囊不透明度',
+        label: `胶囊不透明度：${Math.round(floatOpacity * 100)}%`,
         enabled: floatEnabled,
-        submenu: OPACITY_OPTIONS.map((value) => ({
+        submenu: opacityOptions(floatOpacity).map((value) => ({
           label: `${Math.round(value * 100)}%`,
           type: 'radio' as const,
           checked: Math.abs(floatOpacity - value) < 0.01,

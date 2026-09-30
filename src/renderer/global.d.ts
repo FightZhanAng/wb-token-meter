@@ -1,4 +1,12 @@
-import type { AppInfo, Settings, Snapshot, UpdateState } from '../shared/types'
+import type {
+  AppInfo,
+  CapsuleTheme,
+  FloatCardSide,
+  FloatState,
+  Settings,
+  Snapshot,
+  UpdateState
+} from '../shared/types'
 
 declare global {
   interface Window {
@@ -16,9 +24,17 @@ declare global {
 
       /** 桌面胶囊：拖动走单向消息，高频且不需要回值 */
       moveFloat(dx: number, dy: number): void
+      /** 单击胶囊 —— 展开 / 收起悬浮卡片 */
+      toggleFloatCard(): void
+      collapseFloatCard(): void
+      getFloatState(): Promise<FloatState>
+      onFloatExpanded(handler: (state: { expanded: boolean; side: FloatCardSide; alignRight: boolean }) => void): () => void
+      /** 卡片里的「打开面板」 */
       openPanel(): void
       /** 在胶囊上右键时弹出菜单 */
       openFloatMenu(): void
+      /** 启动参数带来的胶囊主题；主窗口里为 undefined */
+      initialCapsuleTheme?: CapsuleTheme
 
       getSettings(): Promise<Settings>
       updateSettings(patch: Partial<Settings>): Promise<Settings>

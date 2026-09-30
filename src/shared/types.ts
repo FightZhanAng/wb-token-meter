@@ -241,6 +241,16 @@ export type ThemeMode = 'system' | 'light' | 'dark'
 
 export type FloatSize = 'small' | 'medium' | 'large'
 
+/**
+ * 胶囊外观。**和面板的 ThemeMode 是两条独立的轴** ——
+ * 面板只有跟随系统 / 浅色 / 深色，胶囊是贴在别人桌面上的一块牌子，
+ * 多给几档风格、并且允许它不跟面板走（见 shared/capsule.ts 的说明）。
+ */
+export type CapsuleTheme = 'auto' | 'paper' | 'ink' | 'amber' | 'carbon'
+
+/** 展开的卡片朝哪边 —— 由主进程按屏幕空间定，渲染层只管照摆 */
+export type FloatCardSide = 'up' | 'down'
+
 export interface FloatPosition {
   x: number
   y: number
@@ -257,6 +267,11 @@ export interface Settings {
   autoDownloadUpdate: boolean
   /** 是否在桌面显示胶囊 */
   floatEnabled: boolean
+  /**
+   * 胶囊自己的外观档位，**不跟随面板** ——
+   * 面板深色而胶囊留白纸是很常见的偏好，两块东西本来就在不同的视觉环境里。
+   */
+  floatTheme: CapsuleTheme
   /** 胶囊整体不透明度，0.3 ~ 1 */
   floatOpacity: number
   /** 胶囊尺寸档位 */
@@ -277,5 +292,15 @@ export interface FloatState {
   created: boolean
   visible: boolean
   loaded: boolean
+  /** 卡片是否展开 —— 渲染层要靠它决定画胶囊还是胶囊 + 卡片 */
+  expanded: boolean
+  /** 卡片朝上还是朝下；收起态恒为 up */
+  side: FloatCardSide
+  /**
+   * 胶囊贴窗口的哪一侧（true = 贴右）。
+   * 展开时窗口比胶囊宽，两边得贴同一边；横向贴哪边由主进程按屏幕位置定，
+   * 渲染层只负责照摆 —— 计算只留一处，不然两边各算一次就会错位。
+   */
+  alignRight: boolean
   bounds: { x: number; y: number; width: number; height: number } | null
 }
