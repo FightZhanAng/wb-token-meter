@@ -146,11 +146,16 @@ env -u ELECTRON_RUN_AS_NODE node_modules/electron/dist/electron.exe . --user-dat
 
 ```bash
 export GIT_TERMINAL_PROMPT=0
-git ls-remote origin HEAD          # 先花 5 秒验通道，再决定走哪条路
-git push origin v0.8.2             # 扔后台，约 51s
-git push origin main               # 扔后台，实测 2m40s
+git ls-remote ssh-origin HEAD      # 先花 5 秒验通道，再决定走哪条路
+git push ssh-origin v0.8.2         # 扔后台
+git push ssh-origin main           # 扔后台
 ```
 
+- **优先走 `ssh-origin`**：2026-09-30 实测一次把 tag + main 都推完只用了 **15 秒**；
+  同一天 HTTPS（`origin`）实测 tag 51s、main **2m40s**，而且会时通时断
+  （`Recv failure: Connection was reset`）。**两条都通的时候也别贪 HTTPS。**
+- 推送失败时回退另一条通道：`git push ssh-origin <ref> || git push origin <ref>`。
+  回退判断要看 `${PIPESTATUS[0]}`，不能看管道右端的退出码。
 - 管道会吃掉退出码：`... | tail` 之后要看 `echo "exit=${PIPESTATUS[0]}"`，
   否则拿到的永远是 `tail` 的 0，会把失败误判成成功。
 - `GIT_TERMINAL_PROMPT=0`：宁可失败也别挂在那儿等输入。
@@ -177,6 +182,16 @@ git push origin main               # 扔后台，实测 2m40s
 - **已经推过的 tag 不要删了重推**：会再触发一次 run；如果第一次还在跑，
   删 tag 会让它的 checkout（按 tag 名检出）失败，留一个红叉。
 - 手动触发（`workflow_dispatch`）**只把 exe 留档成 artifact，不发 Release**。
+- **一次 tag push 可能投递两条 run**。2026-09-30 推 `v0.10.0` 时实测：同一秒出现两个 run，
+  同一个 workflow 文件、同一个 `head_sha`、同一个 `ref`、都是 `run_attempt: 1` ——
+  即 GitHub 侧对同一次 push 重复投递，不是我们推了两遍。
+  两条都会跑完整构建、都会执行 `gh release create`：**谁先完成谁成功，后者撞「已存在」失败**，
+  于是 Actions 页面上留一个红叉。
+  - **判断发布成功看 Release 的四个附件（§3.4），不看那条红叉。**
+  - 这次失败的那条是另一类抖动：卡在 `pnpm/action-setup@v4` 两分钟后被判 failure，
+    两条并发去拉 pnpm / 装依赖时更容易撞上。基础设置阶段失败 ≠ 代码有问题。
+  - **别为了消红叉去 rerun 或删 tag 重推**：rerun 照样会撞已存在的 Release，
+    删 tag 会再触发一次（而且可能把还在跑的那条 checkout 弄挂，多留一个红叉）。
 
 ### 3.4 查 CI 结果
 
@@ -198,6 +213,14 @@ git push origin main               # 扔后台，实测 2m40s
 正常结果：run `completed / success`，Release 有**四个**附件 ——
 `*-setup.exe`、`*-portable.exe`、`latest.yml`、`*.blockmap`。
 后两个少任何一个，应用内的更新检查都会报「更新源上找不到版本信息」。
+
+**判断「发版成功」的口径是 Release 的附件，不是 run 的颜色。**
+`/releases/tags/vX.Y.Z` 返回 200 且四个附件都是 `uploaded`，这次发版就是成功的 ——
+哪怕同一次 tag 推送留下的另一条 run 是红的（§3.3 的重复投递，或 `pnpm/action-setup`
+这类基础设置抖动）。反过来才是真问题：run 全绿但附件缺 `latest.yml` / `*.blockmap`。
+
+查的时候顺手看一眼 run 的 `event` / `head_sha` / `ref`：两条 run 这三项完全相同就是重复投递，
+不用去查代码。
 
 ---
 
