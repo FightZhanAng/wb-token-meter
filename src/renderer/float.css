@@ -181,9 +181,16 @@ body {
  * 两个子元素的高度都由 float.tsx 从布局常数写死 —— 这里不能给 height: 100%，
  * 否则两个都会去抢整摞的高度。
  */
+/*
+ * justify-content: flex-end 是收起握手的一半 —— 卡片拆掉之后、窗口缩起来之前，
+ * 栈里只剩胶囊，这一行把它钉在缩窗后会落定的那条边上（side=up 钉底、
+ * column-reverse 的 side=down 钉顶），中间帧不会先跳一下再弹回来。
+ * 展开态内容正好填满窗口，这一行不起任何作用。
+ */
 .float-stack {
   display: flex;
   flex-direction: column;
+  justify-content: flex-end;
   height: 100%;
 }
 

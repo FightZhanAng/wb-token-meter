@@ -120,6 +120,11 @@ export interface FloatPlacement {
    * 调用方拿它当唯一真相存起来，展开再收起之后胶囊才不会一格一格地漂。
    */
   capsule: Point
+  /**
+   * 形状模式（透明窗口）下要套在窗口上的 region；null = 恢复矩形。
+   * 见 floatWindowBounds 的 shapeMode 说明。
+   */
+  shape: Box[] | null
 }
 
 /**
@@ -137,13 +142,50 @@ export function floatWindowBounds(opts: {
   capsule: Point
   expanded: boolean
   workArea: Box
+  /**
+   * 形状模式（透明窗口）：窗口**恒为展开尺寸、永不 resize**，收起态用 region
+   * 把窗口裁到胶囊那一块。透明窗口 setBounds 会撞上 DWM 的两个毛病：
+   * 新内容滞后一两百毫秒才上屏，切换的瞬间还夹一帧全空 —— 表现就是收起卡片时
+   * 胶囊闪一下。region（SetWindowRgn）的裁剪是即时的，纹理不变就没有重锚问题。
+   * 非透明窗口（solid 降级模式）不传它，走原来的 resize 路径。
+   */
+  shapeMode?: boolean
 }): FloatPlacement {
-  const { size, capsule, expanded, workArea } = opts
-  const win = expanded ? expandedWindowSizeOf(size) : windowSizeOf(size)
+  const { size, capsule, expanded, workArea, shapeMode } = opts
+  const win = shapeMode ? expandedWindowSizeOf(size) : expanded ? expandedWindowSizeOf(size) : windowSizeOf(size)
   const side = expanded ? floatCardSide(size, capsule, workArea) : 'up'
   const half = workArea.x + workArea.width / 2
   const alignRight = capsule.x + CAPSULE_SIZES[size].width / 2 >= half
   const offset = capsuleOffset({ size, expanded, side, alignRight })
+
+  if (shapeMode && !expanded) {
+    /* 收起态：窗口矩形保持展开尺寸，把胶囊钉在窗口**右下**锚位（与 DOM 的
+       justify-content: flex-end + alignItems: flex-end 对齐），region 只留胶囊
+       那一块（含阴影边距）。锚位刻意**冻结**在右下：跨屏幕中线拖拽时 alignRight
+       若跟着翻，region 与渲染层的锚位会错开一帧，胶囊会闪；锚位只在展开时重算。
+       region 外既不渲染也不吃点击，所以超出屏幕的部分无害 —— 钳的只是胶囊本身。 */
+    const cap = CAPSULE_SIZES[size]
+    const x = Math.min(Math.max(capsule.x, workArea.x), workArea.x + workArea.width - cap.width)
+    const y = Math.min(Math.max(capsule.y, workArea.y), workArea.y + workArea.height - cap.height)
+    const anchor = {
+      x: win.width - SHADOW_PAD - cap.width,
+      y: win.height - SHADOW_PAD - cap.height
+    }
+    return {
+      bounds: { x: x - anchor.x, y: y - anchor.y, width: win.width, height: win.height },
+      side,
+      alignRight: true,
+      capsule: { x, y },
+      shape: [
+        {
+          x: anchor.x - SHADOW_PAD,
+          y: anchor.y - SHADOW_PAD,
+          width: cap.width + SHADOW_PAD * 2,
+          height: cap.height + SHADOW_PAD * 2
+        }
+      ]
+    }
+  }
 
   const minX = workArea.x - SHADOW_PAD
   const minY = workArea.y - SHADOW_PAD
@@ -156,7 +198,8 @@ export function floatWindowBounds(opts: {
     bounds: { x, y, width: win.width, height: win.height },
     side,
     alignRight,
-    capsule: { x: x + offset.x, y: y + offset.y }
+    capsule: { x: x + offset.x, y: y + offset.y },
+    shape: null
   }
 }
 

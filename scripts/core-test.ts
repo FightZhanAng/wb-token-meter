@@ -8,7 +8,7 @@
  *   3. 计费键（traceId / conversationRequestId）与积分明细的对齐率
  *   4. OpenCode Go 的额度接口：除「真实数据」一段外全部打在本地 mock 服务上
  */
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { homedir, tmpdir } from 'node:os'
@@ -53,6 +53,8 @@ import {
 import {
   collectReasonixSnapshot,
   parseReasonixMeta,
+  parseReasonixContextWindows,
+  parseReasonixStatsLine,
   parseReasonixUsageLine
 } from '../src/shared/reasonix-collector'
 import { collectZcodeSnapshot, parseConfigContextSizes, parseModelsDevContextSizes } from '../src/shared/zcode-collector'
@@ -750,6 +752,84 @@ check(
 )
 check('最宽的一档胶囊也不会把卡片撑破', expandedWindowSizeOf('large').width >= CAPSULE_SIZES.large.width + SHADOW_PAD * 2)
 
+/* 形状模式（透明窗口）：窗口恒为展开尺寸，收起态用 region 裁到胶囊那一块。
+   透明窗口 setBounds 会撞上 DWM 的「新内容滞后 + 切换瞬间一帧全空」，
+   region（SetWindowRgn）即时生效且纹理不变 —— 这是收起闪烁的根治方案。 */
+const shapeCollapsed = floatWindowBounds({
+  size: 'medium',
+  capsule: here,
+  expanded: false,
+  workArea: screen,
+  shapeMode: true
+})
+check(
+  '形状模式收起态：窗口恒为展开尺寸（永不 resize）',
+  shapeCollapsed.bounds.width === expandedWindowSizeOf('medium').width &&
+    shapeCollapsed.bounds.height === expandedWindowSizeOf('medium').height,
+  `${shapeCollapsed.bounds.width}x${shapeCollapsed.bounds.height}`
+)
+check('形状模式收起态：胶囊落在原处', shapeCollapsed.capsule.x === here.x && shapeCollapsed.capsule.y === here.y)
+check(
+  '形状模式收起态：region = 胶囊 ± SHADOW_PAD，贴窗口下沿（alignRight → 右）',
+  shapeCollapsed.shape?.length === 1 &&
+    shapeCollapsed.shape[0].width === medium.width + SHADOW_PAD * 2 &&
+    shapeCollapsed.shape[0].height === medium.height + SHADOW_PAD * 2 &&
+    shapeCollapsed.shape[0].x + shapeCollapsed.shape[0].width === shapeCollapsed.bounds.width &&
+    shapeCollapsed.shape[0].y + shapeCollapsed.shape[0].height === shapeCollapsed.bounds.height,
+  JSON.stringify(shapeCollapsed.shape)
+)
+const shapeOpened = floatWindowBounds({
+  size: 'medium',
+  capsule: here,
+  expanded: true,
+  workArea: screen,
+  shapeMode: true
+})
+check('形状模式展开态：region 撤销（整窗可点可画）', shapeOpened.shape === null)
+check('形状模式展开态：胶囊原地不动', shapeOpened.capsule.x === here.x && shapeOpened.capsule.y === here.y)
+const shapeBack = floatWindowBounds({
+  size: 'medium',
+  capsule: shapeOpened.capsule,
+  expanded: false,
+  workArea: screen,
+  shapeMode: true
+})
+check(
+  '形状模式来回切幂等（bounds 与 region 都回到同一处）',
+  shapeBack.bounds.x === shapeCollapsed.bounds.x &&
+    shapeBack.bounds.y === shapeCollapsed.bounds.y &&
+    JSON.stringify(shapeBack.shape) === JSON.stringify(shapeCollapsed.shape),
+  `${shapeBack.bounds.x},${shapeBack.bounds.y}`
+)
+const shapeAtLeft = floatWindowBounds({
+  size: 'medium',
+  capsule: { x: 20, y: 500 },
+  expanded: false,
+  workArea: screen,
+  shapeMode: true
+})
+check(
+  '形状模式收起态：锚位冻结在右下（跨中线拖拽不换边，region 与 DOM 永远对齐）',
+  shapeAtLeft.alignRight === true &&
+    shapeAtLeft.shape?.[0].x === shapeCollapsed.shape?.[0].x &&
+    shapeAtLeft.bounds.x === 20 - (shapeCollapsed.bounds.width - SHADOW_PAD - medium.width),
+  JSON.stringify(shapeAtLeft.shape)
+)
+const shapeEdge = floatWindowBounds({
+  size: 'medium',
+  capsule: { x: 1910, y: 1030 },
+  expanded: false,
+  workArea: screen,
+  shapeMode: true
+})
+check(
+  '形状模式收起态贴边：只钳胶囊本身，region 连阴影一起留在屏幕内',
+  shapeEdge.capsule.x === screen.x + screen.width - medium.width &&
+    shapeEdge.capsule.y === screen.y + screen.height - medium.height &&
+    shapeEdge.shape?.[0].x === shapeEdge.bounds.width - SHADOW_PAD - medium.width - SHADOW_PAD,
+  `${shapeEdge.capsule.x},${shapeEdge.capsule.y}`
+)
+
 section('胶囊接线')
 
 /*
@@ -1436,6 +1516,105 @@ check(
 )
 check('meta 坏 JSON 返回 null', parseReasonixMeta('nope') === null)
 
+section('Reasonix 新版按天流水单行解析')
+
+check(
+  '新格式：ISO 时间戳、缓存、思考各就各位',
+  (() => {
+    const iso = '2026-10-01T21:19:48.2452108+08:00'
+    const row = parseReasonixStatsLine(
+      JSON.stringify({
+        ts: iso,
+        source: 'desktop',
+        model: 'opencode-go-3d75c0d6b5f32bfa0e0044167ef5dc14/deepseek-flash',
+        prompt: 103428,
+        completion: 1414,
+        reasoning: 1103,
+        cache_hit: 97152,
+        cache_miss: 6276,
+        total: 104842,
+        requests: 1
+      })
+    )
+    return (
+      row?.sessionId === 'reasonix-desktop' &&
+      row?.model === 'opencode-go-3d75c0d6b5f32bfa0e0044167ef5dc14/deepseek-flash' &&
+      row?.timestamp === Date.parse(iso) &&
+      row?.inputTokens === 103428 &&
+      row?.outputTokens === 1414 &&
+      row?.cachedTokens === 97152 &&
+      row?.reasoningTokens === 1103
+    )
+  })()
+)
+check(
+  'turn 标记行跳过（回合边界不是调用）',
+  parseReasonixStatsLine(JSON.stringify({ ts: '2026-10-01T21:42:43.7897724+08:00', source: 'desktop', turn: true })) ===
+    null
+)
+check(
+  '没记缓存字段的行视作全 miss，思考缺省为 0',
+  (() => {
+    const row = parseReasonixStatsLine(
+      JSON.stringify({
+        ts: '2026-08-04T21:40:32.6650099+08:00',
+        source: 'desktop',
+        model: 'mimo-token-plan-cn/mimo-v2.5',
+        prompt: 142766,
+        completion: 79,
+        reasoning: 18,
+        total: 142845,
+        requests: 1
+      })
+    )
+    return row?.cachedTokens === 0 && row?.inputTokens === 142766 && row?.reasoningTokens === 18
+  })()
+)
+check('缺 ts 的行丢掉', parseReasonixStatsLine(JSON.stringify({ source: 'desktop', prompt: 10 })) === null)
+check('ts 不是时间的行丢掉', parseReasonixStatsLine(JSON.stringify({ ts: '不是时间', prompt: 10 })) === null)
+check(
+  '零 token 的行丢掉',
+  parseReasonixStatsLine(JSON.stringify({ ts: '2026-10-01T21:00:00+08:00', prompt: 0, completion: 0 })) === null
+)
+check('坏 JSON 返回 null', parseReasonixStatsLine('{ 半行') === null)
+check('空行返回 null', parseReasonixStatsLine('') === null)
+
+section('Reasonix 模型窗口解析（config.toml）')
+
+const reasonixConfigText = [
+  '[ui]',
+  'something_else = 1',
+  '',
+  '[[providers]]',
+  'name        = "opencode-go-3d75"',
+  'models      = ["deepseek-flash", "glm-5.3"]',
+  'context_window = 128000   # tokens; compaction triggers near this limit',
+  'model_overrides   = { "deepseek-flash" = { reasoning_protocol = "deepseek", context_window = 1000000 }, "glm-5.3" = { vision = true } }',
+  '',
+  '[[providers]]',
+  'name        = "plain-provider"',
+  'models      = ["simple-model"]',
+  'context_window = 262144',
+  '',
+  /* 陷阱：providers 之后还有别的 section，里面的 name = 不能串进最后一个 provider */
+  '[mcp_servers.context7]',
+  'name    = "context7"'
+].join('\n')
+
+const reasonixWindows = parseReasonixContextWindows(reasonixConfigText)
+check(
+  'model_overrides 的窗口压过 provider 默认',
+  reasonixWindows.get('opencode-go-3d75/deepseek-flash') === 1000000,
+  String(reasonixWindows.get('opencode-go-3d75/deepseek-flash'))
+)
+check(
+  '没有 override 的模型吃 provider 默认',
+  reasonixWindows.get('opencode-go-3d75/glm-5.3') === 128000 && reasonixWindows.get('plain-provider/simple-model') === 262144,
+  JSON.stringify([...reasonixWindows.entries()])
+)
+check('没有窗口的 override 不进表', reasonixWindows.get('opencode-go-3d75/missing') === undefined)
+check('providers 之外的 name 不会串块', reasonixWindows.get('plain-provider/context7') === undefined)
+
 section('Reasonix 目录扫描（临时夹具）')
 
 const reasonixRoot = mkdtempSync(join(tmpdir(), 'wbtm-reasonix-'))
@@ -1499,20 +1678,111 @@ writeFileSync(
 /* 刻意留一个没有 meta 的会话：标题留空、项目退回会话名，不能崩 */
 writeFileSync(join(reasonixRoot, 'sessions', 'broken.meta.json'), '{ 坏 meta', 'utf8')
 
+/* 新版桌面端的按天流水（<appData>/reasonix/stats/<YYYY-MM-DD>.jsonl）：
+   没有 session 字段、ts 是 ISO 字符串、带 reasoning，还有 turn 标记行。
+   标题 / cwd 从兄弟目录借：desktop-sessions-v5/by-id 的 header.json 与
+   events.frames mtime，desktop/session-ui-v1.sqlite 的首条用户输入 */
+const reasonixDesktopRoot = mkdtempSync(join(tmpdir(), 'wbtm-reasonix-desktop-'))
+const reasonixStatsRoot = join(reasonixDesktopRoot, 'stats')
+mkdirSync(reasonixStatsRoot, { recursive: true })
+const isoOf = (ms: number): string => new Date(ms).toISOString()
+writeFileSync(
+  join(reasonixStatsRoot, '2026-10-01.jsonl'),
+  [
+    JSON.stringify({ ts: isoOf(FIXED_NOW - 350), source: 'desktop', turn: true }),
+    JSON.stringify({
+      ts: isoOf(FIXED_NOW - 400),
+      source: 'desktop',
+      model: 'mimo-token-plan-cn/mimo-v2.5',
+      prompt: 900,
+      completion: 40,
+      reasoning: 25,
+      cache_hit: 700,
+      cache_miss: 200,
+      total: 940,
+      requests: 1
+    }),
+    /* 早期行没记缓存字段 —— 视作全 miss */
+    JSON.stringify({
+      ts: isoOf(FIXED_NOW - 300),
+      source: 'desktop',
+      model: 'opencode-go-3d75/deepseek-flash',
+      prompt: 800,
+      completion: 20,
+      reasoning: 10,
+      total: 820,
+      requests: 1
+    }),
+    '{ 半行',
+    ''
+  ].join('\n'),
+  'utf8'
+)
+
+/* 两个桌面会话：新会话（标题来自首条 submission，mtime 最新 → 活跃）与旧会话 */
+const reasonixSid = 'desktop-manual-fixture1'
+const reasonixSidOld = 'desktop-manual-fixture0'
+const reasonixById = join(reasonixDesktopRoot, 'desktop-sessions-v5', 'by-id')
+for (const [sid, cwd] of [
+  [reasonixSid, 'D:\\工作台'],
+  [reasonixSidOld, 'D:\\旧项目']
+] as Array<[string, string]>) {
+  mkdirSync(join(reasonixById, sid), { recursive: true })
+  writeFileSync(join(reasonixById, sid, 'header.json'), JSON.stringify({ sessionId: sid, cwd }), 'utf8')
+  writeFileSync(join(reasonixById, sid, 'events.frames'), '占位 —— 采集器只 stat 不读', 'utf8')
+}
+/* 活跃判定靠 events.frames 的 mtime：新会话比一切调用都晚，旧会话比一切都早 */
+utimesSync(join(reasonixById, reasonixSid, 'events.frames'), new Date(FIXED_NOW - 100), new Date(FIXED_NOW - 100))
+utimesSync(join(reasonixById, reasonixSidOld, 'events.frames'), new Date(FIXED_NOW - 90000), new Date(FIXED_NOW - 90000))
+
+/* 界面库：标题 = revision 最小的非空 submission 文本（多出来的空格要被压掉） */
+mkdirSync(join(reasonixDesktopRoot, 'desktop'), { recursive: true })
+const reasonixUi = new DatabaseSync(join(reasonixDesktopRoot, 'desktop', 'session-ui-v1.sqlite'))
+reasonixUi.exec('CREATE TABLE records (kind TEXT, key TEXT, revision INTEGER, payload TEXT)')
+const reasonixSubmission = (sid: string, revision: number, text: string): string =>
+  JSON.stringify({ ref: { sessionId: sid }, revision: String(revision), contentJson: JSON.stringify({ text }) })
+for (const [sid, revision, text] of [
+  [reasonixSid, 34, '后面的话'],
+  [reasonixSid, 12, '第一句  话'],
+  [reasonixSidOld, 3, '别的会话的标题']
+] as Array<[string, number, string]>) {
+  reasonixUi
+    .prepare("INSERT INTO records VALUES ('submission', ?, ?, ?)")
+    .run(`local:${sid}/composer-${revision}`, revision, reasonixSubmission(sid, revision, text))
+}
+reasonixUi.close()
+
+/* config.toml：池子的模型窗口从这里解析（最后一次请求的模型带 override） */
+writeFileSync(
+  join(reasonixDesktopRoot, 'config.toml'),
+  [
+    '[[providers]]',
+    'name        = "opencode-go-3d75"',
+    'models      = ["deepseek-flash", "glm-5.3"]',
+    'context_window = 128000',
+    'model_overrides   = { "deepseek-flash" = { vision = true, context_window = 1000000 } }'
+  ].join('\n'),
+  'utf8'
+)
+
 const reasonixLedgerPath = join(reasonixRoot, 'usage.jsonl')
-const reasonixFixture = collectReasonixSnapshot({ reasonixDir: reasonixRoot, now: FIXED_NOW })
+const reasonixFixture = collectReasonixSnapshot({ reasonixDir: reasonixRoot, statsDir: reasonixStatsRoot, now: FIXED_NOW })
 
 check('kind 标记为 reasonix', reasonixFixture.kind === 'reasonix')
-check('扫到 2 个会话', reasonixFixture.totals.sessions === 2, String(reasonixFixture.totals.sessions))
-check('半行 / 零 token / 缺 ts 的行被丢掉', reasonixFixture.totals.calls === 4, String(reasonixFixture.totals.calls))
+check('扫到 3 个会话（老账 2 个 + 新账桌面端 1 个池子）', reasonixFixture.totals.sessions === 3, String(reasonixFixture.totals.sessions))
+check('半行 / 零 token / 缺 ts / turn 标记的行被丢掉', reasonixFixture.totals.calls === 6, String(reasonixFixture.totals.calls))
 check(
-  '输入 = promptTokens（含缓存读）',
-  reasonixFixture.totals.inputTokens === 1000 + 2000 + 300 + 500,
+  '输入 = prompt（含缓存读），两本账并算',
+  reasonixFixture.totals.inputTokens === 1000 + 2000 + 300 + 500 + 900 + 800,
   String(reasonixFixture.totals.inputTokens)
 )
-check('缓存命中只算 cacheHitTokens', reasonixFixture.totals.cachedTokens === 2700, String(reasonixFixture.totals.cachedTokens))
-check('输出求和', reasonixFixture.totals.outputTokens === 200, String(reasonixFixture.totals.outputTokens))
-check('思考 token 恒为 0（引擎不单记）', reasonixFixture.totals.reasoningTokens === 0)
+check(
+  '缓存命中 = cacheHit(Tokens) / cache_hit，没记缓存的行不算',
+  reasonixFixture.totals.cachedTokens === 2700 + 700,
+  String(reasonixFixture.totals.cachedTokens)
+)
+check('输出求和', reasonixFixture.totals.outputTokens === 200 + 40 + 20, String(reasonixFixture.totals.outputTokens))
+check('思考 token：新账单记、老账恒 0', reasonixFixture.totals.reasoningTokens === 25 + 10, String(reasonixFixture.totals.reasoningTokens))
 check(
   '所有粒度的积分都是 0',
   reasonixFixture.totals.credits === 0 &&
@@ -1526,41 +1796,99 @@ check(
   String(reasonixFixture.sessions.find((s) => s.sessionId === 'code-Agent')?.contextUsed)
 )
 check(
-  '上下文上限拿不到，留 0（界面只报已用）',
-  reasonixFixture.sessions.every((s) => s.contextSize === 0)
+  '老账会话标题来自 meta.summary',
+  reasonixFixture.sessions.find((s) => s.sessionId === 'code-Agent')?.title === '夹具会话',
+  reasonixFixture.sessions.find((s) => s.sessionId === 'code-Agent')?.title
 )
-check('会话标题来自 meta.summary', reasonixFixture.sessions[0]?.title === '夹具会话', reasonixFixture.sessions[0]?.title)
 check(
-  '按 meta.workspace 分组，没有 meta 的退回会话名',
+  '池子标题 = 活跃桌面会话的首条用户输入（revision 最小那条，空格压掉）',
+  reasonixFixture.sessions.find((s) => s.sessionId === 'reasonix-desktop')?.title === '第一句 话',
+  reasonixFixture.sessions.find((s) => s.sessionId === 'reasonix-desktop')?.title
+)
+check(
+  '池子 cwd 借活跃会话 header.json 的 cwd（不借旧会话的）',
+  reasonixFixture.sessions.find((s) => s.sessionId === 'reasonix-desktop')?.cwd === 'D:\\工作台',
+  reasonixFixture.sessions.find((s) => s.sessionId === 'reasonix-desktop')?.cwd
+)
+check(
+  '池子窗口按最后一次请求的模型从 config.toml 解析（override 优先）',
+  reasonixFixture.sessions.find((s) => s.sessionId === 'reasonix-desktop')?.contextSize === 1000000,
+  String(reasonixFixture.sessions.find((s) => s.sessionId === 'reasonix-desktop')?.contextSize)
+)
+check(
+  '老账会话的模型目录不落本地，窗口留 0',
+  reasonixFixture.sessions.every((s) => s.sessionId === 'reasonix-desktop' || s.contextSize === 0)
+)
+check(
+  '按 meta.workspace 分组，没有 meta 的退回会话名（新账落 reasonix-desktop 池子）',
   reasonixFixture.projects.map((p) => p.projectDir).sort().join('|') ===
-    ['D:\\proj\\a', 'desktop-202605240306-1'].sort().join('|'),
+    ['D:\\proj\\a', 'desktop-202605240306-1', 'reasonix-desktop'].sort().join('|'),
   reasonixFixture.projects.map((p) => p.projectDir).join('|')
 )
-check('活跃会话取最近有动静的', reasonixFixture.active?.sessionId === 'code-Agent', String(reasonixFixture.active?.sessionId))
-check('子代理的调用并进原会话（只有 2 个会话）', reasonixFixture.totals.sessions === 2)
+check(
+  '活跃会话取最近有动静的（新账的行更新）',
+  reasonixFixture.active?.sessionId === 'reasonix-desktop',
+  String(reasonixFixture.active?.sessionId)
+)
+check(
+  '新账池子没有 meta，水位退回最后一次请求的输入',
+  reasonixFixture.sessions.find((s) => s.sessionId === 'reasonix-desktop')?.contextUsed === 800,
+  String(reasonixFixture.sessions.find((s) => s.sessionId === 'reasonix-desktop')?.contextUsed)
+)
+check('子代理的调用并进原会话（老账 2 个 + 新账 1 个池子）', reasonixFixture.totals.sessions === 3)
 
 const reasonixStatBefore = statSync(reasonixLedgerPath)
-collectReasonixSnapshot({ reasonixDir: reasonixRoot, now: FIXED_NOW })
+const reasonixStatsFileBefore = statSync(join(reasonixStatsRoot, '2026-10-01.jsonl'))
+collectReasonixSnapshot({ reasonixDir: reasonixRoot, statsDir: reasonixStatsRoot, now: FIXED_NOW })
 const reasonixStatAfter = statSync(reasonixLedgerPath)
+const reasonixStatsFileAfter = statSync(join(reasonixStatsRoot, '2026-10-01.jsonl'))
 check(
-  '采集不修改流水账',
-  reasonixStatBefore.mtimeMs === reasonixStatAfter.mtimeMs && reasonixStatBefore.size === reasonixStatAfter.size
+  '采集不修改两本流水账',
+  reasonixStatBefore.mtimeMs === reasonixStatAfter.mtimeMs &&
+    reasonixStatBefore.size === reasonixStatAfter.size &&
+    reasonixStatsFileBefore.mtimeMs === reasonixStatsFileAfter.mtimeMs &&
+    reasonixStatsFileBefore.size === reasonixStatsFileAfter.size
+)
+
+check(
+  '只有一本账也照读：老账缺失 → 新账 1 池 2 调用；新账缺失 → 老账 2 会话 4 调用',
+  (() => {
+    const emptyRoot = mkdtempSync(join(tmpdir(), 'wbtm-reasonix-empty-'))
+    try {
+      const onlyStats = collectReasonixSnapshot({ reasonixDir: emptyRoot, statsDir: reasonixStatsRoot, now: FIXED_NOW })
+      const onlyLedger = collectReasonixSnapshot({ reasonixDir: reasonixRoot, statsDir: emptyRoot, now: FIXED_NOW })
+      return (
+        onlyStats.totals.calls === 2 &&
+        onlyStats.totals.sessions === 1 &&
+        onlyLedger.totals.calls === 4 &&
+        onlyLedger.totals.sessions === 2
+      )
+    } finally {
+      rmSync(emptyRoot, { recursive: true, force: true })
+    }
+  })()
 )
 
 rmSync(reasonixRoot, { recursive: true, force: true })
+rmSync(reasonixDesktopRoot, { recursive: true, force: true })
 
 section('Reasonix 真实数据')
 
 const reasonixDirPath = join(homedir(), '.reasonix')
+/* 新版按天流水。必须从 homedir 推导而不是读 APPDATA 环境变量：test:ci 伪造的是
+   USERPROFILE/HOME，APPDATA 仍指真目录，顺着它走会把真实数据带进 CI 等价自检。
+   Windows 上 appData 基址 = homedir + AppData/Roaming，与主进程 app.getPath('appData') 一致。 */
+const reasonixStatsPath = join(homedir(), 'AppData', 'Roaming', 'reasonix', 'stats')
+const hasReasonixStats = existsSync(reasonixStatsPath)
 const reasonixStarted = Date.now()
-const reasonixReal = collectReasonixSnapshot({ reasonixDir: reasonixDirPath })
+const reasonixReal = collectReasonixSnapshot({ reasonixDir: reasonixDirPath, statsDir: reasonixStatsPath })
 const reasonixElapsed = Date.now() - reasonixStarted
 
 console.log(`  读取耗时 ${reasonixElapsed} ms`)
 console.log(`  会话 ${reasonixReal.totals.sessions} 个 · 调用 ${grouped(reasonixReal.totals.calls)} 次`)
 console.log(
   `  token 输入 ${compact(reasonixReal.totals.inputTokens)} · 输出 ${compact(reasonixReal.totals.outputTokens)}` +
-    ` · 缓存 ${compact(reasonixReal.totals.cachedTokens)}`
+    ` · 缓存 ${compact(reasonixReal.totals.cachedTokens)} · 思考 ${compact(reasonixReal.totals.reasoningTokens)}`
 )
 console.log(`  当前上下文 ${grouped(reasonixReal.active?.used ?? 0)} token`)
 
@@ -1572,7 +1900,15 @@ if (!hasReasonix) {
   check('读到调用', reasonixReal.totals.calls > 0)
   check('读取在 5 秒内', reasonixElapsed < 5_000, `${reasonixElapsed} ms`)
   check('积分恒为 0', reasonixReal.totals.credits === 0)
-  check('思考 token 恒为 0', reasonixReal.totals.reasoningTokens === 0)
+  check('思考 token 不超过输出（新账的思考是输出的子集）', reasonixReal.totals.reasoningTokens <= reasonixReal.totals.outputTokens)
+  if (hasReasonixStats) {
+    check('新版流水有思考 token', reasonixReal.totals.reasoningTokens > 0, String(reasonixReal.totals.reasoningTokens))
+    check(
+      '桌面池子借到了活跃会话的标题',
+      (reasonixReal.sessions.find((s) => s.sessionId === 'reasonix-desktop')?.title ?? '').length > 0,
+      reasonixReal.sessions.find((s) => s.sessionId === 'reasonix-desktop')?.title
+    )
+  }
   check(
     '会话 token 之和 == 全局',
     sum(reasonixReal.sessions.map((s) => s.inputTokens + s.outputTokens)) ===
@@ -1585,15 +1921,21 @@ if (!hasReasonix) {
   )
   check('缓存命中不超过输入', reasonixReal.totals.cachedTokens <= reasonixReal.totals.inputTokens)
   check('有活跃会话', reasonixReal.active !== null)
-  check('至少一个会话带标题', reasonixReal.sessions.some((s) => s.title.length > 0))
-  check('至少一个会话带工作目录', reasonixReal.sessions.some((s) => s.cwd.length > 0))
+  /* 标题 / 工作目录只有老账本（meta.json）才拿得到 —— 只有新版数据的机器上这两项天然为空 */
+  if (existsSync(join(reasonixDirPath, 'usage.jsonl'))) {
+    check('至少一个会话带标题', reasonixReal.sessions.some((s) => s.title.length > 0))
+    check('至少一个会话带工作目录', reasonixReal.sessions.some((s) => s.cwd.length > 0))
+  }
 }
 
 check(
-  'Reasonix 目录不存在不崩',
-  collectReasonixSnapshot({ reasonixDir: join(homedir(), '.reasonix-nonexistent') }).sessions.length === 0
+  '两本账都不存在不崩（只读存在的账本时，用例由上面的单边夹具覆盖）',
+  collectReasonixSnapshot({
+    reasonixDir: join(homedir(), '.reasonix-nonexistent'),
+    statsDir: join(homedir(), '.reasonix-stats-nonexistent')
+  }).sessions.length === 0
 )
-check('路径为空不崩', collectReasonixSnapshot({ reasonixDir: '' }).sessions.length === 0)
+check('路径为空不崩', collectReasonixSnapshot({ reasonixDir: '', statsDir: '' }).sessions.length === 0)
 
 /* ------------------------------------------- 10. DeepSeek Harness 数据源 */
 
@@ -2937,7 +3279,12 @@ async function main(): Promise<void> {
     const qoderCache = new Map()
     collectQoderSnapshot({ qoderDir: qoderDirPath, cache: qoderCache, now: FIXED_NOW })
     const reasonixCache = new Map()
-    collectReasonixSnapshot({ reasonixDir: reasonixDirPath, cache: reasonixCache, now: FIXED_NOW })
+    collectReasonixSnapshot({
+      reasonixDir: reasonixDirPath,
+      statsDir: reasonixStatsPath,
+      cache: reasonixCache,
+      now: FIXED_NOW
+    })
     const dshCache = new Map()
     collectDshSnapshot({ dshDir: dshDirPath, cache: dshCache, now: FIXED_NOW })
 
@@ -3014,7 +3361,9 @@ async function main(): Promise<void> {
      * 硬要求 size > 0 会把 CI 判死（v0.6.0 第一次打标签就是这么挂的）。
      */
     check('Qoder CN 缓存里没有别的源的文件', [...qoderCache.keys()].every((key) => key.includes('.qoder-cn')))
-    check('Reasonix 缓存里没有别的源的文件', [...reasonixCache.keys()].every((key) => key.includes('.reasonix')))
+    /* Reasonix 的缓存键有两处合法前缀：老账的 ~/.reasonix，以及新版按天流水的
+       <appData>/Roaming/reasonix/stats —— 后者没有点前缀，只能认 'reasonix' 子串 */
+    check('Reasonix 缓存里没有别的源的文件', [...reasonixCache.keys()].every((key) => key.includes('reasonix')))
     check('DSH 缓存里没有别的源的文件', [...dshCache.keys()].every((key) => key.includes('.dsh')))
     check('读到 Qoder CN 数据时缓存确实用上了', !hasQoder || qoderCache.size > 0, `${qoderCache.size} 项`)
     check('读到 Reasonix 数据时缓存确实用上了', !hasReasonix || reasonixCache.size > 0, `${reasonixCache.size} 项`)

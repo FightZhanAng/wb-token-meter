@@ -69,6 +69,10 @@ const api = {
   collapseFloatCard: (): void => {
     ipcRenderer.send('float:collapse-card')
   },
+  /** 收起的内容画完并呈现了一帧 —— 主进程收到它才缩窗口，卡片才不会被硬切一帧 */
+  floatContentSettled: (): void => {
+    ipcRenderer.send('float:content-settled')
+  },
   getFloatState: (): Promise<FloatState> => ipcRenderer.invoke('float:state') as Promise<FloatState>,
   /** 主进程撑完窗口后回报展开状态 —— 渲染层照着它决定画什么、往哪边贴 */
   onFloatExpanded: (

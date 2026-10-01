@@ -359,6 +359,12 @@ amber / carbon 有自己整套色板（`--pen` 就是琥珀/红，本来就 ≠ 
 - **档位表里必须含当前值**，否则那一列圆点**一个都不亮**（不透明度的默认值 0.94 就不在
   `OPACITY_OPTIONS` 里）。别把缺的那个值写死进表，按 `opacityOptions()` 那样插进有序位置 ——
   写死只救得了那一个值。
+- **透明窗口绝不 resize**（实测：setBounds 后 DWM 滞留旧画面 100~200ms、切换瞬间夹一帧
+  全空，这就是「收起卡片闪一下」的根因）。窗口恒为展开尺寸，收起态用 `setShape`
+  裁到胶囊那块 —— region 即时生效、纹理不变，怎么切都无缝。收起态的锚位冻结在
+  右下（`floatWindowBounds` 的 shapeMode 分支），跨中线拖拽不换边，region 与 DOM
+  锚位才不会错开。solid 降级模式没有这套待遇，保留 resize + 「内容先切、画完一帧
+  再缩窗」的握手（`float:content-settled`）。
 
 ### 6.5 各数据源的 token 口径不一样
 

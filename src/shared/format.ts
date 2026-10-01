@@ -60,11 +60,12 @@ export function hasTokens(kind: SourceKind): boolean {
 /**
  * 该数据源是否单列思考 token。
  * WorkBuddy、ZCode 与 MiMo 单列；Kimi Code 的 output 里已含思考，
- * Reasonix 与 DeepSeek Harness 也一样（前者引擎不单记，后者 pi-ai 把 reasoning
- * 折进了 output），都没有这一项，留着只会永远是一根 0 长度的空条。
+ * DeepSeek Harness 也一样（pi-ai 把 reasoning 折进了 output）。
+ * Reasonix 老流水把思考折进 completion、不单记，但 2026-06 起新版按天流水
+ * 单记了 reasoning（仍是输出的子集）—— 有真数据就不该藏，照常显示。
  */
 export function hasReasoning(kind: SourceKind): boolean {
-  return kind === 'workbuddy' || kind === 'zcode' || kind === 'mimo'
+  return kind === 'workbuddy' || kind === 'zcode' || kind === 'mimo' || kind === 'reasonix'
 }
 
 /**

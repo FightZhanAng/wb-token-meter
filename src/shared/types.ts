@@ -302,5 +302,10 @@ export interface FloatState {
    * 渲染层只负责照摆 —— 计算只留一处，不然两边各算一次就会错位。
    */
   alignRight: boolean
+  /**
+   * 胶囊在屏幕上的位置。形状模式（透明窗口恒为展开尺寸）下窗口 bounds 不随
+   * 收起/展开变化，核对「胶囊没漂」得看它，不能看 bounds。
+   */
+  capsule: { x: number; y: number } | null
   bounds: { x: number; y: number; width: number; height: number } | null
 }

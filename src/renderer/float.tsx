@@ -1,4 +1,4 @@
-import { StrictMode, useCallback, useEffect, useMemo, useRef, useState, type JSX } from 'react'
+import { StrictMode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type JSX } from 'react'
 import { createRoot } from 'react-dom/client'
 import { CAPSULE_THEME_ORDER, capsuleThemeLabel, capsuleThemeShort, resolveCapsuleTheme } from '@shared/capsule'
 import {
@@ -616,6 +616,22 @@ function FloatApp(): JSX.Element {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [expanded])
+
+  /*
+   * 展开状态的内容一切换完就回报主进程：收起时它等这声「画完了」才缩窗口。
+   * 双 rAF —— 第一个回调还在新内容的呈现之前跑，第二个必然在其后，
+   * 提前回报的话主进程会把还挂着卡片的窗口缩掉，那一刀就白躲了。
+   */
+  useLayoutEffect(() => {
+    let raf2 = 0
+    const raf1 = requestAnimationFrame(() => {
+      raf2 = requestAnimationFrame(() => meter?.floatContentSettled())
+    })
+    return () => {
+      cancelAnimationFrame(raf1)
+      cancelAnimationFrame(raf2)
+    }
+  }, [expanded, side, alignRight])
 
   const cycleTheme = useCallback(() => {
     if (!meter) return

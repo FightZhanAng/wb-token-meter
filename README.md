@@ -169,23 +169,43 @@ ZCode / Reasonix 的 input 都含缓存。所以：
 
 ### Reasonix（只有 token）
 
-桌面端与 CLI 共用一套引擎，每次模型调用往同一本流水账上追加一行 ——
-五个本地源里最直白的一份：
+引擎有**两本账**，都要读。2026-06 前的桌面端与 CLI 写老账本；2026-06 起的新版桌面端
+把账挪进了 Electron 标准数据目录（Windows 是 `%APPDATA%\Roaming\reasonix`），按天一份、
+行格式也换了。两本账互不重叠（老账最后一行实测停在 2026-05-24，新账从 2026-08-04 起）：
 
 | 数据源 | 位置 | 内容 |
 |---|---|---|
-| 用量流水 | `~/.reasonix/usage.jsonl` | 一次调用一行：`promptTokens` / `completionTokens` / `cacheHitTokens` / `cacheMissTokens`，外加 `ts`、`session`、`model` |
-| 会话元数据 | `~/.reasonix/sessions/<会话名>.meta.json` | `summary`（标题）、`workspace`（工作目录）、`lastPromptTokens`（当前上下文） |
+| 用量流水（老） | `~/.reasonix/usage.jsonl` | 一次调用一行：`promptTokens` / `completionTokens` / `cacheHitTokens` / `cacheMissTokens`，外加 `ts`（epoch 毫秒）、`session`、`model` |
+| 会话元数据（老） | `~/.reasonix/sessions/<会话名>.meta.json` | `summary`（标题）、`workspace`（工作目录）、`lastPromptTokens`（当前上下文） |
+| 用量流水（新） | `%APPDATA%\Roaming\reasonix\stats\<YYYY-MM-DD>.jsonl` | 一次调用一行：`prompt` / `completion` / `reasoning` / `cache_hit` / `cache_miss`，外加 `ts`（ISO 8601 字符串）、`source`、`model`（带路由前缀，如 `opencode-go-<哈希>/deepseek-flash`）；`"turn":true` 的是回合边界标记行，不带 token |
 
-口径（实测 `promptTokens === cacheHitTokens + cacheMissTokens` 在 1799 行上无例外）：
+口径（老账实测 `promptTokens === cacheHitTokens + cacheMissTokens` 在 1799 行上无例外；
+新账同向，少数早期行没记缓存字段、视作全 miss）：
 
 ```
-输入 = promptTokens（含缓存读）      缓存命中 = cacheHitTokens
-输出 = completionTokens              思考 = 无（引擎把它算进 output 了）
+输入 = prompt(Tokens)（含缓存读）    缓存命中 = cacheHit(Tokens) / cache_hit
+输出 = completion(Tokens)            思考 = reasoning（新账单记，是输出的子集）
 ```
 
-`kind: "subagent"` 的行是子代理的调用，算真实消耗但不单列会话 —— 流水账里
-`session` 字段写的还是原会话名，所以自然并进去了。
+两本账的差别不止字段名：
+
+- **新账没有会话维度，但元信息能借到**。行里没有 `session` 字段，聚合库
+  （`cache/usage-catalog` 的 sqlite）也只到 day / source / model 为止 —— 调用没法
+  归到具体会话，新账的调用按 `source` 落进 `reasonix-<source>`（当前是
+  `reasonix-desktop`）一个池子，项目维度停在池子名上，水位退回它最后一次请求的输入。
+  标题与工作目录从兄弟目录借：`desktop-sessions-v5/by-id/<会话>/header.json` 带 cwd、
+  `events.frames` 的 mtime 定「最近有动静」；界面库 `desktop/session-ui-v1.sqlite`
+  的 submission 记录带用户原文（桌面端的会话名就是首条用户输入，取 revision 最小的
+  那条）—— 池子借最近活跃会话的那份，只影响「当前活跃会话」的显示，不改变用量归属。
+- **思考 token 只有新账有**。老账把思考折进 `completionTokens`、不单记；新账单记
+  `reasoning` 且仍在 `completion` 里（`total === prompt + completion` 恒成立），
+  界面上作为「输出」的从属行显示。
+- **上下文窗口：新账能解析，老账拿不到**。新账的 model 引用带 provider 前缀，桌面端
+  `config.toml` 的 `[[providers]]` 块里有 `context_window` 和按模型的 `model_overrides`
+  （override 优先）；池子的窗口按最后一次请求的模型算 —— 那正是「当前上下文」用的
+  那个模型。老账的模型名不带前缀、旧引擎的模型目录不落本地，窗口留 0、只报已用量。
+- 老账的 `kind: "subagent"` 行是子代理的调用，算真实消耗但不单列会话 —— 流水账里
+  `session` 字段写的还是原会话名，所以自然并进去了。
 
 本模块**刻意不读 `~/.reasonix/config.json`**：那里面存着明文 apiKey，而这里需要的
 标题 / 工作目录 / 上下文水位在 `meta.json` 里都有。
@@ -298,7 +318,8 @@ pnpm dist          # 打包 Windows 安装包与免安装版到 release/
 | `WB_TOKEN_METER_ZCODE_DIR` | 覆盖 ZCode 数据目录，默认 `~/.zcode` |
 | `WB_TOKEN_METER_MIMO_DIR` | 覆盖 MiMo 数据目录，默认 `~/.local/share/mimocode` |
 | `WB_TOKEN_METER_MIMO_CACHE_DIR` | 覆盖 MiMo 缓存目录（模型目录在里面），默认 `~/.cache/mimocode` |
-| `WB_TOKEN_METER_REASONIX_DIR` | 覆盖 Reasonix 数据目录（`usage.jsonl` 在里面），默认 `~/.reasonix` |
+| `WB_TOKEN_METER_REASONIX_DIR` | 覆盖 Reasonix 旧版数据目录（`usage.jsonl` 在里面），默认 `~/.reasonix` |
+| `WB_TOKEN_METER_REASONIX_STATS_DIR` | 覆盖 Reasonix 新版按天流水目录，默认 `<APPDATA>\Roaming\reasonix\stats` |
 | `WB_TOKEN_METER_DSH_DIR` | 覆盖 DeepSeek Harness 数据目录（会话日志在里面），默认 `~/.dsh` |
 | `WB_TOKEN_METER_OPENCODE_DIR` | 覆盖 OpenCode 数据目录（`auth.json` 在里面），默认 `~/.local/share/opencode` |
 | `WB_TOKEN_METER_OPENCODE_URL` | 覆盖额度查询端点（测试用），默认官方地址 |
@@ -447,9 +468,17 @@ Qoder CN 大数报今日积分，次数与水位在第二行）；
 - **近 7 天** —— 补齐空档的柱子（**没数据的那天画成 0，不省略**），今天那根用记录笔色；
 - **底栏** —— 更新时间 + 刷新 + **打开面板**（打开主面板的入口挪到了这里）。
 
-**卡片是「长出来」的，不是新窗口**：展开换的是同一个窗口的尺寸，位置由胶囊的位置
-反推，所以两层永远贴在一起，胶囊本身也不动。收起有四种方式：Esc、点卡片右上角的 ✕、
-再点一下胶囊、点别的地方（窗口失焦）。
+**卡片是「长出来」的，不是新窗口**：位置由胶囊的位置反推，所以两层永远贴在一起，
+胶囊本身也不动。收起有四种方式：Esc、点卡片右上角的 ✕、再点一下胶囊、
+点别的地方（窗口失焦）。
+
+**窗口尺寸恒定，收起/展开只换 region**（`BrowserWindow.setShape`）：透明窗口一旦
+resize，Windows 的合成器会滞留旧画面一两百毫秒、切换瞬间还夹一帧全空 —— 表现就是
+收起卡片时胶囊「闪一下」。所以窗口从创建起就保持展开尺寸，收起态用 region 把它裁到
+胶囊那一块（region 外不渲染、也不吃点击），展开态恢复整窗；换的只有裁剪框和内容，
+纹理从头到尾没变过。region 外的部分超出屏幕也无害，所以收起态只钳胶囊本身的位置。
+solid 降级模式（透明不可见时的逃生通道）没有这套待遇 —— 窗口照旧真的缩放，
+收起走「渲染层先拆卡片、画完一帧再缩窗」的握手时序。
 
 ![胶囊](docs/preview-float.png)
 
@@ -550,7 +579,13 @@ Qoder CN 大数报今日积分，次数与水位在第二行）；
   引擎按价格表算的 `cost` 是金额不是积分，本工具不读它。
 - Reasonix 的流水账只写当前活着的那个会话名：会话归档后（`sessions/<名>__archive_<时间>.jsonl`）
   历史行仍留在同一个名字下，所以归档会话的用量会并进原会话里，拆不开。
-- Reasonix 拿不到上下文上限（引擎的模型目录不落本地），水位只报已用量、不给百分比。
+- Reasonix 老账会话拿不到上下文上限（旧引擎的模型目录不落本地）；新版桌面端的池子
+  从 `config.toml` 的 providers 解析窗口、按最后一次请求的模型算 —— 模型所属的
+  provider 已从 config 删掉（如历史里的 mimo-token-plan-cn）或 config 读不到时，
+  退回「只报已用量」。
+- Reasonix 的新版按天流水没有会话维度：桌面端的调用全落进 `reasonix-desktop` 一个池子，
+  项目 / 会话排行里它只出现这一条。标题与工作目录借自最近活跃的那个桌面会话
+  （首条用户输入 + header.json 的 cwd），是显示用的近似 —— 用量本身没法按会话拆。
 - DeepSeek Harness 的子代理会话（`delegationDepth > 0`）是独立目录，算真实消耗但
   不并进父会话，会作为独立会话出现在排行里（与 ZCode 的 `subagent_child` 同样处理）。
 - DeepSeek Harness 的会话日志是追加写的，正在跑的那个会话可能还没把最后一步 flush 下来，

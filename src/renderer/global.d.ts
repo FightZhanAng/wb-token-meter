@@ -27,6 +27,8 @@ declare global {
       /** 单击胶囊 —— 展开 / 收起悬浮卡片 */
       toggleFloatCard(): void
       collapseFloatCard(): void
+      /** 展开状态的内容切换已呈现一帧（收起的缩窗握手） */
+      floatContentSettled(): void
       getFloatState(): Promise<FloatState>
       onFloatExpanded(handler: (state: { expanded: boolean; side: FloatCardSide; alignRight: boolean }) => void): () => void
       /** 卡片里的「打开面板」 */

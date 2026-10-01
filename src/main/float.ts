@@ -16,6 +16,8 @@ const MARGIN = 28
 const VISIBLE_FALLBACK_MS = 700
 /** 拖动结束后隔多久落盘一次位置，别让每帧移动都写磁盘 */
 const POSITION_FLUSH_MS = 400
+/** 收起握手：等渲染层画完的兜底时限，超时照样缩窗 */
+const PENDING_COLLAPSE_MS = 200
 
 /**
  * 实心底色模式下窗口自己的底色。
@@ -56,6 +58,10 @@ export class FloatWindow {
   private visibleFallback: NodeJS.Timeout | null = null
   private readyTimeout: NodeJS.Timeout | null = null
   private positionTimer: NodeJS.Timeout | null = null
+  /** 收起握手：渲染层画完前挂起的缩窗动作 */
+  private pendingCollapse: NodeJS.Timeout | null = null
+  /** 上一次套上的 region（去重，拖拽时别每帧都发 SetWindowRgn） */
+  private appliedShape: string | null = null
   /** 创建时用的底色模式，用来判断是否需要重建窗口 */
   private createdSolid: boolean | null = null
 
@@ -94,6 +100,7 @@ export class FloatWindow {
         expanded: this.expanded,
         side: this.side,
         alignRight: this.alignRight,
+        capsule: null,
         bounds: null
       }
     }
@@ -104,6 +111,7 @@ export class FloatWindow {
       expanded: this.expanded,
       side: this.side,
       alignRight: this.alignRight,
+      capsule: this.origin,
       bounds: win.getBounds()
     }
   }
@@ -180,6 +188,9 @@ export class FloatWindow {
       this.readyToShow = false
       this.pendingShow = false
       this.createdSolid = null
+      if (this.pendingCollapse) clearTimeout(this.pendingCollapse)
+      this.pendingCollapse = null
+      this.appliedShape = null
     })
 
     loadRenderer(win, 'float')
@@ -213,6 +224,8 @@ export class FloatWindow {
     // 藏起来之前先收起卡片：下次露面时总该是那个干净的小胶囊
     this.setExpanded(false)
     if (this.win && !this.win.isDestroyed()) this.win.hide()
+    // 窗口都藏了就没有闪烁可言，别让挂起的缩窗等到超时
+    this.settleCollapse()
   }
 
   /** 返回切换后是否可见 */
@@ -227,16 +240,51 @@ export class FloatWindow {
   }
 
   /**
-   * 展开 / 收起卡片。窗口尺寸跟着换，但胶囊在屏幕上的位置不变 ——
-   * 视觉上是卡片从胶囊旁边长出来，而不是胶囊跳到了别处。
+   * 展开 / 收起卡片。胶囊在屏幕上的位置不变 —— 视觉上是卡片从胶囊旁边长出来，
+   * 而不是胶囊跳到了别处。
+   *
+   * 两个模式、两条时序：
+   * - **形状模式（透明窗口）**：窗口恒为展开尺寸，收起/展开只换 region 与内容。
+   *   region（SetWindowRgn）的裁剪即时生效，纹理不变就没有 DWM 重锚问题，
+   *   任何时序都无缝 —— 直接摆。
+   * - **solid 降级模式**：窗口真的在缩放。收起必须「先让渲染层拆卡片，画完一帧
+   *   （float:content-settled 回报）再缩窗」—— 反过来先缩窗的话，窗口已经变成
+   *   胶囊大小、内容还是整张卡片，被硬切一刀，表现就是收起时闪一下。
+   *   窗口不可见时没有闪烁可言，直接摆。
    */
   setExpanded(next: boolean): void {
     if (this.expanded === next) return
     const before = this.origin
     this.expanded = next
+    const win = this.win
+    const solid = this.readSettings().floatSolidBackground
+    const defer = !next && solid && !!win && !win.isDestroyed() && win.isVisible()
+    if (defer) {
+      this.send('float:expanded', { expanded: this.expanded, side: this.side, alignRight: this.alignRight })
+      // 渲染层挂了 / 还没加载时 ack 永远不来 —— 到点还是得缩，别把大窗留着
+      if (this.pendingCollapse) clearTimeout(this.pendingCollapse)
+      this.pendingCollapse = setTimeout(() => this.settleCollapse(), PENDING_COLLAPSE_MS)
+      return
+    }
     const { capsule } = this.applyPlacement()
     this.send('float:expanded', { expanded: this.expanded, side: this.side, alignRight: this.alignRight })
     // 只有贴边收紧真的把胶囊挪动了才落盘 —— 正常情况下展开不动胶囊，不必写盘
+    if (before && (before.x !== capsule.x || before.y !== capsule.y)) {
+      this.onMoved({ x: capsule.x, y: capsule.y })
+    }
+  }
+
+  /** 渲染层：收起后的内容已经画完并呈现了一帧。这时缩窗正好是无感的 */
+  contentSettled(): void {
+    this.settleCollapse()
+  }
+
+  private settleCollapse(): void {
+    if (!this.pendingCollapse) return
+    clearTimeout(this.pendingCollapse)
+    this.pendingCollapse = null
+    const before = this.origin
+    const { capsule } = this.applyPlacement()
     if (before && (before.x !== capsule.x || before.y !== capsule.y)) {
       this.onMoved({ x: capsule.x, y: capsule.y })
     }
@@ -314,9 +362,12 @@ export class FloatWindow {
     if (this.visibleFallback) clearTimeout(this.visibleFallback)
     if (this.readyTimeout) clearTimeout(this.readyTimeout)
     if (this.positionTimer) clearTimeout(this.positionTimer)
+    if (this.pendingCollapse) clearTimeout(this.pendingCollapse)
     this.visibleFallback = null
     this.readyTimeout = null
     this.positionTimer = null
+    this.pendingCollapse = null
+    this.appliedShape = null
     if (this.win && !this.win.isDestroyed()) this.win.destroy()
     this.win = null
     this.loaded = false
@@ -333,11 +384,15 @@ export class FloatWindow {
     const settings = this.readSettings()
     const workArea = this.workArea()
     const origin = this.origin ?? defaultCapsulePosition(settings.floatSize, workArea, MARGIN)
+    // 透明窗口走形状模式：窗口恒为展开尺寸，收起态用 region 裁剪。
+    // solid 降级模式是「透明不可见」时的逃生通道，窗口本来就小，走原来的 resize。
+    const shapeMode = !settings.floatSolidBackground
     const placement = floatWindowBounds({
       size: settings.floatSize,
       capsule: origin,
       expanded: this.expanded,
-      workArea
+      workArea,
+      shapeMode
     })
 
     this.origin = placement.capsule
@@ -352,6 +407,14 @@ export class FloatWindow {
        * pointermove 一秒钟几十帧，几秒就把胶囊撑大。显式 setBounds 固定尺寸则完全稳定。
        */
       win.setBounds(placement.bounds)
+      if (shapeMode) {
+        // region 没变就不重设 —— 拖拽时每帧 setShape 是无谓的系统调用
+        const key = JSON.stringify(placement.shape)
+        if (key !== this.appliedShape) {
+          this.appliedShape = key
+          win.setShape(placement.shape ?? [])
+        }
+      }
     }
     return { capsule: placement.capsule, side: placement.side }
   }

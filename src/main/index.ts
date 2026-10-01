@@ -36,6 +36,7 @@ import {
   preloadPath,
   qoderDir,
   reasonixDir,
+  reasonixStatsDir,
   workbuddyDir,
   zcodeDir
 } from './paths'
@@ -278,7 +279,11 @@ function refresh(force = false): Snapshot | null {
     } else if (kind === 'qoder') {
       snapshot = collectQoderSnapshot({ qoderDir: sourceDir(kind), cache: qoderCache })
     } else if (kind === 'reasonix') {
-      snapshot = collectReasonixSnapshot({ reasonixDir: sourceDir(kind), cache: reasonixCache })
+      snapshot = collectReasonixSnapshot({
+        reasonixDir: sourceDir(kind),
+        statsDir: reasonixStatsDir(),
+        cache: reasonixCache
+      })
     } else if (kind === 'dsh') {
       snapshot = collectDshSnapshot({ dshDir: sourceDir(kind), cache: dshCache })
     } else if (kind === 'opencode') {
@@ -393,6 +398,7 @@ function currentFloatState(): FloatState {
       visible: false,
       loaded: false,
       expanded: false,
+      capsule: null,
       side: 'up',
       alignRight: true,
       bounds: null
@@ -935,6 +941,7 @@ function bootstrap(): void {
            })()`
 
           const collapsedBounds = floatWin.getBounds()
+          const collapsedCapsule = currentFloatState().capsule
           await floatWin.webContents.executeJavaScript(clickCapsule)
           await new Promise((resolve) => setTimeout(resolve, 700))
 
@@ -986,9 +993,11 @@ function bootstrap(): void {
           await new Promise((resolve) => setTimeout(resolve, 500))
           smoke('float-collapse', {
             expanded: currentFloatState().expanded,
-            before: floatWin.getBounds(),
-            capsuleAt: [collapsedBounds.x, collapsedBounds.y]
+            bounds: floatWin.getBounds(),
+            capsuleBefore: collapsedCapsule,
+            capsuleAfter: currentFloatState().capsule
           })
+
 
           /*
            * 每个胶囊主题各截两张：收起态的胶囊、展开态的卡片。
@@ -1157,6 +1166,8 @@ ipcMain.on('float:move', (_event, dx: unknown, dy: unknown) => {
 // 单击胶囊 = 展开 / 收起悬浮卡片（不再直接开面板，那一步挪到卡片里）
 ipcMain.on('float:toggle-card', () => floatWindow?.toggleExpand())
 ipcMain.on('float:collapse-card', () => floatWindow?.setExpanded(false))
+// 收起握手：渲染层把卡片拆掉并呈现了一帧，这时缩窗正好无感（见 FloatWindow.setExpanded）
+ipcMain.on('float:content-settled', () => floatWindow?.contentSettled())
 ipcMain.handle('float:state', () => currentFloatState())
 ipcMain.on('float:open-panel', () => {
   // 进面板前先把卡片收掉：留着它只会和主窗口抢眼球

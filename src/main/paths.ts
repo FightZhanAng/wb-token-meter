@@ -83,7 +83,8 @@ export function opencodeDir(): string {
 }
 
 /**
- * Reasonix 的数据目录（桌面端与 CLI 共用这一份）。
+ * Reasonix 旧版数据目录（2026-06 前的桌面端与 CLI 共用这一份；新版桌面端不再写
+ * 这里，改记 reasonixStatsDir()，两本账都要读）。
  * 用量流水是 <dir>/usage.jsonl，会话元数据在 <dir>/sessions/*.meta.json。
  * 同目录下的 config.json 存着明文 apiKey，采集器刻意不碰。
  */
@@ -91,6 +92,17 @@ export function reasonixDir(): string {
   const override = process.env['WB_TOKEN_METER_REASONIX_DIR']
   if (override) return override
   return join(homedir(), '.reasonix')
+}
+
+/**
+ * Reasonix 桌面端新版（2026-06 起）的按天流水目录。新版引擎把账从 ~/.reasonix
+ * 挪进了 Electron 标准数据目录（Windows 是 %APPDATA%\reasonix），按天一份 jsonl。
+ * app.getPath('appData') 给的就是那个标准基址，跨平台与 Reasonix 自己的落盘一致。
+ */
+export function reasonixStatsDir(): string {
+  const override = process.env['WB_TOKEN_METER_REASONIX_STATS_DIR']
+  if (override) return override
+  return join(app.getPath('appData'), 'reasonix', 'stats')
 }
 
 /** DeepSeek Harness 的数据目录；会话日志在 <dir>/sessions/<工作目录>/<会话>/ 下 */
