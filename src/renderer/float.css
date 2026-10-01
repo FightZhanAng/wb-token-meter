@@ -12,9 +12,10 @@
  * 一共四套：paper（记录纸）/ ink（深靛）/ amber（琥珀夜光）/ carbon（碳黑）。
  * 属性由 preload 在样式表之前写好（见 preload/index.ts），首帧就是对的颜色。
  *
- * ink 与 paper 里那 11 个基础色（--paper/--sheet/--ink/--ink-2/--ink-3/--pen/
- * --warn/--alarm/--d-in/--d-out/--track）必须和 styles.css 的深色块 / 浅色块
- * **逐字节相同** —— 两个窗口是同一台仪器，各调各的迟早会跑偏。core-test 盯着这一条。
+ * ink 与 paper 里那 12 个基础色（--paper/--sheet/--ink/--ink-2/--ink-3/--pen/
+ * --warn/--alarm/--d-in/--d-cache/--d-out/--track）必须和 styles.css 的深色块 /
+ * 浅色块 **逐字节相同** —— 两个窗口是同一台仪器，各调各的迟早会跑偏。
+ * core-test 盯着这一条（amber / carbon 有自己的整套色板，不在这条约束里）。
  */
 :root {
   color-scheme: light;

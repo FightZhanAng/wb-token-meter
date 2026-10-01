@@ -257,7 +257,7 @@ git tag -a vX.Y.Z -m "vX.Y.Z：中文摘要"
 **但要带一个环境变量**：
 
 ```bash
-WB_TOKEN_METER_FAKE_UPDATE=0.9.0 env -u ELECTRON_RUN_AS_NODE \
+WB_TOKEN_METER_FAKE_UPDATE=<当前版本号> env -u ELECTRON_RUN_AS_NODE \
   WB_TOKEN_METER_SMOKE=1 WB_TOKEN_METER_SMOKE_EXIT=1 \
   node_modules/electron/dist/electron.exe . --user-data-dir=".workbuddy/tmp/smoke-shots"
 ```
@@ -278,7 +278,8 @@ WB_TOKEN_METER_FAKE_UPDATE=0.9.0 env -u ELECTRON_RUN_AS_NODE \
 - `src/shared/` 是**不依赖 Electron 的纯 Node 逻辑**（解析、聚合、口径换算、格式化），
   能在 `scripts/core-test.ts` 里 headless 跑；`src/main/` 里也有可测的部分
   （`opencode-usage.ts`、`modelsdev.ts`）。
-- **改解析或聚合就补 `scripts/core-test.ts` 的用例**（当前 390 项）。
+- **改解析或聚合就补 `scripts/core-test.ts` 的用例**（项数随环境浮动 —— 带真实数据的
+  断言在 CI 条件下整段跳过，所以 565 / 484 都对，以自检输出的总数为准）。
   涉及网络的用例一律打在本地 mock server 上，只有「真实数据」那一段碰真实环境。
 - **改数据源要动的地方**：`src/shared/<源>-collector.ts`、`src/shared/types.ts` 的源定义、
   `src/main/index.ts` 的接线、以及 `core-test.ts` 里「七个数据源互不影响」那一段。
@@ -322,8 +323,10 @@ WB_TOKEN_METER_FAKE_UPDATE=0.9.0 env -u ELECTRON_RUN_AS_NODE \
 记录纸 / 深靛 / 琥珀夜光 / 碳黑）：它贴在别人的桌面上，用户经常想让胶囊和面板不一样，
 所以别把它「统一」进 `nativeTheme`。那一档靠窗口启动参数 `--wbm-capsule-theme=`
 传给 preload，preload 在样式表之前写 `<html data-capsule>`；`float.css` 只认
-`data-capsule`，不认 `data-theme`。深色三档的 12 个共用令牌必须和 `styles.css`
-的深浅两块**逐字节相同**（`core-test` 盯着这一条）。
+`data-capsule`，不认 `data-theme`。**paper 与 ink 两档**的 12 个共用令牌必须分别和
+`styles.css` 的浅色块 / 深色块**逐值相同**（`core-test` 盯着这一条）。
+amber / carbon 有自己整套色板（`--pen` 就是琥珀/红，本来就 ≠ 面板深色那支），
+**别去「统一」它们**。
 
 ### 6.3 网络请求只在主进程
 

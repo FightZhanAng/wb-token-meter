@@ -51,7 +51,8 @@ export function capsuleThemeShort(theme: CapsuleTheme): string {
  *
  * 窗口底色是创建参数，只能在主进程给；而胶囊本体是 CSS 画的。两边对不上的表现
  * 是「胶囊四周多出一圈异色」—— 透明模式下看不出来，一旦切到实心底色就露馅。
- * 所以这张表必须和 float.css 里同名主题的 `--sheet` 逐字节相同，core-test 会去对。
+ * 所以这张表必须和 float.css 里同名主题的 `--sheet` **逐值相同**（大小写不计，
+ * CSS 那边写的是小写、这里是十六进制大写），core-test 会去对。
  */
 export const CAPSULE_SOLID_BG: Record<Exclude<CapsuleTheme, 'auto'>, string> = {
   paper: '#F6F8F5',

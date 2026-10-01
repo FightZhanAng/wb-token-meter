@@ -116,7 +116,13 @@ export class SettingsStore {
   }
 
   patch(patch: Partial<Settings>): Settings {
-    this.current = { ...this.current, ...patch }
+    /*
+     * 运行期来的字段也要过一遍白名单 —— `parseSettings` 必须是唯一收口。
+     * 这些值不只落盘：`floatTheme` 会被拼进窗口的 `additionalArguments`
+     * （见 main/float.ts），其余字段也会流进各个用它的地方。裸合并等于把
+     * 「渲染层传什么就信什么」写进了设置层。
+     */
+    this.current = parseSettings({ ...this.current, ...patch })
     this.flush()
     return this.current
   }

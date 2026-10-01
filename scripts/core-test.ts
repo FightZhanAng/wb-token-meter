@@ -752,6 +752,14 @@ check('最宽的一档胶囊也不会把卡片撑破', expandedWindowSizeOf('lar
 
 section('胶囊接线')
 
+/*
+ * 这一段只是「接线还在不在」的粗筛 —— 字符串 grep 守不住行为：
+ * `includes` 会被更长标识符的子串命中（`dataset.capsuleTheme` 里就有
+ * `dataset.capsule`），`indexOf(A) < indexOf(B)` 会被文件里更早的同类调用截胡
+ * （onDown 里那句 `if (suppress) collapseFloatCard()` 就让「拖动先收起」恒真）。
+ * 这类断言删掉被测代码照样绿，所以别在这里下功夫：行为级证据看冒烟自检的
+ * float-card / float-collapse / float-theme 报告。
+ */
 const floatSource = readFileSync(join(process.cwd(), 'src', 'renderer', 'float.tsx'), 'utf8')
 check(
   '单击胶囊走的是展开卡片，不是直接开面板',
@@ -759,8 +767,12 @@ check(
   'toggleFloatCard'
 )
 check('卡片里有打开面板的入口', floatSource.includes('openPanel'))
-check('拖动时先收起卡片', floatSource.indexOf('collapseFloatCard') < floatSource.indexOf('moveFloat(dx, dy)'))
-check('胶囊主题写在 data-capsule 上（不是 data-theme）', floatSource.includes('dataset.capsule'))
+/* 带赋值号才不会命中 `dataset.capsuleTheme =`；这条只证「写到了 data-capsule 上」 */
+check('胶囊主题写在 data-capsule 上', /dataset\.capsule\s*=/.test(floatSource), 'dataset.capsule =')
+check(
+  '胶囊的档位选择器挂在 data-capsule 上，没有 data-theme',
+  /\[data-capsule='(ink|amber|carbon)'\]/.test(capsuleCss) && !/\[data-theme/.test(capsuleCss)
+)
 check(
   'preload 暴露了卡片接口',
   ['float:toggle-card', 'float:collapse-card', 'float:state'].every((channel) => preloadSource.includes(channel))

@@ -566,7 +566,13 @@ function FloatApp(): JSX.Element {
   const [side, setSide] = useState<FloatCardSide>('up')
   const [alignRight, setAlignRight] = useState(true)
   const [dragging, setDragging] = useState(false)
-  const theme = settings?.floatTheme ?? 'auto'
+  /*
+   * 回退链要先吃 preload 从启动参数读到的档位，再兜到 auto。
+   * settings 是异步 IPC 取回来的，到货前若先按 `auto` 解析，这个 effect 会把
+   * preload 已经写好的首帧档位覆盖掉 —— 用户选了琥珀/碳黑的话，窗口创建时
+   * 会先闪一下错色，正是启动参数那套机制要消灭的那一帧。
+   */
+  const theme = settings?.floatTheme ?? meter?.initialCapsuleTheme ?? 'auto'
   useCapsuleTheme(theme)
   const readings = useMemo(() => readingsOf(snapshot), [snapshot])
 
