@@ -62,6 +62,13 @@ export class FloatWindow {
   private pendingCollapse: NodeJS.Timeout | null = null
   /** 上一次套上的 region（去重，拖拽时别每帧都发 SetWindowRgn） */
   private appliedShape: string | null = null
+  /** 上一次发给系统的窗口几何，几何没变就不再 SetWindowPos（见 applyPlacement） */
+  private appliedBounds: string | null = null
+  /**
+   * 方向是否已经定下来。首次落位时按胶囊位置现算并定给渲染层，之后收起
+   * 一律沿用 —— 渲染层没重排之前主进程不能自己翻边。
+   */
+  private anchorReady = false
   /** 创建时用的底色模式，用来判断是否需要重建窗口 */
   private createdSolid: boolean | null = null
 
@@ -191,6 +198,7 @@ export class FloatWindow {
       if (this.pendingCollapse) clearTimeout(this.pendingCollapse)
       this.pendingCollapse = null
       this.appliedShape = null
+      this.appliedBounds = null
     })
 
     loadRenderer(win, 'float')
@@ -245,8 +253,9 @@ export class FloatWindow {
    *
    * 两个模式、两条时序：
    * - **形状模式（透明窗口）**：窗口恒为展开尺寸，收起/展开只换 region 与内容。
-   *   region（SetWindowRgn）的裁剪即时生效，纹理不变就没有 DWM 重锚问题，
-   *   任何时序都无缝 —— 直接摆。
+   *   region（SetWindowRgn）的裁剪即时生效，纹理不变就没有 DWM 重锚问题。
+   *   关键是**两态的窗口 bounds 完全相同**（见 floatWindowBounds），所以这里
+   *   摆窗口时几何没变就不发 SetWindowPos —— 发了就等于让 DWM 白重锚一次。
    * - **solid 降级模式**：窗口真的在缩放。收起必须「先让渲染层拆卡片，画完一帧
    *   （float:content-settled 回报）再缩窗」—— 反过来先缩窗的话，窗口已经变成
    *   胶囊大小、内容还是整张卡片，被硬切一刀，表现就是收起时闪一下。
@@ -368,6 +377,7 @@ export class FloatWindow {
     this.positionTimer = null
     this.pendingCollapse = null
     this.appliedShape = null
+    this.appliedBounds = null
     if (this.win && !this.win.isDestroyed()) this.win.destroy()
     this.win = null
     this.loaded = false
@@ -392,12 +402,22 @@ export class FloatWindow {
       capsule: origin,
       expanded: this.expanded,
       workArea,
-      shapeMode
+      shapeMode,
+      /*
+       * 收起时把当前方向原样传下去，而不是让布局函数按位置重算：
+       * 渲染层的 data-side / align-items 要等 float:expanded 到货才改，
+       * 主进程先翻边的话 region 会罩在卡片上 —— 闪的就是那块地方。
+       */
+      frozen:
+        shapeMode && !this.expanded && this.anchorReady
+          ? { side: this.side, alignRight: this.alignRight }
+          : null
     })
 
     this.origin = placement.capsule
     this.side = placement.side
     this.alignRight = placement.alignRight
+    this.anchorReady = true
 
     const win = this.win
     if (win && !win.isDestroyed()) {
@@ -405,8 +425,16 @@ export class FloatWindow {
        * 不能用 setPosition：它内部是「读回当前尺寸再写回」，Win11（150% 缩放）上每调用
        * 一次窗口就宽高各 +1（复现数据：222x81 连续 100 次后变成 322x181），拖拽时
        * pointermove 一秒钟几十帧，几秒就把胶囊撑大。显式 setBounds 固定尺寸则完全稳定。
+       *
+       * 几何一模一样时**一个调用都不发**：形状模式下收起只该换 region，
+       * 多一次 SetWindowPos 就等于让 DWM 白重锚一次纹理 —— 那正是「收起时闪一下」
+       * 的来源（屏幕上闪出来的是内容还停在展开态的那块旧纹理）。
        */
-      win.setBounds(placement.bounds)
+      const boundsKey = `${placement.bounds.x},${placement.bounds.y},${placement.bounds.width},${placement.bounds.height}`
+      if (boundsKey !== this.appliedBounds) {
+        this.appliedBounds = boundsKey
+        win.setBounds(placement.bounds)
+      }
       if (shapeMode) {
         // region 没变就不重设 —— 拖拽时每帧 setShape 是无谓的系统调用
         const key = JSON.stringify(placement.shape)

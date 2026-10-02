@@ -294,7 +294,10 @@ export interface FloatState {
   loaded: boolean
   /** 卡片是否展开 —— 渲染层要靠它决定画胶囊还是胶囊 + 卡片 */
   expanded: boolean
-  /** 卡片朝上还是朝下；收起态恒为 up */
+  /**
+   * 卡片朝上还是朝下。形状模式下收起态**沿用展开前的那一组** —— 渲染层要靠它
+   * 把胶囊摆到 region 上；solid 降级模式收起时恒为 up。
+   */
   side: FloatCardSide
   /**
    * 胶囊贴窗口的哪一侧（true = 贴右）。

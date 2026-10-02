@@ -753,15 +753,18 @@ check(
 check('最宽的一档胶囊也不会把卡片撑破', expandedWindowSizeOf('large').width >= CAPSULE_SIZES.large.width + SHADOW_PAD * 2)
 
 /* 形状模式（透明窗口）：窗口恒为展开尺寸，收起态用 region 裁到胶囊那一块。
-   透明窗口 setBounds 会撞上 DWM 的「新内容滞后 + 切换瞬间一帧全空」，
+   透明窗口 resize 会撞上 DWM 的「新内容滞后 + 切换瞬间一帧全空」，
    region（SetWindowRgn）即时生效且纹理不变 —— 这是收起闪烁的根治方案。 */
-const shapeCollapsed = floatWindowBounds({
-  size: 'medium',
-  capsule: here,
-  expanded: false,
-  workArea: screen,
-  shapeMode: true
-})
+const shapeAt = (
+  capsule: { x: number; y: number },
+  frozen?: { side: 'up' | 'down'; alignRight: boolean }
+): ReturnType<typeof floatWindowBounds> =>
+  floatWindowBounds({ size: 'medium', capsule, expanded: false, workArea: screen, shapeMode: true, frozen: frozen ?? null })
+
+const shapeOpenedAt = (capsule: { x: number; y: number }): ReturnType<typeof floatWindowBounds> =>
+  floatWindowBounds({ size: 'medium', capsule, expanded: true, workArea: screen, shapeMode: true })
+
+const shapeCollapsed = shapeAt(here, { side: 'up', alignRight: true })
 check(
   '形状模式收起态：窗口恒为展开尺寸（永不 resize）',
   shapeCollapsed.bounds.width === expandedWindowSizeOf('medium').width &&
@@ -778,21 +781,12 @@ check(
     shapeCollapsed.shape[0].y + shapeCollapsed.shape[0].height === shapeCollapsed.bounds.height,
   JSON.stringify(shapeCollapsed.shape)
 )
-const shapeOpened = floatWindowBounds({
-  size: 'medium',
-  capsule: here,
-  expanded: true,
-  workArea: screen,
-  shapeMode: true
-})
+const shapeOpened = shapeOpenedAt(here)
 check('形状模式展开态：region 撤销（整窗可点可画）', shapeOpened.shape === null)
 check('形状模式展开态：胶囊原地不动', shapeOpened.capsule.x === here.x && shapeOpened.capsule.y === here.y)
-const shapeBack = floatWindowBounds({
-  size: 'medium',
-  capsule: shapeOpened.capsule,
-  expanded: false,
-  workArea: screen,
-  shapeMode: true
+const shapeBack = shapeAt(shapeOpened.capsule, {
+  side: shapeOpened.side,
+  alignRight: shapeOpened.alignRight
 })
 check(
   '形状模式来回切幂等（bounds 与 region 都回到同一处）',
@@ -801,27 +795,15 @@ check(
     JSON.stringify(shapeBack.shape) === JSON.stringify(shapeCollapsed.shape),
   `${shapeBack.bounds.x},${shapeBack.bounds.y}`
 )
-const shapeAtLeft = floatWindowBounds({
-  size: 'medium',
-  capsule: { x: 20, y: 500 },
-  expanded: false,
-  workArea: screen,
-  shapeMode: true
-})
+const shapeAtLeft = shapeAt({ x: 20, y: 500 }, { side: 'up', alignRight: true })
 check(
-  '形状模式收起态：锚位冻结在右下（跨中线拖拽不换边，region 与 DOM 永远对齐）',
+  '形状模式收起态：锚位沿用展开前那组（跨中线拖拽不换边，region 与 DOM 永远对齐）',
   shapeAtLeft.alignRight === true &&
     shapeAtLeft.shape?.[0].x === shapeCollapsed.shape?.[0].x &&
     shapeAtLeft.bounds.x === 20 - (shapeCollapsed.bounds.width - SHADOW_PAD - medium.width),
   JSON.stringify(shapeAtLeft.shape)
 )
-const shapeEdge = floatWindowBounds({
-  size: 'medium',
-  capsule: { x: 1910, y: 1030 },
-  expanded: false,
-  workArea: screen,
-  shapeMode: true
-})
+const shapeEdge = shapeAt({ x: 1910, y: 1030 })
 check(
   '形状模式收起态贴边：只钳胶囊本身，region 连阴影一起留在屏幕内',
   shapeEdge.capsule.x === screen.x + screen.width - medium.width &&
@@ -829,6 +811,43 @@ check(
     shapeEdge.shape?.[0].x === shapeEdge.bounds.width - SHADOW_PAD - medium.width - SHADOW_PAD,
   `${shapeEdge.capsule.x},${shapeEdge.capsule.y}`
 )
+
+/*
+ * 「收起会闪」的根据，也是唯一能钉住它的断言：同一个胶囊位置、同一组方向下，
+ * 展开与收起的**窗口 bounds 必须逐像素相同**，且 region 正好罩住胶囊在窗口里
+ * 那一块（含阴影留白）。少任何一条，收起时屏幕上就会闪出一块方形卡片 ——
+ * 卡片在下时偏移是整整一张卡片高，跨屏幕中线拖拽时 region 会翻到另一边，
+ * 两种都在下面这几个落点上跑到了。
+ */
+const anchorSpots: Array<{ x: number; y: number }> = [
+  { x: 1000, y: 600 },
+  { x: 20, y: 500 },
+  { x: 1000, y: 4 },
+  { x: 1900, y: 1000 }
+]
+const anchorReport: string[] = []
+let anchorOk = true
+for (const spot of anchorSpots) {
+  const opened = shapeOpenedAt(spot)
+  const closed = shapeAt(opened.capsule, { side: opened.side, alignRight: opened.alignRight })
+  const sameBounds =
+    opened.bounds.x === closed.bounds.x &&
+    opened.bounds.y === closed.bounds.y &&
+    opened.bounds.width === closed.bounds.width &&
+    opened.bounds.height === closed.bounds.height
+  const region = closed.shape?.[0]
+  const coversCapsule =
+    !!region &&
+    region.x === closed.capsule.x - closed.bounds.x - SHADOW_PAD &&
+    region.y === closed.capsule.y - closed.bounds.y - SHADOW_PAD &&
+    region.width === medium.width + SHADOW_PAD * 2 &&
+    region.height === medium.height + SHADOW_PAD * 2
+  if (!sameBounds || !coversCapsule) anchorOk = false
+  anchorReport.push(
+    `${spot.x},${spot.y} ${opened.side}/${opened.alignRight ? 'R' : 'L'} bounds=${sameBounds} region=${coversCapsule}`
+  )
+}
+check('形状模式：四个落点上收起与展开的窗口 bounds 相同，且 region 正好罩住胶囊', anchorOk, anchorReport.join(' | '))
 
 section('胶囊接线')
 
