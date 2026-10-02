@@ -423,6 +423,17 @@ body {
   padding: 0 6px;
 }
 
+/*
+ * 置顶开关。两态不换图标、只换颜色深浅 ——
+ * 10px 的图钉在两种画法之间差的那点细节，眼睛在这个尺寸上根本分不出来，
+ * 而「按下去深了」是一定看得见的。
+ */
+.card-icon.pin[data-on='true'] {
+  color: var(--pen);
+  border-color: var(--card-line);
+  background: var(--track);
+}
+
 /* 主题色块：左半是这一档的纸、右半是它的记录笔 —— 一眼看出这套配色长什么样 */
 .card-icon .swatch {
   display: block;

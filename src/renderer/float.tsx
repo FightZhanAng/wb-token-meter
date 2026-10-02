@@ -215,7 +215,9 @@ function Card({
   side,
   alignRight,
   theme,
+  alwaysOnTop,
   onCycleTheme,
+  onToggleAlwaysOnTop,
   onCollapse
 }: {
   snapshot: Snapshot | null
@@ -223,7 +225,9 @@ function Card({
   side: FloatCardSide
   alignRight: boolean
   theme: CapsuleTheme
+  alwaysOnTop: boolean
   onCycleTheme: () => void
+  onToggleAlwaysOnTop: () => void
   onCollapse: () => void
 }): JSX.Element {
   const [busy, setBusy] = useState(false)
@@ -254,6 +258,29 @@ function Card({
       <header className="card-head">
         <i className="live" aria-hidden="true" />
         <span className="card-src">{sourceLabel(kind)}</span>
+        <button
+          type="button"
+          className="card-icon pin"
+          data-on={alwaysOnTop ? 'true' : 'false'}
+          aria-pressed={alwaysOnTop}
+          title={`胶囊置顶：${alwaysOnTop ? '开' : '关'}（点击切换）`}
+          aria-label={`胶囊置顶，当前${alwaysOnTop ? '开' : '关'}，点击切换`}
+          onClick={onToggleAlwaysOnTop}
+        >
+          {/*
+           * 图钉朝上、钉身压在一条横线上 —— 记的是「压在最上面」这层意思。
+           * 两态不靠换图标（换图标在小尺寸上根本看不出差别），靠颜色深浅。
+           */}
+          <svg viewBox="0 0 12 12" aria-hidden="true">
+            <path
+              d="M6 9.4V3.2M4.1 5.1 6 3.2l1.9 1.9M2.4 10.6h7.2"
+              stroke="currentColor"
+              strokeWidth="1.3"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          </svg>
+        </button>
         <button
           type="button"
           className="card-icon theme"
@@ -641,6 +668,14 @@ function FloatApp(): JSX.Element {
     void meter.updateSettings({ floatTheme: next }).then(setSettings).catch(() => undefined)
   }, [theme])
 
+  const toggleAlwaysOnTop = useCallback(() => {
+    if (!meter) return
+    const next = !(settings?.floatAlwaysOnTop ?? true)
+    // 同 cycleTheme：先翻，广播回来再对齐
+    setSettings((current) => (current ? { ...current, floatAlwaysOnTop: next } : current))
+    void meter.updateSettings({ floatAlwaysOnTop: next }).then(setSettings).catch(() => undefined)
+  }, [settings?.floatAlwaysOnTop])
+
   const solid = settings?.floatSolidBackground ?? false
   const capsuleSize = CAPSULE_SIZES[settings?.floatSize ?? 'medium']
 
@@ -661,7 +696,9 @@ function FloatApp(): JSX.Element {
           side={side}
           alignRight={alignRight}
           theme={theme}
+          alwaysOnTop={settings?.floatAlwaysOnTop ?? true}
           onCycleTheme={cycleTheme}
+          onToggleAlwaysOnTop={toggleAlwaysOnTop}
           onCollapse={() => meter?.collapseFloatCard()}
         />
       ) : null}

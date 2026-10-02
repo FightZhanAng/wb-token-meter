@@ -975,6 +975,17 @@ function bootstrap(): void {
                      ])
                    : null,
                  actions: [...document.querySelectorAll('.card-foot button')].map((el) => el.textContent),
+                 pin: (() => {
+                   const el = document.querySelector('.card-icon.pin')
+                   return el
+                     ? {
+                         present: true,
+                         on: el.dataset.on,
+                         pressed: el.getAttribute('aria-pressed'),
+                         title: el.getAttribute('title')
+                       }
+                     : { present: false }
+                 })(),
                  capsuleSize: el ? [el.clientWidth, el.clientHeight] : null,
                  viewport: [window.innerWidth, window.innerHeight]
                }
@@ -997,6 +1008,52 @@ function bootstrap(): void {
             capsuleBefore: collapsedCapsule,
             capsuleAfter: currentFloatState().capsule
           })
+
+          /*
+           * 卡片上的置顶开关：要验的是**窗口真的换了层级**，而不是按钮的 class 变了。
+           *
+           * 只看 DOM 的话，「点了有反应」和「窗口置顶了」是两回事 —— 前者任何
+           * 一点样式变化都能满足。所以这里读 BrowserWindow.isAlwaysOnTop()：
+           * 那是 DWM 视角的事实。顺手也确认设置落盘了（重启后要还是这个值）。
+           *
+           * 测完必须复原：把置顶关掉，否则后面那些截图步骤会在最前一层跑，
+           * 报告里的层级前提就不对了。
+           */
+          const alwaysOnTopStep = async (): Promise<{
+            before: boolean
+            after: boolean
+            stored: boolean
+            pressed: string | null
+          }> => {
+            const before = floatWin.isAlwaysOnTop()
+            await floatWin.webContents.executeJavaScript(
+              `(() => { const el = document.querySelector('.card-icon.pin'); if (el) el.click(); return !!el })()`
+            )
+            await new Promise((resolve) => setTimeout(resolve, 400))
+            const after = floatWin.isAlwaysOnTop()
+            const pressed = await floatWin.webContents.executeJavaScript(
+              `document.querySelector('.card-icon.pin')?.getAttribute('aria-pressed') ?? null`
+            )
+            return { before, after, stored: settingsStore?.settings.floatAlwaysOnTop ?? before, pressed }
+          }
+
+          // 先展开卡片（置顶按钮在卡片头上）
+          await floatWin.webContents.executeJavaScript(clickCapsule)
+          await new Promise((resolve) => setTimeout(resolve, 700))
+          const onTopOff = await alwaysOnTopStep()
+          // 再点回来，确认它是个开关而不是单向置位
+          const onTopOn = await alwaysOnTopStep()
+          await smoke('float-always-on-top', {
+            off: onTopOff,
+            back: onTopOn,
+            restored: floatWin.isAlwaysOnTop(),
+            stored: settingsStore?.settings.floatAlwaysOnTop ?? null
+          })
+          // 复原成默认的置顶（true），让后续步骤的层级前提与基线一致
+          if (!floatWin.isAlwaysOnTop()) {
+            await alwaysOnTopStep()
+            await new Promise((resolve) => setTimeout(resolve, 300))
+          }
 
 
           /*
