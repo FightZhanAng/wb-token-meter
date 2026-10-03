@@ -8,6 +8,7 @@
  *   3. 计费键（traceId / conversationRequestId）与积分明细的对齐率
  *   4. OpenCode Go 的额度接口：除「真实数据」一段外全部打在本地 mock 服务上
  */
+import { createCipheriv, createHmac, pbkdf2Sync } from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
@@ -59,6 +60,8 @@ import {
 } from '../src/shared/reasonix-collector'
 import { collectZcodeSnapshot, parseConfigContextSizes, parseModelsDevContextSizes } from '../src/shared/zcode-collector'
 import { collectMimoSnapshot } from '../src/shared/mimo-collector'
+import { collectOpencodeSnapshot } from '../src/shared/opencode-collector'
+import { collectTraeCnSnapshot, probeTraeCnKey, traeCnFileStamp } from '../src/shared/traecn-collector'
 import {
   CAPSULE_SOLID_BG,
   CAPSULE_THEME_ORDER,
@@ -2287,6 +2290,392 @@ if (!hasDsh) {
 check('DSH 目录不存在不崩', collectDshSnapshot({ dshDir: join(homedir(), '.dsh-nonexistent') }).sessions.length === 0)
 check('路径为空不崩', collectDshSnapshot({ dshDir: '' }).sessions.length === 0)
 
+/* ---------------------------------------------- 6c. TRAE SOLO CN 数据源 */
+
+section('TRAE SOLO CN 用量库解密（临时夹具）')
+
+/*
+ * 真实账本是 SQLCipher 4 加密的，而密钥只存在于 TraeWork 进程的内存里 ——
+ * CI 上既没有库、也没有钥匙。所以这里**在明文里现建一个同构库，再按实物规则逐页加密**：
+ * 页布局、裸 key、不补位的 CBC、以及带残留旧帧的 WAL 都照实来。
+ * 这一段专门盯三件最容易写错的事：
+ *   1) 裸 key 不做 PBKDF2；第 1 页的明文要把 `SQLite format 3\0` 补回去
+ *   2) WAL 帧要按帧头 salt 过滤、并以最后一个 commit 帧截断 —— 不修就会 0/4 干净快照
+ *   3) 缓存读已含在 input 里、思考是 output 的子集，两个都不能再加一遍
+ */
+const traeCnKey = Buffer.alloc(32, 0x5a)
+const traeCnSalt = Buffer.from('0f1e2d3c4b5a69788796a5b4c3d2e1f0', 'hex')
+const TRAECN_PAGE = 4096
+/** 每页尾部的保留区宽度：16 字节 IV + 64 字节 HMAC-SHA512 */
+const TRAECN_RSTART = 4016
+
+/** mac key = PBKDF2-HMAC-SHA512(key, salt ^ 0x3A, 2 轮)；裸 key 模式下 enc key 就是 key 本身 */
+const traeCnMacKey = (salt: Buffer): Buffer =>
+  pbkdf2Sync(traeCnKey, Buffer.from(salt.map((b) => b ^ 0x3a)), 2, 32, 'sha512')
+
+/** 把一页明文封成落盘页：salt + 密文 + IV + HMAC，与采集器的解密逐字节对称 */
+const sealTraeCnPage = (plain: Buffer, no: number, salt: Buffer): Buffer => {
+  const first = no === 1
+  const iv = Buffer.alloc(16, no & 0xff)
+  const cipher = createCipheriv('aes-256-cbc', traeCnKey, iv)
+  cipher.setAutoPadding(false) // SQLCipher 的 CBC 不做 PKCS#7，设了就会 ERR_OSSL_BAD_DECRYPT
+  const body = Buffer.concat([cipher.update(plain.subarray(first ? 16 : 0, TRAECN_RSTART)), cipher.final()])
+  const page = Buffer.alloc(TRAECN_PAGE)
+  if (first) salt.copy(page, 0)
+  body.copy(page, first ? 16 : 0)
+  iv.copy(page, TRAECN_RSTART)
+  const tail = Buffer.alloc(4)
+  tail.writeUInt32LE(no >>> 0, 0)
+  createHmac('sha512', traeCnMacKey(salt))
+    .update(page.subarray(first ? 16 : 0, TRAECN_RSTART + 16))
+    .update(tail)
+    .digest()
+    .copy(page, TRAECN_RSTART + 16)
+  return page
+}
+
+interface TraeCnFixtureRow {
+  id: string
+  conversation: string
+  session: string
+  at: number
+  source: string
+  deleted?: number
+  extra: string
+}
+
+/** 建一个真 SQLite 库当明文（只留实物里与采集有关的那几列） */
+const buildTraeCnPlain = (file: string, rows: TraeCnFixtureRow[], titles: Array<[string, string]>): void => {
+  const db = new DatabaseSync(file)
+  try {
+    db.exec(`
+      CREATE TABLE server_history_info (
+        history_id TEXT PRIMARY KEY,
+        session_id TEXT,
+        conversation_id TEXT,
+        created_at INTEGER,
+        source TEXT,
+        is_deleted INTEGER,
+        extra_info TEXT
+      );
+      CREATE TABLE chat_session (session_id TEXT PRIMARY KEY, session_title TEXT);
+    `)
+    const insertRow = db.prepare(
+      'INSERT INTO server_history_info (history_id, session_id, conversation_id, created_at, source, is_deleted, extra_info) VALUES (?, ?, ?, ?, ?, ?, ?)'
+    )
+    for (const row of rows) {
+      insertRow.run(row.id, row.session, row.conversation, row.at, row.source, row.deleted ?? 0, row.extra)
+    }
+    const insertTitle = db.prepare('INSERT INTO chat_session (session_id, session_title) VALUES (?, ?)')
+    for (const [id, title] of titles) insertTitle.run(id, title)
+  } finally {
+    db.close()
+  }
+}
+
+/**
+ * 把每一页的 btree 内容整体下移 80 字节，把 SQLCipher 的保留区空出来。
+ *
+ * 必须挪：普通 SQLite 是按「整页可用」排内容的 —— 最后一个 cell 永远贴着页尾，
+ * 而 SQLCipher 的页尾 80 字节（16 IV + 64 HMAC）不参与加密，解密端也只还原到
+ * 4016 字节。不挪的话 cell 会被截断，读出来是
+ * `malformed database schema (server_history_info) - incomplete input`。
+ *
+ * 挪完还要把 DB 头第 20 字节（每页保留字节数）改成 80 —— SQLite 读库时按它算
+ * usableSize，否则那 80 字节会被当成「记不上的碎片」，integrity_check 报
+ * `Fragmentation of 80 bytes reported as 0`。
+ *
+ * 返回压到页头的页号（内容区太满就挪不动）；本夹具的页面都很空，正常是空数组。
+ */
+const reserveTraeCnTail = (buf: Buffer, pages: number): number[] => {
+  const unsafe: number[] = []
+  for (let p = 1; p <= pages; p++) {
+    const base = (p - 1) * TRAECN_PAGE
+    // 第 1 页前面还有 100 字节的文件头，btree 页头从 100 开始
+    const hdr = p === 1 ? 100 : 0
+    const type = buf[base + hdr]
+    // 只看四类 btree 页；本夹具的库很干净，不会有 freelist / overflow 页
+    if (type !== 2 && type !== 5 && type !== 10 && type !== 13) continue
+    const nCell = buf.readUInt16BE(base + hdr + 3)
+    const contentStart = buf.readUInt16BE(base + hdr + 5)
+    if (contentStart - 80 < hdr + 12 + 2 * nCell) {
+      unsafe.push(p)
+      continue
+    }
+    buf.copyWithin(base + contentStart - 80, base + contentStart, base + TRAECN_PAGE)
+    buf.fill(0, base + TRAECN_PAGE - 80, base + TRAECN_PAGE)
+    buf.writeUInt16BE(contentStart - 80, base + hdr + 5)
+    // 单元指针是页内绝对偏移，跟着一起挪；cell 指针数组本身的绝对位置不动
+    const ptrOff = base + hdr + (type === 2 || type === 5 ? 12 : 8)
+    for (let i = 0; i < nCell; i++) {
+      buf.writeUInt16BE(buf.readUInt16BE(ptrOff + 2 * i) - 80, ptrOff + 2 * i)
+    }
+    const freeblock = buf.readUInt16BE(base + hdr + 1)
+    if (freeblock) buf.writeUInt16BE(freeblock - 80, base + hdr + 1)
+  }
+  return unsafe
+}
+
+/** 逐页加密一个明文库（先把保留区空出来，再按 SQLCipher 的页布局封页） */
+const sealTraeCnDb = (
+  plainFile: string,
+  salt: Buffer
+): { pages: number; sealed: Buffer[]; unsafe: number[] } => {
+  const raw = readFileSync(plainFile)
+  const pages = Math.floor(raw.length / TRAECN_PAGE)
+  const unsafe = reserveTraeCnTail(raw, pages)
+  raw[20] = 80
+  const sealed: Buffer[] = []
+  for (let i = 1; i <= pages; i++) {
+    sealed.push(sealTraeCnPage(raw.subarray((i - 1) * TRAECN_PAGE, i * TRAECN_PAGE), i, salt))
+  }
+  return { pages, sealed, unsafe }
+}
+
+/** WAL：32 字节头 + N ×(24 字节帧头 + 一页)；盐写进帧头，回放端靠它认「这一代」 */
+const buildTraeCnWal = (
+  frames: Array<{ no: number; page: Buffer; dbSize: number; salt?: [number, number] }>,
+  salt1: number,
+  salt2: number
+): Buffer => {
+  const head = Buffer.alloc(32)
+  head.writeUInt32BE(0x377f0682, 0)
+  head.writeUInt32BE(3007000, 4)
+  head.writeUInt32BE(TRAECN_PAGE, 8)
+  head.writeUInt32BE(salt1, 16)
+  head.writeUInt32BE(salt2, 20)
+  const parts: Buffer[] = [head]
+  for (const frame of frames) {
+    const fh = Buffer.alloc(24)
+    fh.writeUInt32BE(frame.no, 0)
+    fh.writeUInt32BE(frame.dbSize, 4)
+    fh.writeUInt32BE(frame.salt ? frame.salt[0] : salt1, 8)
+    fh.writeUInt32BE(frame.salt ? frame.salt[1] : salt2, 12)
+    parts.push(fh, frame.page)
+  }
+  return Buffer.concat(parts)
+}
+
+/** 一行 extra_info：字段名与实物逐字相同 */
+const traeCnExtra = (opts: {
+  prompt: number
+  output: number
+  cache?: number
+  reasoning?: number
+  model?: string
+  workspace?: string
+}): string =>
+  JSON.stringify({
+    exact_prompt_tokens_v1: opts.prompt,
+    exact_output_tokens_v1: opts.output,
+    exact_cache_read_input_tokens_v1: opts.cache ?? 0,
+    exact_reasoning_tokens_v1: opts.reasoning ?? 0,
+    config_name: opts.model ?? 'solo-model',
+    workspace_folder: opts.workspace ?? 'D:\\AI\\demo'
+  })
+
+const traeCnTitles: Array<[string, string]> = [
+  ['s1', '设计 Token 看板'],
+  ['s2', '修 CI']
+]
+
+/* 4 次真调用：input 1000 / output 100 / 缓存 620 / 思考 18；外加四种「不该进账」的行 */
+const traeCnRowsA: TraeCnFixtureRow[] = [
+  {
+    id: 'h1',
+    conversation: 's1',
+    session: 'agent-1',
+    at: 1000,
+    source: 'llm_default',
+    extra: traeCnExtra({ prompt: 300, output: 30, cache: 200, reasoning: 6, model: 'solo-1', workspace: 'D:\\AI\\p1' })
+  },
+  {
+    id: 'h2',
+    conversation: 's1',
+    session: 'agent-1',
+    at: 2000,
+    source: 'llm_default',
+    extra: traeCnExtra({ prompt: 200, output: 20, cache: 120, reasoning: 4, model: 'solo-1', workspace: 'D:\\AI\\p1' })
+  },
+  {
+    id: 'h3',
+    conversation: 's2',
+    session: 'agent-2',
+    at: 3000,
+    source: 'llm_default',
+    extra: traeCnExtra({ prompt: 300, output: 30, cache: 200, reasoning: 6, model: 'solo-2', workspace: 'D:\\AI\\p2' })
+  },
+  {
+    id: 'h4',
+    conversation: 's2',
+    session: 'agent-2',
+    at: 4000,
+    source: 'llm_default',
+    extra: traeCnExtra({ prompt: 200, output: 20, cache: 100, reasoning: 2, model: 'solo-2', workspace: 'D:\\AI\\p2' })
+  },
+  // 工具调用不是模型调用：token 字段再大也不进账
+  {
+    id: 't1',
+    conversation: 's1',
+    session: 'agent-1',
+    at: 4500,
+    source: 'Shell',
+    extra: traeCnExtra({ prompt: 999999, output: 999999 })
+  },
+  // 删过的行不再算一次
+  {
+    id: 'd1',
+    conversation: 's1',
+    session: 'agent-1',
+    at: 4600,
+    source: 'llm_default',
+    deleted: 1,
+    extra: traeCnExtra({ prompt: 888888, output: 888888 })
+  },
+  // 分项全缺：凑成一次 0 token 调用只会把「调用次数」抬高
+  { id: 'z1', conversation: 's2', session: 'agent-2', at: 4700, source: 'llm_default', extra: '{}' },
+  // 坏 JSON 只丢这一行
+  { id: 'b1', conversation: 's2', session: 'agent-2', at: 4800, source: 'llm_default', extra: '{ oops' }
+]
+
+/* B 态：h1 的 prompt 变成 4300（合计 input 5000）。行数与列宽都没变，页数照旧 ——
+   WAL 里把 B 的每一页都当帧写进去，回放后正好整库都是 B */
+const traeCnRowsB: TraeCnFixtureRow[] = traeCnRowsA.map((row) =>
+  row.id === 'h1'
+    ? {
+        ...row,
+        extra: traeCnExtra({ prompt: 4300, output: 30, cache: 200, reasoning: 6, model: 'solo-1', workspace: 'D:\\AI\\p1' })
+      }
+    : row
+)
+
+const traeCnRoot = mkdtempSync(join(tmpdir(), 'wbtm-traecn-'))
+const traeCnPlainA = join(traeCnRoot, 'a.plain.db')
+const traeCnPlainB = join(traeCnRoot, 'b.plain.db')
+buildTraeCnPlain(traeCnPlainA, traeCnRowsA, traeCnTitles)
+buildTraeCnPlain(traeCnPlainB, traeCnRowsB, traeCnTitles)
+const traeCnSealedA = sealTraeCnDb(traeCnPlainA, traeCnSalt)
+const traeCnSealedB = sealTraeCnDb(traeCnPlainB, traeCnSalt)
+check(
+  '夹具的每一页都留出了 80 字节保留区（普通 SQLite 不按保留区排版，得自己挪）',
+  traeCnSealedA.unsafe.length === 0 && traeCnSealedB.unsafe.length === 0,
+  [...traeCnSealedA.unsafe, ...traeCnSealedB.unsafe].join(',')
+)
+check(
+  '夹具 B 不小于 A（WAL 的帧才盖得住 A 的每一页）',
+  traeCnSealedB.pages >= traeCnSealedA.pages,
+  `${traeCnSealedA.pages} → ${traeCnSealedB.pages} 页`
+)
+
+const traeCnDbFile = join(traeCnRoot, 'database.db')
+const traeCnWalFile = join(traeCnRoot, 'database.db-wal')
+writeFileSync(traeCnDbFile, Buffer.concat(traeCnSealedA.sealed))
+
+check('密钥能过第 1 页 HMAC', probeTraeCnKey(traeCnDbFile, traeCnKey))
+check('错密钥过不了第 1 页 HMAC', !probeTraeCnKey(traeCnDbFile, Buffer.alloc(32, 0xff)))
+check('键长不是 32 字节直接判否', !probeTraeCnKey(traeCnDbFile, Buffer.alloc(16, 1)))
+check('库不存在时判否而不是抛异常', !probeTraeCnKey(join(traeCnRoot, 'nope.db'), traeCnKey))
+
+const traeCnA = collectTraeCnSnapshot({ dbPath: traeCnDbFile, key: traeCnKey, now: FIXED_NOW })
+check('读到 4 次调用（工具行 / 已删行 / 空分项行都不算）', traeCnA.totals.calls === 4, String(traeCnA.totals.calls))
+check('input = 1000', traeCnA.totals.inputTokens === 1000, String(traeCnA.totals.inputTokens))
+check('output = 100', traeCnA.totals.outputTokens === 100, String(traeCnA.totals.outputTokens))
+check('缓存读 = 620', traeCnA.totals.cachedTokens === 620, String(traeCnA.totals.cachedTokens))
+check('思考 = 18 —— 但它是 output 的子集，没有再进合计', traeCnA.totals.reasoningTokens === 18 && traeCnA.totals.outputTokens === 100)
+check(
+  '缓存读已含在 input 里（没有再加一遍）',
+  traeCnA.totals.inputTokens === 1000 && traeCnA.totals.cachedTokens <= traeCnA.totals.inputTokens
+)
+check('两个会话 / 两个项目 / 两个模型', traeCnA.totals.sessions === 2 && traeCnA.projects.length === 2 && traeCnA.models.length === 2)
+check('会话标题取自 chat_session', traeCnA.sessions.some((s) => s.title === '设计 Token 看板'))
+check(
+  '会话 token 之和 == 全局',
+  sum(traeCnA.sessions.map((s) => s.inputTokens + s.outputTokens)) ===
+    traeCnA.totals.inputTokens + traeCnA.totals.outputTokens
+)
+check('source 标记与页行数', traeCnA.kind === 'traecn' && traeCnA.source.files === 1 && traeCnA.source.dbRows === 6)
+check('窗口大小库里没有 —— 只报已用', traeCnA.sessions.every((s) => s.contextSize === 0 && s.contextUsed > 0))
+
+const traeCnNoKey = collectTraeCnSnapshot({ dbPath: traeCnDbFile, key: null, now: FIXED_NOW })
+check(
+  '没钥匙时给的是 warning 而不是异常',
+  traeCnNoKey.totals.calls === 0 && traeCnNoKey.warnings.some((w) => w.includes('密钥'))
+)
+const traeCnNoDb = collectTraeCnSnapshot({ dbPath: join(traeCnRoot, 'nope', 'database.db'), key: traeCnKey, now: FIXED_NOW })
+check('库不存在时给 warning', traeCnNoDb.totals.calls === 0 && traeCnNoDb.warnings.length > 0)
+const traeCnEmptyPath = collectTraeCnSnapshot({ dbPath: '', key: traeCnKey, now: FIXED_NOW })
+check('路径为空不崩', traeCnEmptyPath.sessions.length === 0 && traeCnEmptyPath.warnings.length > 0)
+const traeCnWrongKey = collectTraeCnSnapshot({ dbPath: traeCnDbFile, key: Buffer.alloc(32, 0xff), now: FIXED_NOW })
+check('错钥匙不崩、显示 0 并给 warning', traeCnWrongKey.totals.calls === 0 && traeCnWrongKey.warnings.length > 0)
+
+/* WAL：B 态的帧 + 一帧没提交的尾巴 + 一帧上一代 salt 的残留。
+   残留帧若被回放，第 1 页会被写坏 —— 所以「input 变成 5000 且没有 warning」
+   同时证明了「WAL 确实生效」与「残留帧确实被丢掉」。 */
+const traeCnWalFrames = traeCnSealedB.sealed.map((page, index) => ({
+  no: index + 1,
+  page,
+  // 只有最后一个帧带 dbSize（commit 帧），回放端以它截断
+  dbSize: index === traeCnSealedB.sealed.length - 1 ? traeCnSealedB.pages : 0
+}))
+traeCnWalFrames.push({ no: 1, page: Buffer.alloc(TRAECN_PAGE, 0xff), dbSize: 0 })
+writeFileSync(
+  traeCnWalFile,
+  buildTraeCnWal(
+    [
+      ...traeCnWalFrames,
+      // 上一代残留帧：salt 对不上，必须整段丢掉
+      { no: 1, page: Buffer.alloc(TRAECN_PAGE, 0xff), dbSize: 0, salt: [0xdeadbeef, 0x0badf00d] }
+    ],
+    0xa1b2c3d4,
+    0x11223344
+  )
+)
+
+const traeCnB = collectTraeCnSnapshot({ dbPath: traeCnDbFile, key: traeCnKey, now: FIXED_NOW })
+check('WAL 回放生效：input 从 1000 变成 5000', traeCnB.totals.inputTokens === 5000, String(traeCnB.totals.inputTokens))
+check('残留旧 salt 帧与未提交尾巴都被丢掉（库仍然完整）', traeCnB.warnings.length === 0, traeCnB.warnings.join(' · '))
+check('WAL 回放后仍是 4 次调用 / 2 个会话', traeCnB.totals.calls === 4 && traeCnB.totals.sessions === 2)
+
+/* 文件戳：主进程靠它判「库动没动」来决定复用快照。「变了」这一例用追半页来做，
+   只赖 size、不赌 mtime 的精度。 */
+const traeCnStampDb = join(traeCnRoot, 'stamp.db')
+writeFileSync(traeCnStampDb, Buffer.concat(traeCnSealedA.sealed))
+const traeCnStamp1 = traeCnFileStamp(traeCnStampDb)
+const traeCnStampSame = traeCnFileStamp(traeCnStampDb)
+check('库没动时文件戳不变', traeCnStamp1 !== null && traeCnStamp1 === traeCnStampSame)
+writeFileSync(traeCnStampDb, Buffer.concat([...traeCnSealedA.sealed, Buffer.alloc(64)]))
+check('库长了文件戳就变', traeCnFileStamp(traeCnStampDb) !== traeCnStamp1)
+check('库不存在时文件戳为 null 而不是抛异常', traeCnFileStamp(join(traeCnRoot, 'nope.db')) === null)
+
+section('TRAE SOLO CN 真实数据')
+
+const traeCnRealDir =
+  process.env['WB_TOKEN_METER_TRAECN_DIR'] ??
+  join(process.env['APPDATA'] ?? join(homedir(), 'AppData', 'Roaming'), 'TRAE SOLO CN', 'ModularData', 'ai-agent')
+const traeCnRealDb = join(traeCnRealDir, 'database.db')
+const traeCnKeyHex = process.env['WB_TOKEN_METER_TRAECN_KEY'] ?? ''
+
+/* 密钥只在 TraeWork 进程的内存里，磁盘 / 注册表 / DPAPI 全无落点 ——
+   所以真实数据这一段必须由外部把密钥递进来（WB_TOKEN_METER_TRAECN_KEY=<64 hex>），
+   否则只能跳过。CI 上必然跳过，属正常。 */
+if (!existsSync(traeCnRealDb) || !/^[0-9a-fA-F]{64}$/.test(traeCnKeyHex)) {
+  console.log('  skip 没有真实用量库、或没给 WB_TOKEN_METER_TRAECN_KEY —— 真实数据断言跳过（CI 环境属正常）')
+} else {
+  const traeCnRealKey = Buffer.from(traeCnKeyHex, 'hex')
+  check('真实库的第 1 页 HMAC 认这个密钥', probeTraeCnKey(traeCnRealDb, traeCnRealKey))
+
+  const traeCnReal = collectTraeCnSnapshot({ dbPath: traeCnRealDb, key: traeCnRealKey, now: FIXED_NOW })
+  check('读到调用', traeCnReal.totals.calls > 0, `${traeCnReal.totals.calls} 次`)
+  check('缓存命中不超过输入（input 已含缓存读）', traeCnReal.totals.cachedTokens <= traeCnReal.totals.inputTokens)
+  check('思考不超过输出（reasoning 是 output 的子集）', traeCnReal.totals.reasoningTokens <= traeCnReal.totals.outputTokens)
+  check(
+    '会话 token 之和 == 全局',
+    sum(traeCnReal.sessions.map((s) => s.inputTokens + s.outputTokens)) ===
+      traeCnReal.totals.inputTokens + traeCnReal.totals.outputTokens
+  )
+  check('至少一个会话带标题', traeCnReal.sessions.some((s) => s.title.length > 0))
+}
+
 /* ---------------------------------------------- 6b. Qoder CN 数据源 */
 
 section('Qoder CN 单行解析')
@@ -2523,6 +2912,191 @@ check(
 check('Qoder CN 路径为空不崩', collectQoderSnapshot({ qoderDir: '' }).sessions.length === 0)
 
 rmSync(qoderFixtureRoot, { recursive: true, force: true })
+
+/* ------------------------------------------- OpenCode 桌面端数据源 */
+
+section('OpenCode 桌面端目录扫描（临时夹具）')
+
+const opencodeFixtureRoot = mkdtempSync(join(tmpdir(), 'wbtm-opencode-desktop-'))
+const opencodeFixtureCache = mkdtempSync(join(tmpdir(), 'wbtm-opencode-desktop-cache-'))
+const opencodeFixtureDbPath = join(opencodeFixtureRoot, 'opencode.db')
+const opencodeFixtureDb = new DatabaseSync(opencodeFixtureDbPath)
+opencodeFixtureDb.exec(`
+  CREATE TABLE message (
+    id TEXT PRIMARY KEY, session_id TEXT,
+    time_created INTEGER, time_updated INTEGER, data TEXT
+  );
+  CREATE TABLE session (
+    id TEXT PRIMARY KEY, title TEXT, directory TEXT, project_id TEXT,
+    time_created INTEGER, time_updated INTEGER, time_archived INTEGER
+  );
+`)
+const insertOpencodeMessage = opencodeFixtureDb.prepare(
+  'INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?)'
+)
+const ocTokens = (
+  input: number,
+  output: number,
+  reasoning: number,
+  cacheRead: number,
+  cacheWrite: number,
+  modelId = 'demo-model',
+  providerId = 'demo-provider'
+): string =>
+  JSON.stringify({
+    role: 'assistant',
+    modelID: modelId,
+    providerID: providerId,
+    tokens: {
+      total: input + output + reasoning + cacheRead + cacheWrite,
+      input,
+      output,
+      reasoning,
+      cache: { read: cacheRead, write: cacheWrite }
+    },
+    cost: 0
+  })
+insertOpencodeMessage.run('m1', 'sess_a', FIXED_NOW - 3000, FIXED_NOW - 3000, ocTokens(1000, 100, 40, 500, 100))
+insertOpencodeMessage.run('m2', 'sess_a', FIXED_NOW - 1000, FIXED_NOW - 1000, ocTokens(200, 50, 10, 1800, 0))
+insertOpencodeMessage.run(
+  'm3',
+  'sess_b',
+  FIXED_NOW - 2000,
+  FIXED_NOW - 2000,
+  ocTokens(300, 30, 0, 0, 0, 'other-model', 'other-provider')
+)
+insertOpencodeMessage.run('m6', 'sess_c', FIXED_NOW - 1800, FIXED_NOW - 1800, ocTokens(700, 7, 0, 300, 0, 'mystery-model'))
+/* 零用量（引擎会给中断的消息写这种）与坏 JSON，都不该被算进去 */
+insertOpencodeMessage.run('m4', 'sess_c', FIXED_NOW - 1500, FIXED_NOW - 1500, ocTokens(0, 0, 0, 0, 0))
+insertOpencodeMessage.run('m5', 'sess_a', FIXED_NOW - 1200, FIXED_NOW - 1200, '{ broken json')
+const insertOpencodeSession = opencodeFixtureDb.prepare(
+  'INSERT INTO session (id, title, directory, project_id, time_created, time_updated, time_archived) VALUES (?, ?, ?, ?, ?, ?, ?)'
+)
+insertOpencodeSession.run('sess_a', '夹具会话 A', 'D:\\proj\\a', 'global', FIXED_NOW - 9000, FIXED_NOW - 1000, 0)
+insertOpencodeSession.run('sess_b', '夹具会话 B', 'D:\\proj\\b', 'proj_b', FIXED_NOW - 9000, FIXED_NOW - 2000, FIXED_NOW)
+insertOpencodeSession.run('sess_c', '夹具会话 C', 'D:\\proj\\c', 'global', FIXED_NOW - 9000, FIXED_NOW - 1800, 0)
+opencodeFixtureDb.close()
+/* 模型目录：同名模型挂在两个 provider 下，窗口必须按 provider 分流 */
+writeFileSync(
+  join(opencodeFixtureCache, 'models.json'),
+  JSON.stringify({
+    'demo-provider': { models: { 'demo-model': { limit: { context: 1048576, output: 131072 } } } },
+    'other-provider': {
+      models: { 'other-model': { limit: { context: 200000 } }, 'demo-model': { limit: { context: 999 } } }
+    }
+  })
+)
+
+const opencodeFixture = collectOpencodeSnapshot({
+  opencodeDir: opencodeFixtureRoot,
+  cacheDir: opencodeFixtureCache,
+  now: FIXED_NOW
+})
+check('kind 标记为 opencode-desktop', opencodeFixture.kind === 'opencode-desktop')
+check('扫到 3 个会话', opencodeFixture.totals.sessions === 3, String(opencodeFixture.totals.sessions))
+check('零用量与坏 JSON 的行被丢掉', opencodeFixture.totals.calls === 4, String(opencodeFixture.totals.calls))
+check(
+  '输入 = input + 缓存读 + 缓存写（与 MiMo 同口径）',
+  opencodeFixture.totals.inputTokens === 1000 + 500 + 100 + 200 + 1800 + 300 + 700 + 300,
+  String(opencodeFixture.totals.inputTokens)
+)
+check('缓存命中只算 cache.read', opencodeFixture.totals.cachedTokens === 2600, String(opencodeFixture.totals.cachedTokens))
+check('输出求和', opencodeFixture.totals.outputTokens === 187, String(opencodeFixture.totals.outputTokens))
+check('思考 token 单列', opencodeFixture.totals.reasoningTokens === 50, String(opencodeFixture.totals.reasoningTokens))
+check(
+  '所有粒度的积分都是 0',
+  opencodeFixture.totals.credits === 0 &&
+    opencodeFixture.sessions.every((s) => s.credits === 0) &&
+    opencodeFixture.days.every((d) => d.credits === 0) &&
+    opencodeFixture.models.every((m) => m.credits === 0)
+)
+check(
+  '上下文水位取最后一次请求的 prompt',
+  opencodeFixture.sessions.find((s) => s.sessionId === 'sess_a')?.contextUsed === 2000,
+  String(opencodeFixture.sessions.find((s) => s.sessionId === 'sess_a')?.contextUsed)
+)
+check(
+  '上下文窗口按 provider/model 查表（同名模型不串）',
+  opencodeFixture.sessions.find((s) => s.sessionId === 'sess_a')?.contextSize === 1048576 &&
+    opencodeFixture.sessions.find((s) => s.sessionId === 'sess_b')?.contextSize === 200000,
+  `${opencodeFixture.sessions.find((s) => s.sessionId === 'sess_a')?.contextSize} / ${opencodeFixture.sessions.find((s) => s.sessionId === 'sess_b')?.contextSize}`
+)
+check('模型不在目录里时窗口留 0', opencodeFixture.sessions.find((s) => s.sessionId === 'sess_c')?.contextSize === 0)
+check('已归档会话不参与活跃评选', opencodeFixture.active?.sessionId === 'sess_a', String(opencodeFixture.active?.sessionId))
+check('会话标题来自 session 表', opencodeFixture.sessions[0]?.title === '夹具会话 A', opencodeFixture.sessions[0]?.title)
+check(
+  '按会话所在目录分组',
+  opencodeFixture.projects.map((p) => p.projectDir).sort().join('/') === 'D:\\proj\\a/D:\\proj\\b/D:\\proj\\c'
+)
+
+const opencodeFixtureStatBefore = statSync(opencodeFixtureDbPath)
+collectOpencodeSnapshot({ opencodeDir: opencodeFixtureRoot, cacheDir: opencodeFixtureCache, now: FIXED_NOW })
+const opencodeFixtureStatAfter = statSync(opencodeFixtureDbPath)
+check(
+  '采集不修改用量库',
+  opencodeFixtureStatBefore.mtimeMs === opencodeFixtureStatAfter.mtimeMs &&
+    opencodeFixtureStatBefore.size === opencodeFixtureStatAfter.size
+)
+
+rmSync(opencodeFixtureRoot, { recursive: true, force: true })
+rmSync(opencodeFixtureCache, { recursive: true, force: true })
+
+section('OpenCode 桌面端真实数据')
+
+const opencodeDataPath = join(homedir(), '.local', 'share', 'opencode')
+const opencodeCachePath = join(homedir(), '.cache', 'opencode')
+const opencodeStarted = Date.now()
+const opencodeReal = collectOpencodeSnapshot({ opencodeDir: opencodeDataPath, cacheDir: opencodeCachePath })
+const opencodeElapsed = Date.now() - opencodeStarted
+
+console.log(`  读取耗时 ${opencodeElapsed} ms`)
+console.log(`  会话 ${opencodeReal.totals.sessions} 个 · 调用 ${grouped(opencodeReal.totals.calls)} 次`)
+console.log(
+  `  token 输入 ${compact(opencodeReal.totals.inputTokens)} · 输出 ${compact(opencodeReal.totals.outputTokens)}` +
+    ` · 缓存 ${compact(opencodeReal.totals.cachedTokens)} · 思考 ${compact(opencodeReal.totals.reasoningTokens)}`
+)
+console.log(
+  `  当前上下文 ${grouped(opencodeReal.active?.used ?? 0)} / ${grouped(opencodeReal.active?.size ?? 0)} token`
+)
+
+const hasOpencode = opencodeReal.totals.calls > 0
+
+if (!hasOpencode) {
+  console.log('  skip 未检测到 OpenCode 数据 —— 真实数据相关断言全部跳过（CI 环境属正常）')
+} else {
+  check('读到会话', opencodeReal.totals.sessions > 0)
+  check('读到调用', opencodeReal.totals.calls > 0)
+  check('读取在 15 秒内', opencodeElapsed < 15_000, `${opencodeElapsed} ms`)
+  check('积分恒为 0', opencodeReal.totals.credits === 0)
+  check(
+    '会话 token 之和 == 全局',
+    sum(opencodeReal.sessions.map((s) => s.inputTokens + s.outputTokens)) ===
+      opencodeReal.totals.inputTokens + opencodeReal.totals.outputTokens
+  )
+  check(
+    '模型 token 之和 == 全局',
+    sum(opencodeReal.models.map((m) => m.inputTokens + m.outputTokens)) ===
+      opencodeReal.totals.inputTokens + opencodeReal.totals.outputTokens
+  )
+  check(
+    '日 token 之和 == 全局',
+    sum(opencodeReal.days.map((d) => d.inputTokens + d.outputTokens)) ===
+      opencodeReal.totals.inputTokens + opencodeReal.totals.outputTokens
+  )
+  check('缓存命中不超过输入', opencodeReal.totals.cachedTokens <= opencodeReal.totals.inputTokens)
+  check('有活跃会话', opencodeReal.active !== null)
+  check('每个会话都有标题', opencodeReal.sessions.every((s) => s.title.length > 0))
+  /* 目录缺失时窗口会整体退化成 0，这条只在引擎写过模型目录时才成立 */
+  if (existsSync(join(opencodeCachePath, 'models.json'))) {
+    check('至少有一个会话能算出上下文窗口', opencodeReal.sessions.some((s) => s.contextSize > 0))
+  }
+}
+
+check(
+  'OpenCode 目录不存在不崩',
+  collectOpencodeSnapshot({ opencodeDir: join(homedir(), '.opencode-nonexistent'), cacheDir: '' }).sessions.length === 0
+)
+check('OpenCode 路径为空不崩', collectOpencodeSnapshot({ opencodeDir: '', cacheDir: '' }).sessions.length === 0)
 
 /* ---------------------------------------------- 8. OpenCode Go 数据源 */
 
@@ -3286,7 +3860,7 @@ async function main(): Promise<void> {
 
     /* --------------------------------------------- 多源隔离 */
 
-    section('八个数据源互不影响')
+    section('十个数据源互不影响')
 
     const sharedWbCache = new Map()
     const wbBefore = collectSnapshot({ workbuddyDir, cache: sharedWbCache, now: FIXED_NOW })
@@ -3306,9 +3880,13 @@ async function main(): Promise<void> {
     })
     const dshCache = new Map()
     collectDshSnapshot({ dshDir: dshDirPath, cache: dshCache, now: FIXED_NOW })
+    collectOpencodeSnapshot({ opencodeDir: opencodeDataPath, cacheDir: opencodeCachePath, now: FIXED_NOW })
+    /* TRAE SOLO CN 没有解析缓存（每次都要重新解密），这里再采一次是为了证明
+       回放出来的结果稳定、且不会串到别的源 */
+    const traeCnRepeat = collectTraeCnSnapshot({ dbPath: traeCnDbFile, key: traeCnKey, now: FIXED_NOW })
 
     /* OpenCode Go 是唯一会发请求的源，这里让它连失败两次：一次压根没有凭证（不发请求），
-       一次打到没人监听的本地端口（网络层失败）。两次都不该动到另外四个源的缓存与快照。 */
+       一次打到没人监听的本地端口（网络层失败）。两次都不该动到另外九个源的缓存与快照。 */
     const isolatedNoKey = new OpencodeUsage({
       dir: opencodeRoot,
       historyFile: historyPath('isolated-no-key.jsonl'),
@@ -3388,7 +3966,12 @@ async function main(): Promise<void> {
     check('读到 Reasonix 数据时缓存确实用上了', !hasReasonix || reasonixCache.size > 0, `${reasonixCache.size} 项`)
     check('读到 DSH 数据时缓存确实用上了', !hasDsh || dshCache.size > 0, `${dshCache.size} 项`)
     check(
-      '八个源的 kind 各自正确',
+      'TRAE SOLO CN 反复采集结果一致（没有会串味的共享状态）',
+      traeCnRepeat.totals.calls === traeCnB.totals.calls && traeCnRepeat.totals.inputTokens === traeCnB.totals.inputTokens,
+      `${traeCnRepeat.totals.calls} 次 / ${traeCnRepeat.totals.inputTokens} token`
+    )
+    check(
+      '十个源的 kind 各自正确',
       wbAfter.kind === 'workbuddy' &&
         kimiReal.kind === 'kimi' &&
         zcodeReal.kind === 'zcode' &&
@@ -3396,16 +3979,21 @@ async function main(): Promise<void> {
         qoderReal.kind === 'qoder' &&
         reasonixReal.kind === 'reasonix' &&
         dshReal.kind === 'dsh' &&
+        traeCnRepeat.kind === 'traecn' &&
+        opencodeReal.kind === 'opencode-desktop' &&
+        sourceLabel('opencode-desktop') === 'OpenCode' &&
         sourceLabel('opencode') === 'OpenCode Go' &&
         sourceLabel('qoder') === 'Qoder CN' &&
         sourceLabel('reasonix') === 'Reasonix' &&
         sourceLabel('dsh') === 'DeepSeek Harness' &&
-        SOURCE_ORDER.length === 8,
+        sourceLabel('traecn') === 'TRAE SOLO CN' &&
+        SOURCE_ORDER.length === 10,
       SOURCE_ORDER.join('/')
     )
   } finally {
     rmSync(opencodeRoot, { recursive: true, force: true })
     rmSync(realHistoryRoot, { recursive: true, force: true })
+    rmSync(traeCnRoot, { recursive: true, force: true })
   }
 }
 

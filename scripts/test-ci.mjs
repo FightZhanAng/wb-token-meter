@@ -21,7 +21,7 @@ import { join } from 'node:path'
 
 const ENTRY = join('.tmp-test', 'scripts', 'core-test.js')
 
-// 空的「家」：WorkBuddy / Kimi / ZCode / MiMo / Reasonix / DSH / OpenCode
+// 空的「家」：WorkBuddy / Kimi / ZCode / MiMo / Reasonix / DSH / OpenCode Go / OpenCode
 // 全都查不到，真实数据断言整段跳过 —— 和 CI runner 上的情形一致
 const fakeHome = mkdtempSync(join(tmpdir(), 'wbtm-ci-home-'))
 

@@ -73,13 +73,21 @@ export function mimoCacheDir(): string {
 }
 
 /**
- * OpenCode 的数据目录。auth.json 就在这里，OpenCode Go 的额度查询从里面取凭证。
+ * OpenCode 引擎的数据目录。用量库 opencode.db 与凭证 auth.json 都在这里 ——
+ * 桌面端（engine sidecar）与 CLI 共用同一份。
  * 注意它是 mimocode 在 ~/.local/share 下的兄弟目录，别混。
  */
 export function opencodeDir(): string {
   const override = process.env['WB_TOKEN_METER_OPENCODE_DIR']
   if (override) return override
   return join(homedir(), '.local', 'share', 'opencode')
+}
+
+/** OpenCode 引擎的缓存目录，模型目录 models.json 在这里（算上下文窗口用） */
+export function opencodeCacheDir(): string {
+  const override = process.env['WB_TOKEN_METER_OPENCODE_CACHE_DIR']
+  if (override) return override
+  return join(homedir(), '.cache', 'opencode')
 }
 
 /**
@@ -110,6 +118,25 @@ export function dshDir(): string {
   const override = process.env['WB_TOKEN_METER_DSH_DIR']
   if (override) return override
   return join(homedir(), '.dsh')
+}
+
+/**
+ * TRAE SOLO CN（TraeWork CN）的数据目录 —— 用量库 database.db 就在这一层。
+ *
+ * 它用的是 Electron 的标准 userData 基址，目录名取 product.json 里的
+ * win32NameVersion（'TraeWork CN' 是应用名，数据目录却是 'TRAE SOLO CN'，
+ * 两者不一致，别照名字猜）。库本身是 SQLCipher 4 加密的，
+ * 密钥只能从运行中的进程内存里取，见 shared/traecn-collector.ts 的说明。
+ */
+export function traeCnDir(): string {
+  const override = process.env['WB_TOKEN_METER_TRAECN_DIR']
+  if (override) return override
+  return join(app.getPath('appData'), 'TRAE SOLO CN', 'ModularData', 'ai-agent')
+}
+
+/** 用量库的完整路径 —— 取密钥（按文件问谁锁着它）与采集都认它 */
+export function traeCnDbPath(): string {
+  return join(traeCnDir(), 'database.db')
 }
 
 /**

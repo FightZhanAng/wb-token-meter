@@ -466,16 +466,22 @@ export class FloatWindow {
 
   private present(win: BrowserWindow): void {
     const settings = this.readSettings()
-    win.setAlwaysOnTop(settings.floatAlwaysOnTop, 'floating')
-    win.setOpacity(clampOpacity(settings.floatOpacity))
     // 刻意用 showInactive：胶囊弹出来把正在打字的焦点抢走是这类工具最招人烦的行为
     win.showInactive()
+    // 置顶必须落在**可见之后**：透明窗口 show 时 DWM 会重建表面，隐藏态设的
+    // topmost 会被丢掉 —— 表现是启动后胶囊压不住别的窗口，而 isAlwaysOnTop()
+    // 读的是内部标志照样返回 true，自检看着一直是绿的。开关走的 syncFromSettings
+    // 是在可见态设的，所以那条路从没暴露过这个坑。
+    win.setAlwaysOnTop(settings.floatAlwaysOnTop, 'floating')
+    win.setOpacity(clampOpacity(settings.floatOpacity))
 
     if (this.visibleFallback) clearTimeout(this.visibleFallback)
     this.visibleFallback = setTimeout(() => {
       if (win.isDestroyed() || win.isVisible()) return
       // 透明窗口在部分环境 showInactive 后不可见，回退到带焦点的 show()
       win.show()
+      // 这次 show 之前窗口仍不可见，topmost 还会再丢一次 —— 同一个坑补第二刀
+      win.setAlwaysOnTop(this.readSettings().floatAlwaysOnTop, 'floating')
     }, VISIBLE_FALLBACK_MS)
   }
 }

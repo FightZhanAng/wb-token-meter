@@ -999,9 +999,14 @@ export default function App(): JSX.Element {
           <div className="app-header-main">
             <div className="app-title">Token 计量器</div>
             <div className="app-subtitle">
-              {snapshot
-                ? `更新于 ${formatClock(snapshot.generatedAt)} · ${relativeTime(snapshot.generatedAt, now)}`
-                : '正在读取…'}
+              {/* 切源后的空窗里快照的 kind 还停在上一本账：这时要明说「正在读取哪一本」，
+                  不然按钮亮了、数字没动，看起来像点了没反应。显示口径仍跟着 snapshot.kind
+                  走（见上），这里只是把「没到」说出来。 */}
+              {!snapshot
+                ? '正在读取…'
+                : snapshot.kind !== source
+                  ? `正在读取 ${sourceLabel(source)}…`
+                  : `更新于 ${formatClock(snapshot.generatedAt)} · ${relativeTime(snapshot.generatedAt, now)}`}
             </div>
           </div>
           <div className="header-actions">

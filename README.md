@@ -1,20 +1,21 @@
 # Token 计量器
 
 **一个用量面板，同时看得见 [WorkBuddy](https://www.workbuddy.cn/)、Qoder CN、Kimi Code、
-ZCode、Xiaomi MiMo、Reasonix、DeepSeek Harness 与 OpenCode Go 的消耗。**
+ZCode、Xiaomi MiMo、Reasonix、DeepSeek Harness、TRAE SOLO CN、OpenCode 与 OpenCode Go 的消耗。**
 
 WorkBuddy 采用积分制，界面上只显示积分、看不到 token 消耗。但每次模型调用的
 官方 token 数据其实都写在本地磁盘上 —— 这个工具把它读出来，做成常驻托盘的用量面板。
 
 Qoder CN 反过来：积分与上下文水位写在本地，token 一个都不给 ——
 每次调用只留一笔积分，界面就按积分画。
-Kimi Code、ZCode、Xiaomi MiMo、Reasonix 与 DeepSeek Harness 没有积分这一层，
-本地留的正好就是 token 用量本身。
+Kimi Code、ZCode、Xiaomi MiMo、Reasonix、DeepSeek Harness 与 OpenCode 没有积分
+这一层，本地留的正好就是 token 用量本身。TRAE SOLO CN 也是只有 token，
+但它的账本加了密，还得先从运行中的进程里取到钥匙（见下）。
 OpenCode Go 更特别：它连 token 都不给看，只有订阅额度的占用比例，得联网去问。
 面板右上角（或托盘菜单的「数据源」）可以随时切换看哪一个，几边的账本各算各的、互不影响。
 
 > 非官方第三方工具，与 WorkBuddy、Qoder、Kimi Code、ZCode、小米、Reasonix、
-> DeepSeek、opencode 官方均无关。
+> DeepSeek、TRAE、opencode 官方均无关。
 > 除 OpenCode Go 的额度查询和更新检查外，所有数据都在本地读取和计算，不修改任何原始文件。
 > 出站请求只有两个：`GET https://opencode.ai/zen/go/v1/usage`（带本机凭证读来的 key，
 > 拿那三个百分比）和更新检查（去本仓库的 Release 拉 `latest.yml`）—— 都不发送任何本地数据。
@@ -45,7 +46,7 @@ OpenCode Go 更特别：它连 token 都不给看，只有订阅额度的占用�
 
 ## 数据从哪来
 
-**不需要估算。** 七个源把精确的用量写在本地磁盘上，只是没在界面上展示 ——
+**不需要估算。** 九个源把精确的用量写在本地磁盘上，只是没在界面上展示 ——
 其中 Qoder CN 能取到的只有积分与上下文水位（服务端不下发 token）；
 OpenCode Go 的额度比例则来自它的在线接口。
 
@@ -242,6 +243,82 @@ ZCode / Reasonix 的 input 都含缓存。所以：
 折进 output 了，界面上「· 思考」整行收起。
 
 
+### TRAE SOLO CN 桌面端（只有 token，账本加密）
+
+数据目录取 Electron 的标准 userData 基址（目录名叫 `TRAE SOLO CN`，而应用名是
+`TraeWork CN` —— 两者不一致，别照名字猜）：
+
+| 数据源 | 位置 | 内容 |
+|---|---|---|
+| 用量库 | `%APPDATA%\TRAE SOLO CN\ModularData\ai-agent\database.db` | **SQLCipher 4 加密**的 SQLite；`server_history_info` 表里 `source = 'llm_default'` 那些行的 `extra_info` JSON：`exact_prompt_tokens_v1` / `exact_output_tokens_v1` / `exact_cache_read_input_tokens_v1` / `exact_reasoning_tokens_v1`、模型 `config_name`、工作目录 `workspace_folder` |
+| 会话标题 | 同库 `chat_session` 表 | `session_title`，按 `conversation_id` 关联（实测它等于 `chat_session.session_id`） |
+
+```
+输入 = exact_prompt_tokens_v1          ← 已含缓存读，跟 WorkBuddy 那一档一样
+缓存命中 = exact_cache_read_input_tokens_v1
+输出 = exact_output_tokens_v1          思考 = exact_reasoning_tokens_v1（是 output 的**子集**）
+```
+
+后两条都写在库里的语义标记上（`exact_token_semantics_v1` =
+`provider_raw_usage_completion_includes_reasoning`），且 `input + output === total` 逐行
+严格成立，所以思考只作明细、绝不能再加进合计。`created_at` 是**秒**不是毫秒。
+
+两个坑，都踩过了：
+
+- **钥匙只在运行中的进程内存里**。磁盘 5.7 万个文件（hex / 大写 / `0x` / 原始字节 /
+  base64 各种变体）、注册表、Windows 凭据管理器、DPAPI 块、进程环境块，以及由
+  `ICUBE_MACHINE_ID` 派生的几十种组合，全部 0 命中。所以先用 Restart Manager 问
+  「谁锁着这个库」，再去那个进程的可读内存里捞 64 位 hex 候选，逐个拿**第 1 页的
+  HMAC** 验——验签才是判据，捞到什么不算数。实测一次全量扫描 ~680 MB / 21 秒，
+  所以主进程**必须缓存密钥**，20 秒一轮的刷新扛不住这个代价；TraeWork 重启会换钥，
+  缓存失效靠「第 1 页 HMAC 验不过」来发现。取密钥全在 `src/main/traecn-key.ts`，
+  解密 / 聚合在纯 Node 的 `src/shared/traecn-collector.ts`。
+  **TraeWork CN 没在运行时取不到钥匙，这个源会显示 0 并给一条说明** ——
+  这不是「读不到数据」，是压根没有钥匙。
+- **SQLCipher 的 CBC 不做 PKCS#7 校验**，Node / OpenSSL 这边必须
+  `setAutoPadding(false)`。不设会出现「逐页 HMAC 全对、AES 解密全错」
+  （`ERR_OSSL_BAD_DECRYPT`），错得很像密钥不对，能白查半天。
+
+库在被写入时快照仍可能撕裂（旁边还有 `-wal` / `-shm`），所以解密带重试、
+拿 `PRAGMA integrity_check` 兜底，不完整就重拍。WAL 回放必须按**帧头 salt** 过滤、
+并以最后一个 commit 帧截断 —— checkpoint 之后 WAL 会被复用，上一代的残留旧帧因为
+密钥相同、HMAC 照样通过，一起回放就把库污染成 malformed（实测不修是 0/4 干净快照，
+修完 4/4）。
+
+已知边界：上下文窗口大小库里没有（水位只报已用量）；解密只在内存 / `%TEMP%` 里做，
+用完即删，不碰原始文件。20 秒一轮的刷新按 db + `-wal` 的文件戳（size + mtime）判
+「库动没动」，没动就直接复用上一份快照 —— TraeWork 关着的时候库是死的，重解只是
+把同一个解密价每轮再付一遍；手动「刷新」绕开缓存，永远真读。
+
+
+### OpenCode 桌面端（只有 token）
+
+桌面端自己不留用量账 —— 它启动 engine sidecar，账记在引擎的数据目录里，
+而且与 opencode CLI **共用同一个库**（`session.version` 只是引擎版本号，
+拆不出哪条会话来自桌面端；面板上就按「OpenCode」一家算）：
+
+| 数据源 | 位置 | 内容 |
+|---|---|---|
+| 用量库 | `~/.local/share/opencode/opencode.db` → `message` | 每条助手消息的 `data` JSON：`tokens.input` / `output` / `reasoning` / `cache.read` / `cache.write`，外加 `modelID` / `providerID` / `time.created` |
+| 会话元数据 | 同库 `session` 表 | 标题、工作目录、创建 / 更新 / 归档时间（`parent_id` 非空的子代理会话按独立会话计入） |
+| 模型目录 | `~/.cache/opencode/models.json` | `provider.models.<模型>.limit.context` —— 上下文窗口按 `provider/model` 查 |
+
+口径与 MiMo 一脉相承（同源的表结构）：
+
+```
+输入 = input + cache.read + cache.write     缓存命中 = cache.read
+输出 = output                               思考 = reasoning（单列）
+```
+
+也就是它的 `input` 同样是**不含缓存读**的纯新增输入。`part` 表里 `step-finish`
+那份 tokens 与 `message` 完全同值（副本），所以只取 `message` 级。
+
+这个库比别的源大得多（本机 732 MB，其中 `event` 表 569 MB、`message` 101 MB），
+所以这个源**不做「复制三件套」的读库兜底** —— 复制 700 MB 只为读两千行不划算；
+只读直开，失败就报「未能读取」。同理，它只碰 `message` / `session` 两张表，
+`event` / `part` 一概不看。桌面端正在运行时照样读得到：SQLite 的只读连接
+不会挡住写者。
+
 ### OpenCode Go（只有额度，联网查询）
 
 **它是唯一一个不读本地文件的源** —— 用量不在磁盘上，得去问接口：
@@ -261,7 +338,10 @@ Go 是 $10/月的订阅，限额按**美元金额**算（5 小时 = 月限额的
 
 请求节流：自动刷新最小间隔 60 秒（轮询本身是 20 秒一次），失败按 60s → 120s → 300s
 退避；托盘与面板上的手动刷新会强制绕过节流。整块逻辑在 `src/main/opencode-usage.ts`，
-与另外七个源完全隔离 —— 网络失败不影响它们的统计。
+与另外九个源完全隔离 —— 网络失败不影响它们的统计。
+
+桌面端与 CLI 的本地 token 用量在隔壁的「OpenCode」源（读同一个目录下的 `opencode.db`）——
+一个是本地账本、一个是联网额度，两本分开看。
 
 
 ### 积分口径（仅 WorkBuddy）
@@ -275,7 +355,7 @@ WorkBuddy 的积分以数据库记录为**权威口径**，不是用 token 反�
 界面底部会把最后一项单独列出来，避免总额平白少一截。
 
 Qoder CN 的积分不走这套 —— 每个请求一笔就写在会话明细里，不需要对账，
-也就没有「未归因」。没有积分的六个源，积分相关的整块（今日积分、比价、
+也就没有「未归因」。没有积分的八个源，积分相关的整块（今日积分、比价、
 会话行的积分、未归因提示）在切到它们时会整块收起，而不是显示成 0 分。
 
 ### 两点实测结论
@@ -321,7 +401,10 @@ pnpm dist          # 打包 Windows 安装包与免安装版到 release/
 | `WB_TOKEN_METER_REASONIX_DIR` | 覆盖 Reasonix 旧版数据目录（`usage.jsonl` 在里面），默认 `~/.reasonix` |
 | `WB_TOKEN_METER_REASONIX_STATS_DIR` | 覆盖 Reasonix 新版按天流水目录，默认 `<APPDATA>\Roaming\reasonix\stats` |
 | `WB_TOKEN_METER_DSH_DIR` | 覆盖 DeepSeek Harness 数据目录（会话日志在里面），默认 `~/.dsh` |
-| `WB_TOKEN_METER_OPENCODE_DIR` | 覆盖 OpenCode 数据目录（`auth.json` 在里面），默认 `~/.local/share/opencode` |
+| `WB_TOKEN_METER_TRAECN_DIR` | 覆盖 TRAE SOLO CN 数据目录（加密用量库 `database.db` 在里面），默认 `%APPDATA%\TRAE SOLO CN\ModularData\ai-agent` |
+| `WB_TOKEN_METER_TRAECN_KEY` | 直接给出 TRAE SOLO CN 的库密钥（64 位 hex）—— 只给 `test:core` 的真实数据断言用，免得为了跑一次自检去扫 21 秒内存 |
+| `WB_TOKEN_METER_OPENCODE_DIR` | 覆盖 OpenCode 数据目录（用量库 `opencode.db` 与凭证 `auth.json` 都在里面），默认 `~/.local/share/opencode` |
+| `WB_TOKEN_METER_OPENCODE_CACHE_DIR` | 覆盖 OpenCode 引擎的缓存目录（模型目录 `models.json` 在里面），默认 `~/.cache/opencode` |
 | `WB_TOKEN_METER_OPENCODE_URL` | 覆盖额度查询端点（测试用），默认官方地址 |
 | `WB_TOKEN_METER_OPENCODE_KEY` | 直接指定额度查询用的 key（测试用），给了就不读 `auth.json` |
 | `WB_TOKEN_METER_SMOKE=1` | 冒烟自检：把启动状态写到 `%TEMP%\wbtm-smoke\` |
@@ -381,7 +464,7 @@ GitHub Downloads 会卡在证书吊销检查上）。两边都靠 `ELECTRON_MIRR
 > （标题 + 更新时间）和三个动作（GitHub、**外观**、刷新）；第三行整行给
 > **数据源切换**。数据源是这一页的主导航，挤在标题旁边只会把标题压成
 > 「Token ...」，所以它独占一行 —— 现在横向摆得下四个（`WorkBuddy` /
-> `Qoder CN` / `Kimi Code` / `ZCode`），其余四个收在「更多」里；当前源落在
+> `Qoder CN` / `Kimi Code` / `ZCode`），其余五个收在「更多」里；当前源落在
 > 「更多」里时，那个按钮会显示它的名字。数据源与外观都存进设置文件，重启后还在。
 >
 > Windows 上主窗口是**无边框 + 自绘标题栏**（`titleBarStyle: 'hidden'` +
@@ -422,11 +505,11 @@ GitHub Downloads 会卡在证书吊销检查上）。两边都靠 `ELECTRON_MIRR
 
 ### 面板上的通道
 
-- **今日** —— token 与积分（没有积分的六个源把第二个大数字换成缓存命中率；
+- **今日** —— token 与积分（没有积分的八个源把第二个大数字换成缓存命中率；
   Qoder CN 反过来，大数直接报积分、副行是调用次数），下面一行是输入 / 输出 / 调用次数
 - **上下文** —— 带红线区的仪表：已用量、指针、以及会话的工作目录；
   模型上限未知时只报已用量（Qoder CN 按快照里的水位比例画）
-- **结构** —— 输入 / 缓存命中 / 输出 / 思考 的分布（WorkBuddy / ZCode / MiMo 单列思考，其余源不单列；
+- **结构** —— 输入 / 缓存命中 / 输出 / 思考 的分布（WorkBuddy / ZCode / MiMo / Reasonix / TRAE SOLO CN / OpenCode 单列思考，其余源不单列；
   Qoder CN 没有 token，这张卡整块收起）
 - **14 天** —— 每日 token 柱状图（Qoder CN 画积分），**补齐空档**：没有用量的日子画成 0 高度。
   只画「有数据的那些天」会让柱子等距排列，看起来是条连续时间轴，实际日期却在跳
@@ -508,7 +591,7 @@ solid 降级模式（透明不可见时的逃生通道）没有这套待遇 —�
 
 | 菜单项 | 能改什么 |
 |---|---|
-| 数据源 | WorkBuddy / Qoder CN / Kimi Code / ZCode / MiMo / Reasonix / DeepSeek Harness / OpenCode Go |
+| 数据源 | WorkBuddy / Qoder CN / Kimi Code / ZCode / MiMo / Reasonix / DeepSeek Harness / TRAE SOLO CN / OpenCode / OpenCode Go |
 | 外观 | 跟随系统 / 浅色 / 深色 |
 | 胶囊主题 | 跟随面板 / 记录纸 / 深靛 / 琥珀夜光 / 碳黑 |
 | 桌面胶囊 | 显示 / 隐藏 |
@@ -590,6 +673,16 @@ solid 降级模式（透明不可见时的逃生通道）没有这套待遇 —�
   不并进父会话，会作为独立会话出现在排行里（与 ZCode 的 `subagent_child` 同样处理）。
 - DeepSeek Harness 的会话日志是追加写的，正在跑的那个会话可能还没把最后一步 flush 下来，
   所以「今日」会滞后几十秒；首次全量扫描本机 15 个会话约 0.5 秒，之后靠 mtime 缓存跳过。
+- TRAE SOLO CN 的库密钥只在运行中的 TraeWork 进程内存里，**App 没在跑时这个源只能显示 0**
+  并给一条说明；密钥一旦取到就缓存，TraeWork 重启换钥靠「第 1 页 HMAC 验不过」发现并重扫
+  （一次全量扫描约 21 秒）。库在被写入时快照可能撕裂，解密带重试兜底。
+- OpenCode 桌面端与 CLI **共用同一个引擎库**，拆不出哪条会话来自桌面端
+  （`session.version` 只是引擎版本号）—— 面板上的「OpenCode」就是这整本账。
+- OpenCode 的库比别的源大得多（本机 732 MB，`event` 表占大一半），所以这个源
+  **不做「复制三件套」的读库兜底**：只读直开，失败就报「未能读取」；
+  桌面端正在写的时候照样读得到，只读连接不会挡住写者。
+- OpenCode 的上下文窗口来自引擎自己的模型目录 `~/.cache/opencode/models.json`；
+  文件缺失、或模型不在目录里时，水位只报已用量、不给百分比。
 - OpenCode Go 的额度只有三个百分比：接口不回 token 数、不回剩余金额，也拆不到单个模型
   （官方文档里的 $15/$30/$60 是按模型的月限额，服务端已经折算成一个比例）。
 - OpenCode Go 的趋势曲线是**本地采样**：应用没在跑时没有数据，断档期间的变化看不到。

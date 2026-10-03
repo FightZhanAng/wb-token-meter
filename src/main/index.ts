@@ -8,8 +8,10 @@ import { collectDshSnapshot, type DshParseCache } from '../shared/dsh-collector'
 import { SOURCE_ORDER, sourceLabel } from '../shared/format'
 import { collectKimiSnapshot, type KimiParseCache } from '../shared/kimi-collector'
 import { collectMimoSnapshot } from '../shared/mimo-collector'
+import { collectOpencodeSnapshot } from '../shared/opencode-collector'
 import { collectQoderSnapshot, type QoderParseCache } from '../shared/qoder-collector'
 import { collectReasonixSnapshot, type ReasonixParseCache } from '../shared/reasonix-collector'
+import { collectTraeCnSnapshot, probeTraeCnKey, traeCnFileStamp } from '../shared/traecn-collector'
 import { collectZcodeSnapshot } from '../shared/zcode-collector'
 import type {
   AppInfo,
@@ -32,15 +34,19 @@ import {
   loadRenderer,
   mimoCacheDir,
   mimoDataDir,
+  opencodeCacheDir,
   opencodeDir,
   preloadPath,
   qoderDir,
   reasonixDir,
   reasonixStatsDir,
+  traeCnDbPath,
+  traeCnDir,
   workbuddyDir,
   zcodeDir
 } from './paths'
 import { DEFAULT_SETTINGS, SettingsStore } from './settings'
+import { readTraeCnKey, type TraeCnKeyProbe } from './traecn-key'
 import { TrayController, type MenuChoice } from './tray'
 import { UpdateController } from './updater'
 
@@ -115,6 +121,50 @@ const qoderCache: QoderParseCache = new Map()
 const reasonixCache: ReasonixParseCache = new Map()
 const dshCache: DshParseCache = new Map()
 
+/**
+ * TRAE SOLO CN 的数据库密钥。**必须缓存**：唯一能取到它的办法是扫那些锁着
+ * 用量库的进程的内存（实测 ~680MB / 21 秒），而 20 秒一次的轮询扛不住这个代价。
+ * 同一份 TraeWork 不重启，密钥就一直有效 —— 所以只有第 1 页 HMAC 验不过
+ * （App 重启换了钥）才重扫，见 ensureTraeCnKey()。
+ */
+let traeCnKey: Buffer | null = null
+/** 上一次取密钥的结果（含「谁锁着这个库」），用来给「取不到」配一条具体的提示 */
+let traeCnKeyProbe: TraeCnKeyProbe | null = null
+let traeCnKeyScan: Promise<void> | null = null
+let traeCnKeyCheckedAt = 0
+
+/** 取密钥失败后的冷却：App 没开时每分钟撞一次就够了，别把轮询变成扫描器 */
+const TRAECN_KEY_RETRY_MS = 60_000
+
+/**
+ * TRAE SOLO CN 的快照缓存：db + -wal 的文件戳没变就整份复用（见 refresh() 的
+ * traecn 分支）。只缓存「有钥」时采的那份 —— 没钥的空账本来就不花钱，而且
+ * 钥从无到有的那一拍必须真的重采，不能被上一份「没钥」的空账挡住。
+ */
+let traeCnStampCache: { stamp: string; snapshot: Snapshot } | null = null
+
+function ensureTraeCnKey(force = false): Promise<void> {
+  if (traeCnKey && !force) return Promise.resolve()
+  if (traeCnKeyScan) return traeCnKeyScan
+  if (!force && !traeCnKey && traeCnKeyProbe && Date.now() - traeCnKeyCheckedAt < TRAECN_KEY_RETRY_MS) {
+    return Promise.resolve()
+  }
+  traeCnKeyCheckedAt = Date.now()
+  traeCnKeyScan = readTraeCnKey(traeCnDbPath())
+    .then((probe) => {
+      traeCnKeyProbe = probe
+      traeCnKey = probe.key
+    })
+    .catch(() => {
+      traeCnKeyProbe = { pids: [], key: null }
+      traeCnKey = null
+    })
+    .finally(() => {
+      traeCnKeyScan = null
+    })
+  return traeCnKeyScan
+}
+
 /* ------------------------------------------------------------ 采集 */
 
 /** OpenCode Go 的额度客户端。懒创建：只有真的切到那个源才会实例化、才会去读 auth.json */
@@ -141,6 +191,8 @@ function sourceDir(kind: SourceKind): string {
   if (kind === 'qoder') return qoderDir()
   if (kind === 'reasonix') return reasonixDir()
   if (kind === 'dsh') return dshDir()
+  if (kind === 'traecn') return traeCnDir()
+  if (kind === 'opencode-desktop') return opencodeDir()
   if (kind === 'opencode') return opencodeDir()
   return workbuddyDir()
 }
@@ -286,6 +338,41 @@ function refresh(force = false): Snapshot | null {
       })
     } else if (kind === 'dsh') {
       snapshot = collectDshSnapshot({ dshDir: sourceDir(kind), cache: dshCache })
+    } else if (kind === 'traecn') {
+      const dbPath = traeCnDbPath()
+      // 缓存的密钥要先验一页 HMAC 再用：TraeWork 重启会换钥，直接拿旧钥去解密
+      // 只会得到一库乱码 —— 而乱码很像「库坏了」，特别容易查错方向。
+      if (traeCnKey && !probeTraeCnKey(dbPath, traeCnKey)) traeCnKey = null
+      // 有钥且 db+wal 都没动过，就别每 20 秒把「拷库 + 逐页 AES + 回放 WAL」整价
+      // 再付一遍：TraeWork 关着的时候库是死的，重解出来的全是同一份内容。
+      // 手动刷新（force）绕开缓存 —— 用户点「刷新」就该是真的重读一遍。
+      const stamp = traeCnKey ? traeCnFileStamp(dbPath) : null
+      if (stamp && !force && traeCnStampCache?.stamp === stamp) {
+        // warnings 必须浅拷贝：这份快照往下还可能被 push「取不到钥」的提示，
+        // 复用原数组会让提示在缓存里越积越多。
+        snapshot = { ...traeCnStampCache.snapshot, warnings: [...traeCnStampCache.snapshot.warnings] }
+      } else {
+        snapshot = collectTraeCnSnapshot({ dbPath, key: traeCnKey })
+        if (stamp) traeCnStampCache = { stamp, snapshot }
+      }
+      if (!traeCnKey && traeCnKeyProbe) {
+        snapshot.warnings.push(
+          traeCnKeyProbe.pids.length
+            ? `TRAE SOLO CN 正在运行（pid ${traeCnKeyProbe.pids.join(',')}），但没在那个进程的内存里认出数据库密钥`
+            : 'TRAE SOLO CN 当前没有运行，读不到用量 —— 这个数据源的密钥只存在于它的进程内存里'
+        )
+      }
+      // 取密钥要扫 ~680MB 内存（21 秒量级），绝不能挡住这次刷新：
+      // 先把「读不到」画出来，取到了再走一遍广播（与额度源同一套路数）。
+      // 只认「进这分支时还没钥、ensure 扫完拿到了」的边沿：ensureTraeCnKey 在
+      // 钥已缓存时是立即 resolve 的，无条件 refresh 会自己触发自己 —— 每一圈
+      // 都是一次全量解密（拷库 + 逐页 AES + 回放 WAL），主进程从此忙死（卡死根因）。
+      const hadTraeCnKey = traeCnKey !== null
+      void ensureTraeCnKey().then(() => {
+        if (!hadTraeCnKey && traeCnKey && currentSource() === 'traecn') refresh()
+      })
+    } else if (kind === 'opencode-desktop') {
+      snapshot = collectOpencodeSnapshot({ opencodeDir: sourceDir(kind), cacheDir: opencodeCacheDir() })
     } else if (kind === 'opencode') {
       snapshot = buildOpencodeSnapshot()
       // 网络请求绝不能挡住 20 秒一次的同步轮询：先把缓存画出来，真拉到了再走一遍广播。

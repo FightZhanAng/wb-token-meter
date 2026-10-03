@@ -282,7 +282,7 @@ WB_TOKEN_METER_FAKE_UPDATE=<当前版本号> env -u ELECTRON_RUN_AS_NODE \
   断言在 CI 条件下整段跳过，所以 565 / 484 都对，以自检输出的总数为准）。
   涉及网络的用例一律打在本地 mock server 上，只有「真实数据」那一段碰真实环境。
 - **改数据源要动的地方**：`src/shared/<源>-collector.ts`、`src/shared/types.ts` 的源定义、
-  `src/main/index.ts` 的接线、以及 `core-test.ts` 里「七个数据源互不影响」那一段。
+  `src/main/index.ts` 的接线、以及 `core-test.ts` 里「九个数据源互不影响」那一段。
 - **改设置项**：`src/shared/types.ts` 的类型 + `src/main/settings.ts` 的默认值与校验。
   老数据文件靠合并默认值兼容，不用写迁移。
 
@@ -373,7 +373,7 @@ amber / carbon 有自己整套色板（`--pen` 就是琥珀/红，本来就 ≠ 
 | 源 | input | 缓存命中 |
 | --- | --- | --- |
 | WorkBuddy / Kimi Code / ZCode / Reasonix | **含**缓存读 | 各自的 cache 字段 |
-| Xiaomi MiMo / DeepSeek Harness | **不含**，要手动加回 `cache.read` / `cacheWrite` | 同左 |
+| Xiaomi MiMo / DeepSeek Harness / OpenCode | **不含**，要手动加回 `cache.read` / `cacheWrite` | 同左 |
 
 算错不会报错，只会让数字整体偏。同理，Qoder CN 的账本里**根本没有 token**
 （服务端只回积分与水位比例），那不是「读不到」。

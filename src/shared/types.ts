@@ -102,10 +102,23 @@ export interface Totals extends TokenBundle {
  * 数据源。各边的账本口径都不同，界面必须知道自己在看哪一本：
  * WorkBuddy 有积分（token 只是副产品），Qoder CN 有积分但**没有 token**
  * （服务端只回积分与上下文水位），Kimi Code / ZCode / MiMo / Reasonix /
- * DeepSeek Harness 只有 token，OpenCode Go 连 token 都没有 ——
- * 只有订阅额度的占用比例，而且还是联网查的。
+ * DeepSeek Harness / OpenCode / TRAE SOLO CN 只有 token，OpenCode Go 连 token
+ * 都没有 —— 只有订阅额度的占用比例，而且还是联网查的。
+ * `opencode-desktop` 是 OpenCode 桌面端（opencode 引擎，与 CLI 共用本地库）
+ * 的用量，与联网查额度的 `opencode`（OpenCode Go）是两本账。
+ * `traecn` 是唯一**要先去别的进程内存里取密钥**的源（SQLCipher 加密库）。
  */
-export type SourceKind = 'workbuddy' | 'qoder' | 'kimi' | 'zcode' | 'mimo' | 'reasonix' | 'dsh' | 'opencode'
+export type SourceKind =
+  | 'workbuddy'
+  | 'qoder'
+  | 'kimi'
+  | 'zcode'
+  | 'mimo'
+  | 'reasonix'
+  | 'dsh'
+  | 'traecn'
+  | 'opencode-desktop'
+  | 'opencode'
 
 export interface SnapshotSource {
   /** 数据根目录 */

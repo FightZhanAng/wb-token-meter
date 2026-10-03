@@ -16,6 +16,7 @@ _tmp_*
 
 # 开发过程中沉淀的工作笔记（本地知识，不是源码）
 .workbuddy/
+.buddywork/
 
 # 安全扫描插件的本地产物
 .mimosa/
