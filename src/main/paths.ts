@@ -140,6 +140,26 @@ export function traeCnDbPath(): string {
 }
 
 /**
+ * TRAE SOLO CN 的**模型目录** —— VS Code 通用的全局状态库，明文 SQLite。
+ *
+ * 注意它不在 traeCnDir() 底下：那个是 ai-agent 的私有目录（SQLCipher 账本
+ * 在那里），而模型目录由 Electron 宿主写在标准 userData 的 User\globalStorage 下。
+ * 两个库分属两个进程（渲染进程 vs ai-agent sidecar），所以「账本锁在哪个进程」
+ * 与「目录能不能读」是两件独立的事 —— 目录这一半不需要扫内存拿密钥。
+ */
+export function traeCnStatePath(): string {
+  const override = process.env['WB_TOKEN_METER_TRAECN_STATE']
+  if (override) return override
+  return join(
+    app.getPath('appData'),
+    'TRAE SOLO CN',
+    'User',
+    'globalStorage',
+    'state.vscdb'
+  )
+}
+
+/**
  * Qoder CN 的数据目录（IDE 与 CLI 共用这一份）。
  * 会话记录在 <dir>/projects/<项目转义名>/<会话id>.jsonl。
  * 同目录下还有 .auth、.models 等私有文件，采集器只扫 projects/。

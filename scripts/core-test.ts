@@ -61,7 +61,7 @@ import {
 import { collectZcodeSnapshot, parseConfigContextSizes, parseModelsDevContextSizes } from '../src/shared/zcode-collector'
 import { collectMimoSnapshot } from '../src/shared/mimo-collector'
 import { collectOpencodeSnapshot } from '../src/shared/opencode-collector'
-import { collectTraeCnSnapshot, probeTraeCnKey, traeCnFileStamp } from '../src/shared/traecn-collector'
+import { collectTraeCnSnapshot, probeTraeCnKey, readTraeCnContextWindows, traeCnFileStamp, windowKey } from '../src/shared/traecn-collector'
 import {
   CAPSULE_SOLID_BG,
   CAPSULE_THEME_ORDER,
@@ -2341,6 +2341,8 @@ interface TraeCnFixtureRow {
   at: number
   source: string
   deleted?: number
+  /** 顶层列；实物里与 extra_info.agent_id 同值，缺省会走 JSON 兜底 */
+  agentType?: string
   extra: string
 }
 
@@ -2356,18 +2358,38 @@ const buildTraeCnPlain = (file: string, rows: TraeCnFixtureRow[], titles: Array<
         created_at INTEGER,
         source TEXT,
         is_deleted INTEGER,
+        agent_type TEXT,
         extra_info TEXT
       );
       CREATE TABLE chat_session (session_id TEXT PRIMARY KEY, session_title TEXT);
     `)
     const insertRow = db.prepare(
-      'INSERT INTO server_history_info (history_id, session_id, conversation_id, created_at, source, is_deleted, extra_info) VALUES (?, ?, ?, ?, ?, ?, ?)'
+      'INSERT INTO server_history_info (history_id, session_id, conversation_id, created_at, source, is_deleted, agent_type, extra_info) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
     )
     for (const row of rows) {
-      insertRow.run(row.id, row.session, row.conversation, row.at, row.source, row.deleted ?? 0, row.extra)
+      insertRow.run(row.id, row.session, row.conversation, row.at, row.source, row.deleted ?? 0, row.agentType ?? null, row.extra)
     }
     const insertTitle = db.prepare('INSERT INTO chat_session (session_id, session_title) VALUES (?, ?)')
     for (const [id, title] of titles) insertTitle.run(id, title)
+  } finally {
+    db.close()
+  }
+}
+
+/**
+ * 建一份 state.vscdb 夹具（明文 VS Code 状态库）。
+ *
+ * 结构照实物：ItemTable(key, value)，键名带用户 id 前缀，值是一个
+ * { <agent 分组>: Model[] } 的 JSON，per-model 带 context_window_size。
+ * 特意复刻实物里**同一模型在不同分组下窗口不同**这一点 —— 那正是不能按模型名
+ * 取「所有分组最大值」的理由，夹具要盯住这条。
+ */
+const buildTraeCnState = (file: string, maps: Array<[string, unknown]>): void => {
+  const db = new DatabaseSync(file)
+  try {
+    db.exec('CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value BLOB)')
+    const insert = db.prepare('INSERT INTO ItemTable (key, value) VALUES (?, ?)')
+    for (const [key, value] of maps) insert.run(key, JSON.stringify(value))
   } finally {
     db.close()
   }
@@ -2464,6 +2486,8 @@ const traeCnExtra = (opts: {
   reasoning?: number
   model?: string
   workspace?: string
+  /** 与顶层 agent_type 同值（实物如此）；不给就不写这个字段 */
+  agent?: string
 }): string =>
   JSON.stringify({
     exact_prompt_tokens_v1: opts.prompt,
@@ -2471,13 +2495,22 @@ const traeCnExtra = (opts: {
     exact_cache_read_input_tokens_v1: opts.cache ?? 0,
     exact_reasoning_tokens_v1: opts.reasoning ?? 0,
     config_name: opts.model ?? 'solo-model',
-    workspace_folder: opts.workspace ?? 'D:\\AI\\demo'
+    workspace_folder: opts.workspace ?? 'D:\\AI\\demo',
+    ...(opts.agent ? { agent_id: opts.agent } : {})
   })
 
 const traeCnTitles: Array<[string, string]> = [
   ['s1', '设计 Token 看板'],
   ['s2', '修 CI']
 ]
+
+/*
+ * 夹具里的两个会话刻意跑在**不同分组**上（s1 = solo_agent_lite，s2 = solo_coder），
+ * 且两个分组下同名模型的窗口不一样 —— 这样「按分组查表」和「按模型名瞎猜」
+ * 两条路会给出不同答案，用例盯的就是这个差别。
+ */
+const TRAECN_AGENT_LITE = 'solo_agent_lite'
+const TRAECN_AGENT_CODER = 'solo_coder'
 
 /* 4 次真调用：input 1000 / output 100 / 缓存 620 / 思考 18；外加四种「不该进账」的行 */
 const traeCnRowsA: TraeCnFixtureRow[] = [
@@ -2487,7 +2520,16 @@ const traeCnRowsA: TraeCnFixtureRow[] = [
     session: 'agent-1',
     at: 1000,
     source: 'llm_default',
-    extra: traeCnExtra({ prompt: 300, output: 30, cache: 200, reasoning: 6, model: 'solo-1', workspace: 'D:\\AI\\p1' })
+    agentType: TRAECN_AGENT_LITE,
+    extra: traeCnExtra({
+      prompt: 300,
+      output: 30,
+      cache: 200,
+      reasoning: 6,
+      model: 'solo-1',
+      workspace: 'D:\\AI\\p1',
+      agent: TRAECN_AGENT_LITE
+    })
   },
   {
     id: 'h2',
@@ -2495,7 +2537,16 @@ const traeCnRowsA: TraeCnFixtureRow[] = [
     session: 'agent-1',
     at: 2000,
     source: 'llm_default',
-    extra: traeCnExtra({ prompt: 200, output: 20, cache: 120, reasoning: 4, model: 'solo-1', workspace: 'D:\\AI\\p1' })
+    agentType: TRAECN_AGENT_LITE,
+    extra: traeCnExtra({
+      prompt: 200,
+      output: 20,
+      cache: 120,
+      reasoning: 4,
+      model: 'solo-1',
+      workspace: 'D:\\AI\\p1',
+      agent: TRAECN_AGENT_LITE
+    })
   },
   {
     id: 'h3',
@@ -2503,7 +2554,16 @@ const traeCnRowsA: TraeCnFixtureRow[] = [
     session: 'agent-2',
     at: 3000,
     source: 'llm_default',
-    extra: traeCnExtra({ prompt: 300, output: 30, cache: 200, reasoning: 6, model: 'solo-2', workspace: 'D:\\AI\\p2' })
+    agentType: TRAECN_AGENT_CODER,
+    extra: traeCnExtra({
+      prompt: 300,
+      output: 30,
+      cache: 200,
+      reasoning: 6,
+      model: 'solo-2',
+      workspace: 'D:\\AI\\p2',
+      agent: TRAECN_AGENT_CODER
+    })
   },
   {
     id: 'h4',
@@ -2511,7 +2571,16 @@ const traeCnRowsA: TraeCnFixtureRow[] = [
     session: 'agent-2',
     at: 4000,
     source: 'llm_default',
-    extra: traeCnExtra({ prompt: 200, output: 20, cache: 100, reasoning: 2, model: 'solo-2', workspace: 'D:\\AI\\p2' })
+    agentType: TRAECN_AGENT_CODER,
+    extra: traeCnExtra({
+      prompt: 200,
+      output: 20,
+      cache: 100,
+      reasoning: 2,
+      model: 'solo-2',
+      workspace: 'D:\\AI\\p2',
+      agent: TRAECN_AGENT_CODER
+    })
   },
   // 工具调用不是模型调用：token 字段再大也不进账
   {
@@ -2544,7 +2613,15 @@ const traeCnRowsB: TraeCnFixtureRow[] = traeCnRowsA.map((row) =>
   row.id === 'h1'
     ? {
         ...row,
-        extra: traeCnExtra({ prompt: 4300, output: 30, cache: 200, reasoning: 6, model: 'solo-1', workspace: 'D:\\AI\\p1' })
+        extra: traeCnExtra({
+          prompt: 4300,
+          output: 30,
+          cache: 200,
+          reasoning: 6,
+          model: 'solo-1',
+          workspace: 'D:\\AI\\p1',
+          agent: TRAECN_AGENT_LITE
+        })
       }
     : row
 )
@@ -2571,12 +2648,56 @@ const traeCnDbFile = join(traeCnRoot, 'database.db')
 const traeCnWalFile = join(traeCnRoot, 'database.db-wal')
 writeFileSync(traeCnDbFile, Buffer.concat(traeCnSealedA.sealed))
 
+/* ── 模型目录夹具（state.vscdb） ───────────────────────────────────
+ *
+ * 两张 model_list_map 都放，键名分别带「用户id:」与「用户id_」前缀（实物如此）。
+ * solo-1 在两个分组下窗口不同（200000 / 64000），solo-2 只在 coder 下有；
+ * 另有一个 default=null 的模型，盯着「查不到就留 0」这条。
+ */
+const traeCnStateFile = join(traeCnRoot, 'state.vscdb')
+buildTraeCnState(traeCnStateFile, [
+  [
+    '1234567890123456:AI.agent.model.model_list_map',
+    {
+      [TRAECN_AGENT_LITE]: [
+        { name: 'solo-1', display_name: 'SOLO-1', context_window_size: { max: [1000000], default: 200000 } },
+        { name: 'solo-null', display_name: 'SOLO-NULL', context_window_size: { max: null, default: null } }
+      ]
+    }
+  ],
+  [
+    '1234567890123456_AI.agent.model.model_list_map',
+    {
+      [TRAECN_AGENT_CODER]: [
+        { name: 'solo-1', display_name: 'SOLO-1', context_window_size: { max: [1000000], default: 64000 } },
+        { name: 'solo-2', display_name: 'SOLO-2', context_window_size: { max: null, default: 128000 } }
+      ]
+    }
+  ]
+])
+
+const traeCnWindows = readTraeCnContextWindows(traeCnStateFile)
+check('按 分组/模型 取窗口：lite 的 solo-1 = 200000', traeCnWindows.get(windowKey(TRAECN_AGENT_LITE, 'solo-1')) === 200000)
+check('同模型在 coder 下是 64000 —— 分组才是判据，不是模型名', traeCnWindows.get(windowKey(TRAECN_AGENT_CODER, 'solo-1')) === 64000)
+check('coder 独有的 solo-2 = 128000', traeCnWindows.get(windowKey(TRAECN_AGENT_CODER, 'solo-2')) === 128000)
+check('default=null 的模型不收进表（留 0 比留假数字诚实）', !traeCnWindows.has(windowKey(TRAECN_AGENT_LITE, 'solo-null')))
+check('max 不作分母：lite 的 solo-1 不是 1000000', traeCnWindows.get(windowKey(TRAECN_AGENT_LITE, 'solo-1')) !== 1000000)
+check('查表键大小写不敏感', readTraeCnContextWindows(traeCnStateFile).get(windowKey('SOLO_AGENT_LITE', 'SOLO-1')) === 200000)
+check('状态库不存在时给空表而不是抛异常', readTraeCnContextWindows(join(traeCnRoot, 'nope.vscdb')).size === 0)
+check('路径为空时不崩', readTraeCnContextWindows('').size === 0)
+check('不是 SQLite 的文件按空表处理', readTraeCnContextWindows(traeCnDbFile).size === 0)
+
 check('密钥能过第 1 页 HMAC', probeTraeCnKey(traeCnDbFile, traeCnKey))
 check('错密钥过不了第 1 页 HMAC', !probeTraeCnKey(traeCnDbFile, Buffer.alloc(32, 0xff)))
 check('键长不是 32 字节直接判否', !probeTraeCnKey(traeCnDbFile, Buffer.alloc(16, 1)))
 check('库不存在时判否而不是抛异常', !probeTraeCnKey(join(traeCnRoot, 'nope.db'), traeCnKey))
 
-const traeCnA = collectTraeCnSnapshot({ dbPath: traeCnDbFile, key: traeCnKey, now: FIXED_NOW })
+const traeCnA = collectTraeCnSnapshot({
+  dbPath: traeCnDbFile,
+  key: traeCnKey,
+  statePath: traeCnStateFile,
+  now: FIXED_NOW
+})
 check('读到 4 次调用（工具行 / 已删行 / 空分项行都不算）', traeCnA.totals.calls === 4, String(traeCnA.totals.calls))
 check('input = 1000', traeCnA.totals.inputTokens === 1000, String(traeCnA.totals.inputTokens))
 check('output = 100', traeCnA.totals.outputTokens === 100, String(traeCnA.totals.outputTokens))
@@ -2594,9 +2715,20 @@ check(
     traeCnA.totals.inputTokens + traeCnA.totals.outputTokens
 )
 check('source 标记与页行数', traeCnA.kind === 'traecn' && traeCnA.source.files === 1 && traeCnA.source.dbRows === 6)
-check('窗口大小库里没有 —— 只报已用', traeCnA.sessions.every((s) => s.contextSize === 0 && s.contextUsed > 0))
+check(
+  '水位按会话自己的分组算：s1(lite)=200000 / s2(coder)=128000',
+  traeCnA.sessions.find((s) => s.sessionId === 's1')?.contextSize === 200000 &&
+    traeCnA.sessions.find((s) => s.sessionId === 's2')?.contextSize === 128000,
+  traeCnA.sessions.map((s) => `${s.sessionId}=${s.contextSize}`).join(' ')
+)
+check('已用量仍取最后一次调用的 input', traeCnA.sessions.every((s) => s.contextUsed > 0))
 
-const traeCnNoKey = collectTraeCnSnapshot({ dbPath: traeCnDbFile, key: null, now: FIXED_NOW })
+const traeCnNoKey = collectTraeCnSnapshot({
+  dbPath: traeCnDbFile,
+  key: null,
+  statePath: traeCnStateFile,
+  now: FIXED_NOW
+})
 check(
   '没钥匙时给的是 warning 而不是异常',
   traeCnNoKey.totals.calls === 0 && traeCnNoKey.warnings.some((w) => w.includes('密钥'))
@@ -2607,6 +2739,12 @@ const traeCnEmptyPath = collectTraeCnSnapshot({ dbPath: '', key: traeCnKey, now:
 check('路径为空不崩', traeCnEmptyPath.sessions.length === 0 && traeCnEmptyPath.warnings.length > 0)
 const traeCnWrongKey = collectTraeCnSnapshot({ dbPath: traeCnDbFile, key: Buffer.alloc(32, 0xff), now: FIXED_NOW })
 check('错钥匙不崩、显示 0 并给 warning', traeCnWrongKey.totals.calls === 0 && traeCnWrongKey.warnings.length > 0)
+
+check(
+  '没钥时那条 warning 带「密钥」二字 —— 主进程正是靠它识别并过滤',
+  traeCnNoKey.warnings.some((warning) => warning.includes('密钥')),
+  traeCnNoKey.warnings.join(' · ')
+)
 
 /* WAL：B 态的帧 + 一帧没提交的尾巴 + 一帧上一代 salt 的残留。
    残留帧若被回放，第 1 页会被写坏 —— 所以「input 变成 5000 且没有 warning」
@@ -2631,7 +2769,12 @@ writeFileSync(
   )
 )
 
-const traeCnB = collectTraeCnSnapshot({ dbPath: traeCnDbFile, key: traeCnKey, now: FIXED_NOW })
+const traeCnB = collectTraeCnSnapshot({
+  dbPath: traeCnDbFile,
+  key: traeCnKey,
+  statePath: traeCnStateFile,
+  now: FIXED_NOW
+})
 check('WAL 回放生效：input 从 1000 变成 5000', traeCnB.totals.inputTokens === 5000, String(traeCnB.totals.inputTokens))
 check('残留旧 salt 帧与未提交尾巴都被丢掉（库仍然完整）', traeCnB.warnings.length === 0, traeCnB.warnings.join(' · '))
 check('WAL 回放后仍是 4 次调用 / 2 个会话', traeCnB.totals.calls === 4 && traeCnB.totals.sessions === 2)
@@ -2653,6 +2796,15 @@ const traeCnRealDir =
   process.env['WB_TOKEN_METER_TRAECN_DIR'] ??
   join(process.env['APPDATA'] ?? join(homedir(), 'AppData', 'Roaming'), 'TRAE SOLO CN', 'ModularData', 'ai-agent')
 const traeCnRealDb = join(traeCnRealDir, 'database.db')
+const traeCnRealState =
+  process.env['WB_TOKEN_METER_TRAECN_STATE'] ??
+  join(
+    process.env['APPDATA'] ?? join(homedir(), 'AppData', 'Roaming'),
+    'TRAE SOLO CN',
+    'User',
+    'globalStorage',
+    'state.vscdb'
+  )
 const traeCnKeyHex = process.env['WB_TOKEN_METER_TRAECN_KEY'] ?? ''
 
 /* 密钥只在 TraeWork 进程的内存里，磁盘 / 注册表 / DPAPI 全无落点 ——
@@ -2664,7 +2816,12 @@ if (!existsSync(traeCnRealDb) || !/^[0-9a-fA-F]{64}$/.test(traeCnKeyHex)) {
   const traeCnRealKey = Buffer.from(traeCnKeyHex, 'hex')
   check('真实库的第 1 页 HMAC 认这个密钥', probeTraeCnKey(traeCnRealDb, traeCnRealKey))
 
-  const traeCnReal = collectTraeCnSnapshot({ dbPath: traeCnRealDb, key: traeCnRealKey, now: FIXED_NOW })
+  const traeCnReal = collectTraeCnSnapshot({
+    dbPath: traeCnRealDb,
+    key: traeCnRealKey,
+    statePath: traeCnRealState,
+    now: FIXED_NOW
+  })
   check('读到调用', traeCnReal.totals.calls > 0, `${traeCnReal.totals.calls} 次`)
   check('缓存命中不超过输入（input 已含缓存读）', traeCnReal.totals.cachedTokens <= traeCnReal.totals.inputTokens)
   check('思考不超过输出（reasoning 是 output 的子集）', traeCnReal.totals.reasoningTokens <= traeCnReal.totals.outputTokens)
@@ -2674,6 +2831,28 @@ if (!existsSync(traeCnRealDb) || !/^[0-9a-fA-F]{64}$/.test(traeCnKeyHex)) {
       traeCnReal.totals.inputTokens + traeCnReal.totals.outputTokens
   )
   check('至少一个会话带标题', traeCnReal.sessions.some((s) => s.title.length > 0))
+
+  // 窗口这一路不需要密钥，所以即便没有 state.vscdb 也不该崩；有了就必须命中
+  const traeCnRealWindows = readTraeCnContextWindows(traeCnRealState)
+  if (existsSync(traeCnRealState)) {
+    check(
+      '真实模型目录读出窗口（分组/模型 复合键）',
+      traeCnRealWindows.size > 0,
+      `${traeCnRealWindows.size} 条`
+    )
+    const withSize = traeCnReal.sessions.filter((s) => s.contextSize > 0)
+    check(
+      '真实账里至少一个会话查到窗口',
+      withSize.length > 0,
+      withSize.map((s) => `${s.model}=${s.contextSize}`).slice(0, 3).join(' ')
+    )
+    // 水位不能超过 100%：窗口取错了（拿了 max 或串了分组）这里就会露馅
+    check(
+      '水位不超过 100%',
+      withSize.every((s) => s.contextUsed <= s.contextSize),
+      withSize.filter((s) => s.contextUsed > s.contextSize).length + ' 个越界'
+    )
+  }
 }
 
 /* ---------------------------------------------- 6b. Qoder CN 数据源 */

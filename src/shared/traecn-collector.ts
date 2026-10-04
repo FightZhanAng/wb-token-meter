@@ -43,9 +43,29 @@
  *
  * 库在被写入时快照**仍可能撕裂**，所以这里带重试，拿 integrity_check 兜底。
  *
+ * ── 上下文窗口 ─────────────────────────────────────────────────
+ *
+ * 账本里**没有**窗口大小 —— database.db 是用量账，记的是「这次花了多少」，
+ * 不是「允许花多少」。窗口在另一个库里：Electron 宿主的全局状态库
+ * `%APPDATA%\TRAE SOLO CN\User\globalStorage\state.vscdb`（**明文 SQLite，
+ * 不需要密钥**），ItemTable 里两张 `…AI.agent.model.model_list_map` 键存着
+ * 完整的模型目录，per-model 带 `context_window_size: {max, default}`。
+ *
+ * 查表的键是 `${agent_type}/${config_name}`，agent_type 取自**账本自己的顶层列**
+ * （server_history_info.agent_type，实测与 extra_info.agent_id 同值），不是猜的。
+ * 这一点是窗口唯一靠谱的判据：同一个模型在不同 agent 分组下窗口不一样 ——
+ * 实测 deepseek-v4.1-flash 在 solo_agent_lite 下 default=200000，
+ * 在 chat_v3 下只有 116000。所以「按模型名取所有分组的最大值」那种退让是错的，
+ * 宁可查不到留 0，也不要报一个偏大的分母。
+ *
+ * 取 default 而不是 max：max 是「可切档位的上限」（如 [1000000]），而水位要
+ * 反映用户实际被限制在多少。拿 max 当分母会把 200000 的窗口报成 20%，
+ * 比不报更误导。开了 max 模式（max_mode_by_agent_model 非空）时才该用 max，
+ * 本机那张表是空的，先不接。
+ *
  * ── 已知边界 ───────────────────────────────────────────────────
  *
- * - 上下文窗口大小库里没有（contextSize 恒 0），界面会退化成「只报已用 token」。
+ * - 模型下线 / 分组改名会让查表落空，此时仍退化成「只报已用 token」。
  * - 会话标题取 chat_session.session_title，按 conversation_id 关联
  *   （server_history_info.conversation_id === chat_session.session_id，实测对得上）。
  * - 压缩标记（summarized_above / micro_compacted）本机全为 0。库里若哪天按压缩
@@ -55,7 +75,7 @@
 import { closeSync, copyFileSync, existsSync, mkdtempSync, openSync, readFileSync, readSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { createDecipheriv, createHmac, pbkdf2Sync } from 'node:crypto'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { buildSnapshot, type SourceSession } from './aggregate'
 import type { CallRecord, Snapshot } from './types'
@@ -231,6 +251,103 @@ function decryptOnce(dbPath: string, key: Buffer, dir: string): SnapshotAttempt 
   return { plainPath, pages, walFrames: frames.size, integrity }
 }
 
+/* ------------------------------------------------------------ 模型目录 → 窗口 */
+
+/**
+ * 读 state.vscdb 的模型目录，摊成 `${agent分组}/${模型名}` → 上下文窗口。
+ *
+ * 为什么单独一个库、单独一条读取路径：database.db 是 ai-agent sidecar 的
+ * SQLCipher 账本（要扫进程内存才拿得到钥匙），而模型目录是 Electron 宿主写的
+ * 明文 VS Code 状态库。两者进程不同、加密与否不同，**目录这一半不依赖密钥** ——
+ * 所以别把它塞进解密流程里，那会让「TraeWork 没在跑就全 0」这条限制平白扩大
+ * 到水位上。
+ *
+ * 只取 context_window_size.default（生效值），刻意忽略 max：见文件头的说明。
+ * default 为 null / 0 的条目直接跳过 —— 那档模型这个源报不出窗口，留 0 比
+ * 留一个假数字诚实。
+ */
+export function readTraeCnContextWindows(statePath: string): Map<string, number> {
+  const windows = new Map<string, number>()
+  if (!statePath || !existsSync(statePath)) return windows
+
+  const attempt = (file: string): Map<string, number> | null => {
+    let db: DatabaseSync | null = null
+    try {
+      db = new DatabaseSync(file, { readOnly: true })
+      const rows = db
+        .prepare("SELECT value FROM ItemTable WHERE key LIKE '%model_list_map'")
+        .all() as Array<{ value?: unknown }>
+      for (const row of rows) {
+        collectWindowsFromMap(text(row.value), windows)
+      }
+      return windows
+    } catch {
+      return null
+    } finally {
+      try {
+        db?.close()
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  // 先试只读直开：这条最便宜。state.vscdb 带 -wal，TraeWork 正在跑时直开
+  // 也能读到 WAL 里的最新数据（与 zcode 的 readDatabase 同一套分寸）。
+  if (attempt(statePath)) return windows
+
+  // 直开失败就三件套一起拷到临时目录再读 —— 活库被独占持锁时只有这条路。
+  const dir = mkdtempSync(join(tmpdir(), 'wbtm-traecn-state-'))
+  try {
+    const shot = join(dir, basename(statePath))
+    for (const ext of ['', '-wal', '-shm']) {
+      const src = statePath + ext
+      if (existsSync(src)) copyFileSync(src, shot + ext)
+    }
+    return attempt(shot) ?? windows
+  } catch {
+    return windows
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+/** 单份 model_list_map 的结构是 { <分组>: Model[] }，逐个收进 windows */
+function collectWindowsFromMap(raw: string, windows: Map<string, number>): void {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw || '{}')
+  } catch {
+    return
+  }
+  if (!parsed || typeof parsed !== 'object') return
+
+  for (const [agent, models] of Object.entries(parsed as Record<string, unknown>)) {
+    if (!Array.isArray(models)) continue
+    for (const model of models as Array<Record<string, unknown>>) {
+      const name = text(model?.['name'])
+      if (!name) continue
+      // 两个分组表（带下划线 / 不带）里同一个模型可能重复出现；同键取大的那个，
+      // 免得「先遍历到的那份恰好是 default=null 的旧档」把真值盖掉。
+      const size = windowOf(model)
+      if (size <= 0) continue
+      const key = windowKey(agent, name)
+      if (size > (windows.get(key) ?? 0)) windows.set(key, size)
+    }
+  }
+}
+
+function windowOf(model: Record<string, unknown> | undefined): number {
+  const cws = model?.['context_window_size']
+  if (!cws || typeof cws !== 'object') return 0
+  return count((cws as Record<string, unknown>)['default'])
+}
+
+/** 查表键。两边都小写：账本与目录目前都是原样小写，但别把匹配押在这上面 */
+export function windowKey(agent: string, model: string): string {
+  return `${agent.toLowerCase()}/${model.toLowerCase()}`
+}
+
 /* ------------------------------------------------------------ 行 → 调用 */
 
 function text(value: unknown): string {
@@ -244,11 +361,28 @@ function count(value: unknown): number {
 
 /* ------------------------------------------------------------ 聚合 */
 
+/**
+ * CallRecord 上多带一个 agent 分组。
+ *
+ * 单独定义而不是往共享的 CallRecord 上加字段：只有这个源需要分组，
+ * 而 buildSnapshot 只认 CallRecord 的通用字段，多一个可选属性也无害 ——
+ * 但类型上保留独立定义，好让「为什么这里多一个字段」写在明面上。
+ */
+type TraeCnCall = CallRecord & { agentType: string }
+
 export interface TraeCnCollectOptions {
   /** database.db 的完整路径 */
   dbPath: string
   /** 32 字节裸密钥；null 表示还没取到（TraeWork 没在运行） */
   key: Buffer | null
+  /**
+   * 模型目录 state.vscdb 的完整路径 —— 上下文窗口从这里查。
+   *
+   * **与 key 不同：这里不需要密钥**（明文库）。所以刻意不让它跟着 key 一起
+   * 为空：key 拿不到时整张账是 0，水位自然也算不出来，这条依赖是合理的；
+   * 但反过来说，光是窗口这条路绝不能被 key 拖累，所以它独立传。
+   */
+  statePath?: string
   /** 用于判定「今天」的时间戳，默认取当前时间；测试时可注入固定值 */
   now?: number
 }
@@ -266,6 +400,9 @@ export function collectTraeCnSnapshot(options: TraeCnCollectOptions): Snapshot {
   const warnings: string[] = []
   const empty = (): Snapshot =>
     buildSnapshot([], { kind: 'traecn', dir, files: 0, dbRows: 0, now, warnings })
+
+  // 窗口目录独立于密钥：key 为空也先读，省得 TraeWork 没开时把水位一并丢掉
+  const windows = options.statePath ? readTraeCnContextWindows(options.statePath) : new Map<string, number>()
 
   if (!options.key) {
     warnings.push('没取到 TRAE SOLO CN 的数据库密钥（TraeWork CN 没在运行？），用量将显示为 0')
@@ -297,12 +434,14 @@ export function collectTraeCnSnapshot(options: TraeCnCollectOptions): Snapshot {
 
     const db = new DatabaseSync(plainPath, { readOnly: true })
     let dbRows = 0
-    const calls: CallRecord[] = []
+    const calls: TraeCnCall[] = []
     try {
-      // is_deleted 现在是 NULL（没删过）；留着这层过滤，删过的行不该再算一次
+      // is_deleted 现在是 NULL（没删过）；留着这层过滤，删过的行不该再算一次。
+      // agent_type 是顶层列（实测与 extra_info.agent_id 同值），取它而不解 JSON：
+      // 窗口查表按这个分组走，而单行 extra_info 坏了不该连累分组一起丢。
       const rows = db
         .prepare(
-          `SELECT history_id, session_id, conversation_id, created_at, extra_info
+          `SELECT history_id, session_id, conversation_id, created_at, agent_type, extra_info
              FROM server_history_info
             WHERE source = 'llm_default' AND COALESCE(is_deleted, 0) = 0`
         )
@@ -329,6 +468,9 @@ export function collectTraeCnSnapshot(options: TraeCnCollectOptions): Snapshot {
           sessionId: text(row.conversation_id) || text(row.session_id),
           projectDir: workspace || text(extra['workspace_id']) || text(row.conversation_id),
           model: text(extra['config_name']) || text(extra['auto_router_model_name_v1']) || '未知模型',
+          // agent_type 偶尔缺失（早期迁移的行），退到 JSON 里的 agent_id ——
+          // 两者实测同值，所以这只是兜底，不是第二条口径
+          agentType: text(row.agent_type) || text(extra['agent_id']),
           timestamp: count(row.created_at) * 1000, // 库里是秒
           inputTokens,
           outputTokens,
@@ -345,7 +487,7 @@ export function collectTraeCnSnapshot(options: TraeCnCollectOptions): Snapshot {
         if (id && title) titles.set(id, title)
       }
 
-      const grouped = new Map<string, CallRecord[]>()
+      const grouped = new Map<string, TraeCnCall[]>()
       for (const call of calls) {
         const list = grouped.get(call.sessionId)
         if (list) list.push(call)
@@ -356,14 +498,17 @@ export function collectTraeCnSnapshot(options: TraeCnCollectOptions): Snapshot {
       for (const [sessionId, sessionCalls] of grouped) {
         sessionCalls.sort((a, b) => a.timestamp - b.timestamp)
         const last = sessionCalls[sessionCalls.length - 1]
+        // 窗口按「最后那次调用」查 —— 与 ZCode / Kimi 同口径：会话中途换过
+        // 模型或分组时，水位要对着当前这个算。查不到就是 0，界面退化成
+        // 「上下文 N token」，那比报一个错的分母诚实。
+        const windowSize = windows.get(windowKey(last.agentType, last.model)) ?? 0
         sessions.push({
           sessionId,
           projectDir: last.projectDir,
           cwd: last.projectDir,
           title: titles.get(sessionId) ?? '',
-          // 窗口大小库里没有，只能报已用；界面会退化成「上下文 N token」
           contextUsed: last.inputTokens,
-          contextSize: 0,
+          contextSize: windowSize,
           lastActivity: last.timestamp,
           archived: false,
           calls: sessionCalls

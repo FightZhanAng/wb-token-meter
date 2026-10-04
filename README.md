@@ -252,6 +252,7 @@ ZCode / Reasonix 的 input 都含缓存。所以：
 |---|---|---|
 | 用量库 | `%APPDATA%\TRAE SOLO CN\ModularData\ai-agent\database.db` | **SQLCipher 4 加密**的 SQLite；`server_history_info` 表里 `source = 'llm_default'` 那些行的 `extra_info` JSON：`exact_prompt_tokens_v1` / `exact_output_tokens_v1` / `exact_cache_read_input_tokens_v1` / `exact_reasoning_tokens_v1`、模型 `config_name`、工作目录 `workspace_folder` |
 | 会话标题 | 同库 `chat_session` 表 | `session_title`，按 `conversation_id` 关联（实测它等于 `chat_session.session_id`） |
+| **模型目录** | `%APPDATA%\TRAE SOLO CN\User\globalStorage\state.vscdb` | **明文** SQLite（VS Code 通用状态库，**不需要密钥**）；`ItemTable` 里两张 `…AI.agent.model.model_list_map` 键，`context_window_size.default` 就是上下文窗口 |
 
 ```
 输入 = exact_prompt_tokens_v1          ← 已含缓存读，跟 WorkBuddy 那一档一样
@@ -285,10 +286,22 @@ ZCode / Reasonix 的 input 都含缓存。所以：
 密钥相同、HMAC 照样通过，一起回放就把库污染成 malformed（实测不修是 0/4 干净快照，
 修完 4/4）。
 
-已知边界：上下文窗口大小库里没有（水位只报已用量）；解密只在内存 / `%TEMP%` 里做，
-用完即删，不碰原始文件。20 秒一轮的刷新按 db + `-wal` 的文件戳（size + mtime）判
-「库动没动」，没动就直接复用上一份快照 —— TraeWork 关着的时候库是死的，重解只是
-把同一个解密价每轮再付一遍；手动「刷新」绕开缓存，永远真读。
+**上下文窗口在另一个库里，且窗口是按 agent 分组配的。** `database.db` 是用量账，
+只记「这次花了多少」；窗口大小在 Electron 宿主的 `state.vscdb` 里，明文、不用密钥。
+查表的键是 `${agent_type}/${config_name}`，其中 `agent_type` 取自**账本自己的顶层列**
+（`server_history_info.agent_type`，实测与 `extra_info.agent_id` 同值）—— 不是猜的。
+
+这一点必须当心：**同一个模型在不同分组下窗口不一样**。实测
+`deepseek-v4.1-flash` 在 `solo_agent_lite` 下 `default = 200000`，在 `chat_v3` 下只有
+`116000`。所以「按模型名取所有分组的最大值」那种退让是错的，宁可查不到留 0。
+`context_window_size` 的 `max` 是可切档位的上限（如 `[1000000]`），**不作分母** ——
+拿它当分母会把 200000 的窗口报成 20%，比不报更误导；只有开了 max 模式
+（`max_mode_by_agent_model` 非空，本机是 `{}`）才该改用它。
+
+已知边界：模型下线 / 分组改名会让查表落空，此时仍退化成「只报已用 token」；解密只在
+内存 / `%TEMP%` 里做，用完即删，不碰原始文件。20 秒一轮的刷新按 db + `-wal` 的文件戳
+（size + mtime）判「库动没动」，没动就直接复用上一份快照 —— TraeWork 关着的时候库是
+死的，重解只是把同一个解密价每轮再付一遍；手动「刷新」绕开缓存，永远真读。
 
 
 ### OpenCode 桌面端（只有 token）
@@ -402,6 +415,7 @@ pnpm dist          # 打包 Windows 安装包与免安装版到 release/
 | `WB_TOKEN_METER_REASONIX_STATS_DIR` | 覆盖 Reasonix 新版按天流水目录，默认 `<APPDATA>\Roaming\reasonix\stats` |
 | `WB_TOKEN_METER_DSH_DIR` | 覆盖 DeepSeek Harness 数据目录（会话日志在里面），默认 `~/.dsh` |
 | `WB_TOKEN_METER_TRAECN_DIR` | 覆盖 TRAE SOLO CN 数据目录（加密用量库 `database.db` 在里面），默认 `%APPDATA%\TRAE SOLO CN\ModularData\ai-agent` |
+| `WB_TOKEN_METER_TRAECN_STATE` | 覆盖 TRAE SOLO CN 的模型目录（明文 `state.vscdb`，上下文窗口在里面），默认 `%APPDATA%\TRAE SOLO CN\User\globalStorage\state.vscdb` |
 | `WB_TOKEN_METER_TRAECN_KEY` | 直接给出 TRAE SOLO CN 的库密钥（64 位 hex）—— 只给 `test:core` 的真实数据断言用，免得为了跑一次自检去扫 21 秒内存 |
 | `WB_TOKEN_METER_OPENCODE_DIR` | 覆盖 OpenCode 数据目录（用量库 `opencode.db` 与凭证 `auth.json` 都在里面），默认 `~/.local/share/opencode` |
 | `WB_TOKEN_METER_OPENCODE_CACHE_DIR` | 覆盖 OpenCode 引擎的缓存目录（模型目录 `models.json` 在里面），默认 `~/.cache/opencode` |
@@ -673,9 +687,13 @@ solid 降级模式（透明不可见时的逃生通道）没有这套待遇 —�
   不并进父会话，会作为独立会话出现在排行里（与 ZCode 的 `subagent_child` 同样处理）。
 - DeepSeek Harness 的会话日志是追加写的，正在跑的那个会话可能还没把最后一步 flush 下来，
   所以「今日」会滞后几十秒；首次全量扫描本机 15 个会话约 0.5 秒，之后靠 mtime 缓存跳过。
-- TRAE SOLO CN 的库密钥只在运行中的 TraeWork 进程内存里，**App 没在跑时这个源只能显示 0**
-  并给一条说明；密钥一旦取到就缓存，TraeWork 重启换钥靠「第 1 页 HMAC 验不过」发现并重扫
-  （一次全量扫描约 21 秒）。库在被写入时快照可能撕裂，解密带重试兜底。
+- TRAE SOLO CN 的**用量库**密钥只在运行中的 TraeWork 进程内存里，**App 没在跑时
+  token 显示 0** 并给一条说明；密钥一旦取到就缓存，TraeWork 重启换钥靠「第 1 页
+  HMAC 验不过」发现并重扫（一次全量扫描约 21 秒）。库在被写入时快照可能撕裂，解密
+  带重试兜底。
+- 但 TRAE SOLO CN 的**上下文窗口不受这条限制**：它在明文的 `state.vscdb` 里，
+  不需要密钥。窗口查表按 `${agent_type}/${config_name}`（`agent_type` 取自账本顶层列），
+  模型下线或分组改名才会查不到而退化成「只报已用 token」。
 - OpenCode 桌面端与 CLI **共用同一个引擎库**，拆不出哪条会话来自桌面端
   （`session.version` 只是引擎版本号）—— 面板上的「OpenCode」就是这整本账。
 - OpenCode 的库比别的源大得多（本机 732 MB，`event` 表占大一半），所以这个源

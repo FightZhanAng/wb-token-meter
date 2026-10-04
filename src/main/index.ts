@@ -42,6 +42,7 @@ import {
   reasonixStatsDir,
   traeCnDbPath,
   traeCnDir,
+  traeCnStatePath,
   workbuddyDir,
   zcodeDir
 } from './paths'
@@ -352,7 +353,7 @@ function refresh(force = false): Snapshot | null {
         // 复用原数组会让提示在缓存里越积越多。
         snapshot = { ...traeCnStampCache.snapshot, warnings: [...traeCnStampCache.snapshot.warnings] }
       } else {
-        snapshot = collectTraeCnSnapshot({ dbPath, key: traeCnKey })
+        snapshot = collectTraeCnSnapshot({ dbPath, key: traeCnKey, statePath: traeCnStatePath() })
         if (stamp) traeCnStampCache = { stamp, snapshot }
       }
       if (!traeCnKey && traeCnKeyProbe) {
