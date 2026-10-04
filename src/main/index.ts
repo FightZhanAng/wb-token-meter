@@ -64,11 +64,11 @@ const SMOKE_EXIT = process.env['WB_TOKEN_METER_SMOKE_EXIT'] === '1'
 const SMOKE_TIMEOUT_MS = 120_000
 
 /**
- * 首屏那一拍延后多久量。
+ * 切到 traecn 之后等多久量首屏。
  *
- * 要够早 —— 早到 traecn 还在扫密钥（那台机器实测 ~21 秒），早到能看见骨架；
- * 也要够晚 —— 晚到首帧真的画出来了（否则量到的是空白页，不是「画成了 0」）。
- * 800ms 落在两者之间：首屏那一下 refresh() 是同步的，早于它画不出东西。
+ * 要够晚 —— 晚到首帧真的画出来了（否则量到的是空白页，不是「画成了 0」）；
+ * 也只要够晚 —— traecn 要扫二十几秒密钥，这段等待**不会**盖住它。800ms
+ * 落在两者之间：首屏那一下 refresh() 是同步的，早于它画不出东西。
  */
 const SMOKE_FIRST_PAINT_MS = 800
 
@@ -669,12 +669,24 @@ function bootstrap(): void {
      * 后面那些度量跑的时候真值早就到了，量到的只会是稳定态。
      *
      * 前提是当前源就是 traecn，否则量到的会是别的源（毫秒级，本来就不该有骨架）。
-     * 自检默认源是 workbuddy，所以先切过去，等它进 pending 再量 —— 用切源
-     * 触发而不是改用户设置，免得把人家配置改了不换回来。
+     * 自检默认源是 workbuddy，所以先切过去再量。
+     *
+     * **切源就是改用户设置**：渲染层的 switchSource 走的是
+     * `api.updateSettings({ source })`，不是某个只影响本次会话的旁路。所以这里
+     * 必须自己还原 —— 下面切换循环末尾那个 `patchSettings({ source: sourceBefore })`
+     * 救不了场：它的 sourceBefore 是**在 1200ms 之后**才捕获的，那时设置已经被
+     * 这一段改成 traecn 了，还原等于没还原。用户下次启动会停在一个他从没选过的源上。
      */
     setTimeout(() => {
       const win = mainWindow
       if (!win || win.isDestroyed()) return
+      // 自己动手前先记住原样，还原时只认这一个值 —— 不用下游那个（它捕获得更晚）
+      const sourceAtEntry = settingsStore?.settings.source ?? 'workbuddy'
+      const restore = (): void => {
+        if (settingsStore?.settings.source !== sourceAtEntry) {
+          patchSettings({ source: sourceAtEntry })
+        }
+      }
       const measure = (): void => {
         void win.webContents
           .executeJavaScript(
@@ -690,7 +702,9 @@ function bootstrap(): void {
             smoke('first-paint', {
               ...first,
               // 核心一条：挂着骨架时绝不能同时画着数字 —— 那是「读完了读出 0」
-              ok: (first['blocks'] as number) === 0 || ((first['headline'] as string[]) ?? []).length === 0
+              ok: (first['blocks'] as number) === 0 || ((first['headline'] as string[]) ?? []).length === 0,
+              // 这一段动过用户设置，报告里必须能自证还原回去了
+              restoredFrom: sourceAtEntry
             })
             return win.webContents.capturePage()
           })
@@ -700,8 +714,11 @@ function bootstrap(): void {
             writeFileSync(join(dir, 'window-first-paint.png'), image.toPNG())
           })
           .catch(() => undefined)
+          // 还原放在最后，且**不挂在 measure 的链上**：截图或度量失败时也要还原，
+          // 否则一次自检失败就把用户设置留在 traecn 上
+          .finally(() => restore())
       }
-      if (settingsStore?.settings.source === 'traecn') {
+      if (sourceAtEntry === 'traecn') {
         measure()
       } else {
         void win.webContents
@@ -725,6 +742,9 @@ function bootstrap(): void {
           .then(() => new Promise((resolve) => setTimeout(resolve, SMOKE_FIRST_PAINT_MS)))
           .then(measure)
           .catch(() => undefined)
+          // 中途失败（按钮没找到、窗口没了）同样要还原 —— 这条链上的 catch
+          // 不会走进 measure 的 finally
+          .finally(() => restore())
       }
     }, 1200)
 

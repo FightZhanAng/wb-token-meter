@@ -151,7 +151,11 @@ export interface Snapshot {
    * 扫完再推真的那张。两张都是合法的 Snapshot，光看内容分不出「读完了，确实是 0」
    * 和「还没读到，暂且是 0」。这个字段就是那个区别。
    *
-   * 只有首屏 / 切源那一刻会为 true，稳定态恒为 undefined。
+   * 只有主进程给得出具体档位，且只在首屏 / 切源那一刻；稳定态恒为 undefined。
+   *
+   * 渲染层还有第二个来源：切源后新快照还没到时，用 `snapshot.kind !== source`
+   * 合成一个 `collect` —— 那段时间主进程**一个档位都没产出过**，所以别去
+   * index.ts 里找 `'collect'` 的赋值点，它只存在于 App.tsx 的兜底里。
    */
   pending?: PendingReason
 }
