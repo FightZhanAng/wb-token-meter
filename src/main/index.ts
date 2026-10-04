@@ -63,6 +63,15 @@ const SMOKE_EXIT = process.env['WB_TOKEN_METER_SMOKE_EXIT'] === '1'
 // 进程既不报错也不退出，调用方只能一直等。正常一轮约 40 秒，给到 2 分钟足够宽松。
 const SMOKE_TIMEOUT_MS = 120_000
 
+/**
+ * 首屏那一拍延后多久量。
+ *
+ * 要够早 —— 早到 traecn 还在扫密钥（那台机器实测 ~21 秒），早到能看见骨架；
+ * 也要够晚 —— 晚到首帧真的画出来了（否则量到的是空白页，不是「画成了 0」）。
+ * 800ms 落在两者之间：首屏那一下 refresh() 是同步的，早于它画不出东西。
+ */
+const SMOKE_FIRST_PAINT_MS = 800
+
 // 自检时给更新检查注入一个假版本号：既不真去打网络，又能让更新界面被完整渲染到。
 // 必须在 ensureUpdater() 之前设 —— UpdateController 在构造时就把这个值读走了。
 if (SMOKE && !process.env['WB_TOKEN_METER_FAKE_UPDATE']) {
@@ -357,6 +366,9 @@ function refresh(force = false): Snapshot | null {
         if (stamp) traeCnStampCache = { stamp, snapshot }
       }
       if (!traeCnKey && traeCnKeyProbe) {
+        // 说真话：扫描还没跑完时不能说「App 没在跑」—— 那时候根本还不知道
+        // TraeWork 开没开。这两种情况对用户的动作完全不同（等 vs 去启动它），
+        // 混成一条提示只会让人以为真出问题了。
         snapshot.warnings.push(
           traeCnKeyProbe.pids.length
             ? `TRAE SOLO CN 正在运行（pid ${traeCnKeyProbe.pids.join(',')}），但没在那个进程的内存里认出数据库密钥`
@@ -369,6 +381,15 @@ function refresh(force = false): Snapshot | null {
       // 钥已缓存时是立即 resolve 的，无条件 refresh 会自己触发自己 —— 每一圈
       // 都是一次全量解密（拷库 + 逐页 AES + 回放 WAL），主进程从此忙死（卡死根因）。
       const hadTraeCnKey = traeCnKey !== null
+      // 扫密钥这段空窗必须如实标出来：上面那张「全 0」快照不是读完了读出 0，
+      // 而是一行都没读到。界面靠这个字段画骨架而不是画 0（见 types 的 PendingReason）。
+      if (!traeCnKey && !traeCnKeyProbe) {
+        snapshot.pending = 'key-scan'
+        // 采集器自己那条「没取到密钥（没在运行？）」在扫描期间是**假的** ——
+        // 那时候还没开始扫，根本不知道 TraeWork 开没开。留着它等于同时说
+        // 「正在读」和「读不到」，界面会自己打架。骨架里本来就会说明在等什么。
+        snapshot.warnings = snapshot.warnings.filter((warning) => !warning.includes('密钥'))
+      }
       void ensureTraeCnKey().then(() => {
         if (!hadTraeCnKey && traeCnKey && currentSource() === 'traecn') refresh()
       })
@@ -642,6 +663,71 @@ function bootstrap(): void {
   timer.unref?.()
 
   if (SMOKE) {
+    /*
+     * 首屏那一拍单独量：traecn 启动时要扫密钥，那十几秒里界面**不能**画成一个
+     * 假装读完了的 0。这是这套交互的验收点，所以放在自检计时器起跑之前 ——
+     * 后面那些度量跑的时候真值早就到了，量到的只会是稳定态。
+     *
+     * 前提是当前源就是 traecn，否则量到的会是别的源（毫秒级，本来就不该有骨架）。
+     * 自检默认源是 workbuddy，所以先切过去，等它进 pending 再量 —— 用切源
+     * 触发而不是改用户设置，免得把人家配置改了不换回来。
+     */
+    setTimeout(() => {
+      const win = mainWindow
+      if (!win || win.isDestroyed()) return
+      const measure = (): void => {
+        void win.webContents
+          .executeJavaScript(
+            `(() => ({
+               source: document.querySelector('.source-switch .active')?.textContent || '',
+               blocks: document.querySelectorAll('.pending').length,
+               title: document.querySelector('.pending-title')?.textContent || '',
+               headline: [...document.querySelectorAll('.headline-value')].map((el) => el.textContent)
+             }))()`
+          )
+          .then((paint) => {
+            const first = paint as Record<string, unknown>
+            smoke('first-paint', {
+              ...first,
+              // 核心一条：挂着骨架时绝不能同时画着数字 —— 那是「读完了读出 0」
+              ok: (first['blocks'] as number) === 0 || ((first['headline'] as string[]) ?? []).length === 0
+            })
+            return win.webContents.capturePage()
+          })
+          .then((image) => {
+            const dir = join(tmpdir(), 'wbtm-smoke')
+            mkdirSync(dir, { recursive: true })
+            writeFileSync(join(dir, 'window-first-paint.png'), image.toPNG())
+          })
+          .catch(() => undefined)
+      }
+      if (settingsStore?.settings.source === 'traecn') {
+        measure()
+      } else {
+        void win.webContents
+          .executeJavaScript(
+            `(() => {
+               const root = document.querySelector('.source-switch')
+               const label = ${JSON.stringify(sourceLabel('traecn'))}
+               const direct = [...root.querySelectorAll('button')].find((el) => el.textContent.trim() === label)
+               if (direct) direct.click()
+               else root.querySelector('.source-more')?.click()
+             })()`
+          )
+          .then(() => new Promise((resolve) => setTimeout(resolve, 400)))
+          .then(() => win.webContents.executeJavaScript(
+            `(() => {
+               const label = ${JSON.stringify(sourceLabel('traecn'))}
+               const item = [...document.querySelectorAll('.source-menu button')].find((el) => el.textContent.trim() === label)
+               if (item) item.click()
+             })()`
+          ))
+          .then(() => new Promise((resolve) => setTimeout(resolve, SMOKE_FIRST_PAINT_MS)))
+          .then(measure)
+          .catch(() => undefined)
+      }
+    }, 1200)
+
     // 看门狗：自检挂死时留下证据并主动退出，而不是让调用方干等
     const watchdog = setTimeout(() => {
       smoke('timeout', { limit: SMOKE_TIMEOUT_MS, at: Date.now() })
@@ -695,6 +781,9 @@ function bootstrap(): void {
           // 只在自检里跑，跑完立刻切回去，免得把用户自己的设置改掉。
           const sourceBefore = settingsStore?.settings.source ?? 'workbuddy'
           const switches: Array<{ expected: SourceKind; actual: SourceKind | undefined; dom: unknown }> = []
+          /** 切源 1.5 秒后还挂着载入态的源 —— traecn 属预期（扫密钥要二十几秒），其余才是漏 */
+          const stablePendingLeaks: SourceKind[] = []
+          const pendingHeld: Array<{ source: SourceKind; title: string }> = []
           for (const target of SOURCE_ORDER) {
             if (target === sourceBefore) continue
             // 前三个源就是按钮本身，其余收在「更多」下拉里 —— 两条路径都要真的点一遍
@@ -730,6 +819,21 @@ function bootstrap(): void {
                  }
                })()`
             )
+            // 载入态要在切源后立刻量：切到 traecn 时它要去扫密钥，那十几秒里
+            // 界面上不能是一个假装读完了的 0（真值到了之后 .pending 必然为 0，
+            // 所以这里量的就是「稳定态不该有骨架」这一半）。
+            const pendingAfter = await win.webContents.executeJavaScript(
+              `(() => ({
+                 blocks: document.querySelectorAll('.pending').length,
+                 title: document.querySelector('.pending-title')?.textContent || ''
+               }))()`
+            )
+            const pendingTitle = pendingAfter.title
+            // 骨架那一拍单独留张图：它是这套交互唯一「平时看不到」的形态
+            if (pendingAfter.blocks > 0) {
+              const shot = await win.webContents.capturePage()
+              writeFileSync(join(dir, `window-pending-${target}.png`), shot.toPNG())
+            }
             // 截图前先滚回顶部：自检要能一眼看到「今日」与上下文水位这两张卡
             await win.webContents.executeJavaScript(
               `(() => { const el = document.querySelector('.app-body'); if (el) el.scrollTop = 0 })()`
@@ -737,8 +841,28 @@ function bootstrap(): void {
             await new Promise((resolve) => setTimeout(resolve, 300))
             writeFileSync(join(dir, `window-${target}.png`), (await win.webContents.capturePage()).toPNG())
             switches.push({ expected: target, actual: settingsStore?.settings.source, dom: switched })
+            // 切完一轮之后还挂着骨架 —— 分两种情况，判定相反：
+            // - traecn：1.5 秒远不够（扫密钥 ~21 秒），这时挂着骨架**是对的**
+            // - 其余源：都是毫秒级，真值早该到了，这时还挂着就是漏了
+            if (pendingAfter > 0) {
+              pendingHeld.push({ source: target, title: pendingTitle || '(无标题)' })
+              if (target !== 'traecn') stablePendingLeaks.push(target)
+            }
           }
           smoke('source-switch', { from: sourceBefore, switches })
+          smoke('pending', {
+            // 切源后仍挂着骨架的源；traecn 属预期，其余为空才对
+            held: pendingHeld,
+            leaks: stablePendingLeaks,
+            // 关键一条：骨架在的时候绝不能同时画着数字（那是「读完了读出 0」）
+            noFakeZero: pendingHeld.every((entry) => {
+              const dom = switches.find((s) => s.expected === entry.source)?.dom as
+                | { headline?: string[] }
+                | undefined
+              return (dom?.headline ?? []).length === 0
+            }),
+            ok: stablePendingLeaks.length === 0
+          })
           patchSettings({ source: sourceBefore })
           await new Promise((resolve) => setTimeout(resolve, 1500))
 

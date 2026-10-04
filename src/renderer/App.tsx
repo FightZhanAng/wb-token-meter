@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState, type JSX, type ReactNode } f
 import type {
   AppInfo,
   DayStat,
+  PendingReason,
   QuotaInfo,
   QuotaWindow,
   QuotaWindowKey,
@@ -95,6 +96,41 @@ function Channel({
         {children}
       </div>
     </section>
+  )
+}
+
+/**
+ * 「这一轮还没读完」的占位。
+ *
+ * 为什么不直接画 0：那张全 0 快照是真的（主进程确实推上来了），但它**不是
+ * 读完了读出 0**，而是一行都没读到。画成数字会让用户以为「今天真没用」，
+ * 等十几秒数字跳出来才发现被骗。灰色块 + 一句说清在等什么，才是对的。
+ *
+ * `reason` 只有 key-scan 值得解释「为什么要等」——其余源都是毫秒级，
+ * 一个转圈就够了，说多了反而像出了问题。
+ */
+function PendingBlock({ reason }: { reason: PendingReason }): JSX.Element {
+  const [dots, setDots] = useState('')
+  // 「…」用真实时钟推进，不用 CSS 动画：这一屏本来就要停在上面十几秒，
+  // 动画在小窗里会一直跑，白耗一格 CPU
+  useEffect(() => {
+    if (reason !== 'key-scan') return
+    const tick = setInterval(() => setDots((d) => (d.length >= 3 ? '' : `${d}·`)), 400)
+    return () => clearInterval(tick)
+  }, [reason])
+
+  return (
+    <div className="pending">
+      <div className="pending-title">
+        {reason === 'key-scan' ? '正在读取 TraeWork 的数据库密钥' : '正在读取用量数据'}
+        <span className="pending-dots">{dots}</span>
+      </div>
+      <div className="pending-hint">
+        {reason === 'key-scan'
+          ? '这个源的账本是加密的，密钥只存在于 TraeWork 的进程内存里。首次启动要扫一遍它的内存（约 20 秒），拿到后本窗口一直有效。'
+          : '稍候，数据马上就到。'}
+      </div>
+    </div>
   )
 }
 
@@ -793,6 +829,11 @@ export default function App(): JSX.Element {
   const quota = quotaView ? snapshot?.quota : undefined
   // 积分与未归因警告对额度源没有意义，留着只会让人以为漏看了数据
   const warnings = (snapshot?.warnings ?? []).filter((warning) => !quotaView || !warning.includes('积分'))
+  // 主进程说这一轮还没读完（现在只有 traecn 的首次取密钥会这样）。
+  // 卡在切源那一刻别误判成「读完是 0」——snapshot.kind 还没跟上 source 时，
+  // 新源的那张 pending 快照还没到，此刻该说的是「正在读」而不是任何数字。
+  const pending: PendingReason | null =
+    snapshot?.pending ?? (snapshot && snapshot.kind !== source ? 'collect' : null)
 
   const structureRows = useMemo<BarRow[]>(() => {
     if (!totals) return []
@@ -1041,8 +1082,14 @@ export default function App(): JSX.Element {
       </header>
 
       <div className="app-body">
-        {/* 额度源拿不到 token 明细，整块换成额度视图；原来的通道在这里只会是一片 0 和空态 */}
-        {quotaView ? (
+        {/* 还没读完这一轮：整块画载入态。这一段不能画数字 —— 全 0 快照是真的，
+            但它不是「读完了读出 0」，画成数字会让人以为今天真没用。
+            注意 quotaView 排在前面：额度源那条链路是联网轮询，没有 pending。 */}
+        {pending ? (
+          <Channel name="载入中">
+            <PendingBlock reason={pending} />
+          </Channel>
+        ) : quotaView ? (
           quota ? (
             <QuotaView quota={quota} now={now} />
           ) : (

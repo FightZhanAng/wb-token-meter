@@ -1308,6 +1308,42 @@ button:disabled {
   text-align: center;
 }
 
+/*
+ * 载入态。
+ *
+ * 刻意做得很安静：只用 --ink-3 一档灰，没有强调色、没有转圈动画。
+ * 这一屏可能要停十几秒（traecn 首次扫密钥），任何动效都会变成一台
+ * 空转十几秒的机器 —— 而「说清在等什么」比「让你看它转」有用得多。
+ */
+.pending {
+  padding: 22px 0 26px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.pending-title {
+  font-size: 13px;
+  color: var(--ink-2);
+  /* 与 .gauge-title 同档：它是这一屏真正要读的那句话 */
+  letter-spacing: 0.01em;
+}
+
+/* 三个点跟着真实时钟跳，不跟帧率跳 —— 见 PendingBlock 里的说明 */
+.pending-dots {
+  display: inline-block;
+  width: 1.6em;
+  text-align: left;
+  color: var(--ink-3);
+}
+
+.pending-hint {
+  font-size: 12px;
+  line-height: 1.75;
+  color: var(--ink-3);
+  max-width: 42em;
+}
+
 .fatal {
   margin: 16px;
   padding: 14px;

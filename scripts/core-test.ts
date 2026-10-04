@@ -2740,6 +2740,11 @@ check('路径为空不崩', traeCnEmptyPath.sessions.length === 0 && traeCnEmpty
 const traeCnWrongKey = collectTraeCnSnapshot({ dbPath: traeCnDbFile, key: Buffer.alloc(32, 0xff), now: FIXED_NOW })
 check('错钥匙不崩、显示 0 并给 warning', traeCnWrongKey.totals.calls === 0 && traeCnWrongKey.warnings.length > 0)
 
+/*
+ * 采集层永远不填 pending —— 那是主进程的事（它才知道「密钥还在扫」）。
+ * 这条钉住职责边界：采集器只管「我读到了什么」，读没读完整由上面判。
+ */
+check('采集层不填 pending（读到就是读到了）', traeCnA.pending === undefined && traeCnNoKey.pending === undefined)
 check(
   '没钥时那条 warning 带「密钥」二字 —— 主进程正是靠它识别并过滤',
   traeCnNoKey.warnings.some((warning) => warning.includes('密钥')),
