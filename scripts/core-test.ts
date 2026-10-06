@@ -58,7 +58,8 @@ import {
   parseReasonixContextWindows,
   parseReasonixSessionPreview,
   parseReasonixStatsLine,
-  parseReasonixUsageLine
+  parseReasonixUsageLine,
+  parseReasonixWireLine
 } from '../src/shared/reasonix-collector'
 import { collectZcodeSnapshot, parseConfigContextSizes, parseModelsDevContextSizes } from '../src/shared/zcode-collector'
 import { collectMimoSnapshot } from '../src/shared/mimo-collector'
@@ -1666,6 +1667,45 @@ check(
 check('坏 JSON 返回空', parseReasonixMessageWorkspace('{ 半行') === '')
 check('空行返回空', parseReasonixMessageWorkspace('') === '')
 
+check(
+  'wire 一行：只有 kind === usage 的才算账，模型从 costQuote.modelRef 取',
+  (() => {
+    const usage = parseReasonixWireLine(
+      JSON.stringify({
+        kind: 'usage',
+        usage: {
+          promptTokens: 20130,
+          completionTokens: 304,
+          cacheHitTokens: 97152,
+          reasoningTokens: 141,
+          costQuote: { modelRef: 'opencode-go-3d75/deepseek-flash' }
+        },
+        seq: 14
+      })
+    )
+    return (
+      usage?.inputTokens === 20130 &&
+      usage?.outputTokens === 304 &&
+      usage?.cachedTokens === 97152 &&
+      usage?.reasoningTokens === 141 &&
+      usage?.model === 'opencode-go-3d75/deepseek-flash'
+    )
+  })(),
+  '认领全靠这四个 token 数，必须原样读出来'
+)
+check(
+  'wire 里的非账行返回 null（stream_attempt / tool_dispatch / turn_started …）',
+  parseReasonixWireLine(JSON.stringify({ kind: 'stream_attempt', seq: 3 })) === null &&
+    parseReasonixWireLine(JSON.stringify({ kind: 'turn_started', text: '你好' })) === null
+)
+check(
+  'wire 里没记缓存的账照算，缓存记 0',
+  parseReasonixWireLine(JSON.stringify({ kind: 'usage', usage: { promptTokens: 100, completionTokens: 5 } }))
+    ?.cachedTokens === 0
+)
+check('wire 坏行返回 null', parseReasonixWireLine('{ 半行') === null)
+check('wire 空行返回 null', parseReasonixWireLine('') === null)
+
 section('Reasonix 目录扫描（临时夹具）')
 
 const reasonixRoot = mkdtempSync(join(tmpdir(), 'wbtm-reasonix-'))
@@ -1731,8 +1771,8 @@ writeFileSync(join(reasonixRoot, 'sessions', 'broken.meta.json'), '{ 坏 meta', 
 
 /* 新版桌面端的按天流水（<appData>/reasonix/stats/<YYYY-MM-DD>.jsonl）：
    没有 session 字段、ts 是 ISO 字符串、带 reasoning，还有 turn 标记行。
-   标题 / cwd 从兄弟目录借：desktop-sessions-v5/by-id 的 header.json 与
-   events.frames mtime，desktop/session-ui-v1.sqlite 的首条用户输入 */
+   会话归属来自隔壁的 projects/<项目>/sessions/<会话>.wire.jsonl —— 两边按
+   每次调用的四个 token 数逐行认领，认不出来的留在池子里 */
 const reasonixDesktopRoot = mkdtempSync(join(tmpdir(), 'wbtm-reasonix-desktop-'))
 const reasonixStatsRoot = join(reasonixDesktopRoot, 'stats')
 mkdirSync(reasonixStatsRoot, { recursive: true })
@@ -1741,6 +1781,7 @@ writeFileSync(
   join(reasonixStatsRoot, '2026-10-01.jsonl'),
   [
     JSON.stringify({ ts: isoOf(FIXED_NOW - 350), source: 'desktop', turn: true }),
+    /* 前两条在下面的 wire 里各有一条一模一样的账 —— 会被认领给对应会话 */
     JSON.stringify({
       ts: isoOf(FIXED_NOW - 400),
       source: 'desktop',
@@ -1764,46 +1805,81 @@ writeFileSync(
       total: 820,
       requests: 1
     }),
+    /* 这一条 wire 里没有 —— 认领不出去，留在池子里 */
+    JSON.stringify({
+      ts: isoOf(FIXED_NOW - 200),
+      source: 'desktop',
+      model: 'opencode-go-3d75/deepseek-flash',
+      prompt: 500,
+      completion: 10,
+      reasoning: 0,
+      total: 510,
+      requests: 1
+    }),
     '{ 半行',
     ''
   ].join('\n'),
   'utf8'
 )
 
-/* 两个桌面会话：新会话（标题来自首条 submission，mtime 最新 → 活跃）与旧会话 */
-const reasonixSid = 'desktop-manual-fixture1'
-const reasonixSidOld = 'desktop-manual-fixture0'
-const reasonixById = join(reasonixDesktopRoot, 'desktop-sessions-v5', 'by-id')
-for (const [sid, cwd] of [
-  [reasonixSid, 'D:\\工作台'],
-  [reasonixSidOld, 'D:\\旧项目']
-] as Array<[string, string]>) {
-  mkdirSync(join(reasonixById, sid), { recursive: true })
-  writeFileSync(join(reasonixById, sid, 'header.json'), JSON.stringify({ sessionId: sid, cwd }), 'utf8')
-  writeFileSync(join(reasonixById, sid, 'events.frames'), '占位 —— 采集器只 stat 不读', 'utf8')
-}
-/* 活跃判定靠 events.frames 的 mtime：新会话比一切调用都晚，旧会话比一切都早 */
-utimesSync(join(reasonixById, reasonixSid, 'events.frames'), new Date(FIXED_NOW - 100), new Date(FIXED_NOW - 100))
-utimesSync(join(reasonixById, reasonixSidOld, 'events.frames'), new Date(FIXED_NOW - 90000), new Date(FIXED_NOW - 90000))
+/* 两个新版会话：正文 <id>.jsonl、标题 <id>.jsonl.meta、调用账 <id>.wire.jsonl。
+   标题取 meta 的 preview，cwd 藏在正文开头注入的 Current workspace 段里 */
+const reasonixSid = '20261001-000000.000000000-fixture-a'
+const reasonixSidB = '20261001-000000.000000000-fixture-b'
+const reasonixSessionsDir = join(reasonixDesktopRoot, 'projects', 'd--proj-fixture', 'sessions')
+mkdirSync(reasonixSessionsDir, { recursive: true })
 
-/* 界面库：标题 = revision 最小的非空 submission 文本（多出来的空格要被压掉） */
-mkdirSync(join(reasonixDesktopRoot, 'desktop'), { recursive: true })
-const reasonixUi = new DatabaseSync(join(reasonixDesktopRoot, 'desktop', 'session-ui-v1.sqlite'))
-reasonixUi.exec('CREATE TABLE records (kind TEXT, key TEXT, revision INTEGER, payload TEXT)')
-const reasonixSubmission = (sid: string, revision: number, text: string): string =>
-  JSON.stringify({ ref: { sessionId: sid }, revision: String(revision), contentJson: JSON.stringify({ text }) })
-for (const [sid, revision, text] of [
-  [reasonixSid, 34, '后面的话'],
-  [reasonixSid, 12, '第一句  话'],
-  [reasonixSidOld, 3, '别的会话的标题']
-] as Array<[string, number, string]>) {
-  reasonixUi
-    .prepare("INSERT INTO records VALUES ('submission', ?, ?, ?)")
-    .run(`local:${sid}/composer-${revision}`, revision, reasonixSubmission(sid, revision, text))
-}
-reasonixUi.close()
+/* cwd 在正文里多转义了一层（两个反斜杠），采集器要还原成一个 —— 这里照着造 */
+const reasonixSessionBody = (cwd: string): string =>
+  [
+    JSON.stringify({ role: 'system', content: 'You are Reasonix, a coding agent.' }),
+    JSON.stringify({
+      role: 'user',
+      content: `<workspace>\nCurrent workspace: "${cwd.replace(/\\/g, '\\\\')}". Shell commands`
+    }),
+    ''
+  ].join('\n')
 
-/* config.toml：池子的模型窗口从这里解析（最后一次请求的模型带 override） */
+const reasonixWireLine = (
+  prompt: number,
+  completion: number,
+  cacheHit: number,
+  reasoning: number,
+  model: string
+): string =>
+  JSON.stringify({
+    kind: 'usage',
+    usage: {
+      promptTokens: prompt,
+      completionTokens: completion,
+      totalTokens: prompt + completion,
+      cacheHitTokens: cacheHit,
+      cacheMissTokens: prompt - cacheHit,
+      reasoningTokens: reasoning,
+      costQuote: { modelRef: model }
+    }
+  })
+
+for (const [sid, title, cwd, wireLines] of [
+  [reasonixSid, '第一句  话', 'D:\\工作台', [reasonixWireLine(900, 40, 700, 25, 'mimo-token-plan-cn/mimo-v2.5')]],
+  [reasonixSidB, '另一个会话', 'D:\\另一个项目', [reasonixWireLine(800, 20, 0, 10, 'opencode-go-3d75/deepseek-flash')]]
+] as Array<[string, string, string, string[]]>) {
+  writeFileSync(join(reasonixSessionsDir, `${sid}.jsonl`), reasonixSessionBody(cwd), 'utf8')
+  writeFileSync(
+    join(reasonixSessionsDir, `${sid}.jsonl.meta`),
+    JSON.stringify({ id: sid, model: 'fixture/model', preview: title }),
+    'utf8'
+  )
+  writeFileSync(join(reasonixSessionsDir, `${sid}.wire.jsonl`), [...wireLines, ''].join('\n'), 'utf8')
+  /* wire 里绝大多数行不是账 —— 混几行真的噪声进去，它们不该被算成调用 */
+  writeFileSync(
+    join(reasonixSessionsDir, `${sid}.events.jsonl`),
+    JSON.stringify({ kind: 'turn_started', text: '噪声' }) + '\n',
+    'utf8'
+  )
+}
+
+/* config.toml：会话 / 池子的模型窗口从这里解析（最后一次请求的模型带 override） */
 writeFileSync(
   join(reasonixDesktopRoot, 'config.toml'),
   [
@@ -1818,13 +1894,19 @@ writeFileSync(
 
 const reasonixLedgerPath = join(reasonixRoot, 'usage.jsonl')
 const reasonixFixture = collectReasonixSnapshot({ reasonixDir: reasonixRoot, statsDir: reasonixStatsRoot, now: FIXED_NOW })
+const reasonixSession = (sid: string): (typeof reasonixFixture.sessions)[number] | undefined =>
+  reasonixFixture.sessions.find((s) => s.sessionId === sid)
 
 check('kind 标记为 reasonix', reasonixFixture.kind === 'reasonix')
-check('扫到 3 个会话（老账 2 个 + 新账桌面端 1 个池子）', reasonixFixture.totals.sessions === 3, String(reasonixFixture.totals.sessions))
-check('半行 / 零 token / 缺 ts / turn 标记的行被丢掉', reasonixFixture.totals.calls === 6, String(reasonixFixture.totals.calls))
+check(
+  '扫到 5 个会话（老账 2 + 认领出的 2 个真会话 + 1 个池子）',
+  reasonixFixture.totals.sessions === 5,
+  String(reasonixFixture.totals.sessions)
+)
+check('半行 / 零 token / 缺 ts / turn 标记的行被丢掉', reasonixFixture.totals.calls === 7, String(reasonixFixture.totals.calls))
 check(
   '输入 = prompt（含缓存读），两本账并算',
-  reasonixFixture.totals.inputTokens === 1000 + 2000 + 300 + 500 + 900 + 800,
+  reasonixFixture.totals.inputTokens === 1000 + 2000 + 300 + 500 + 900 + 800 + 500,
   String(reasonixFixture.totals.inputTokens)
 )
 check(
@@ -1832,8 +1914,8 @@ check(
   reasonixFixture.totals.cachedTokens === 2700 + 700,
   String(reasonixFixture.totals.cachedTokens)
 )
-check('输出求和', reasonixFixture.totals.outputTokens === 200 + 40 + 20, String(reasonixFixture.totals.outputTokens))
-check('思考 token：新账单记、老账恒 0', reasonixFixture.totals.reasoningTokens === 25 + 10, String(reasonixFixture.totals.reasoningTokens))
+check('输出求和', reasonixFixture.totals.outputTokens === 200 + 70, String(reasonixFixture.totals.outputTokens))
+check('思考 token：新账单记、老账恒 0', reasonixFixture.totals.reasoningTokens === 35, String(reasonixFixture.totals.reasoningTokens))
 check(
   '所有粒度的积分都是 0',
   reasonixFixture.totals.credits === 0 &&
@@ -1843,50 +1925,73 @@ check(
 )
 check(
   '上下文水位取 meta 的 lastPromptTokens',
-  reasonixFixture.sessions.find((s) => s.sessionId === 'code-Agent')?.contextUsed === 2000,
-  String(reasonixFixture.sessions.find((s) => s.sessionId === 'code-Agent')?.contextUsed)
+  reasonixSession('code-Agent')?.contextUsed === 2000,
+  String(reasonixSession('code-Agent')?.contextUsed)
+)
+check('老账会话标题来自 meta.summary', reasonixSession('code-Agent')?.title === '夹具会话', reasonixSession('code-Agent')?.title)
+
+/* ---- 认领：官方账本的行按 token 值还给 wire 会话 ---- */
+check(
+  '真会话 A 认领到自己那一条，标题取 .jsonl.meta 的 preview',
+  reasonixSession(reasonixSid)?.calls === 1 && reasonixSession(reasonixSid)?.title === '第一句 话',
+  `${reasonixSession(reasonixSid)?.calls} 次 / ${reasonixSession(reasonixSid)?.title}`
 )
 check(
-  '老账会话标题来自 meta.summary',
-  reasonixFixture.sessions.find((s) => s.sessionId === 'code-Agent')?.title === '夹具会话',
-  reasonixFixture.sessions.find((s) => s.sessionId === 'code-Agent')?.title
+  '真会话 B 同样只认领到自己那条（不会串会话）',
+  reasonixSession(reasonixSidB)?.calls === 1 && reasonixSession(reasonixSidB)?.title === '另一个会话',
+  `${reasonixSession(reasonixSidB)?.calls} 次 / ${reasonixSession(reasonixSidB)?.title}`
 )
 check(
-  '池子标题 = 活跃桌面会话的首条用户输入（revision 最小那条，空格压掉）',
-  reasonixFixture.sessions.find((s) => s.sessionId === 'reasonix-desktop')?.title === '第一句 话',
-  reasonixFixture.sessions.find((s) => s.sessionId === 'reasonix-desktop')?.title
+  '真会话的 cwd 从正文开头提（双反斜杠还原成单反斜杠）',
+  reasonixSession(reasonixSid)?.cwd === 'D:\\工作台' && reasonixSession(reasonixSidB)?.cwd === 'D:\\另一个项目',
+  `${reasonixSession(reasonixSid)?.cwd} / ${reasonixSession(reasonixSidB)?.cwd}`
 )
 check(
-  '池子 cwd 借活跃会话 header.json 的 cwd（不借旧会话的）',
-  reasonixFixture.sessions.find((s) => s.sessionId === 'reasonix-desktop')?.cwd === 'D:\\工作台',
-  reasonixFixture.sessions.find((s) => s.sessionId === 'reasonix-desktop')?.cwd
+  '真会话的上下文水位取 wire 最后一条的 prompt',
+  reasonixSession(reasonixSid)?.contextUsed === 900,
+  String(reasonixSession(reasonixSid)?.contextUsed)
+)
+check(
+  '池子只剩认领不出去的那一条，并起了个能认出来的名字',
+  reasonixSession('reasonix-desktop')?.calls === 1 &&
+    reasonixSession('reasonix-desktop')?.title === '历史记录（无会话归属）',
+  `${reasonixSession('reasonix-desktop')?.calls} 次 / ${reasonixSession('reasonix-desktop')?.title}`
+)
+check(
+  '池子没有 meta，水位退回最后一次请求的输入',
+  reasonixSession('reasonix-desktop')?.contextUsed === 500,
+  String(reasonixSession('reasonix-desktop')?.contextUsed)
+)
+check(
+  '真会话也按最后一次请求的模型解析窗口（override 优先）',
+  reasonixSession(reasonixSidB)?.contextSize === 1000000,
+  String(reasonixSession(reasonixSidB)?.contextSize)
 )
 check(
   '池子窗口按最后一次请求的模型从 config.toml 解析（override 优先）',
-  reasonixFixture.sessions.find((s) => s.sessionId === 'reasonix-desktop')?.contextSize === 1000000,
-  String(reasonixFixture.sessions.find((s) => s.sessionId === 'reasonix-desktop')?.contextSize)
+  reasonixSession('reasonix-desktop')?.contextSize === 1000000,
+  String(reasonixSession('reasonix-desktop')?.contextSize)
 )
 check(
-  '老账会话的模型目录不落本地，窗口留 0',
-  reasonixFixture.sessions.every((s) => s.sessionId === 'reasonix-desktop' || s.contextSize === 0)
+  'config.toml 里没有的模型，窗口留 0（会话 A 用的是 mimo）',
+  reasonixSession(reasonixSid)?.contextSize === 0,
+  String(reasonixSession(reasonixSid)?.contextSize)
 )
 check(
-  '按 meta.workspace 分组，没有 meta 的退回会话名（新账落 reasonix-desktop 池子）',
+  '按会话 cwd 分组：真会话归自己的目录，池子退回会话名',
   reasonixFixture.projects.map((p) => p.projectDir).sort().join('|') ===
-    ['D:\\proj\\a', 'desktop-202605240306-1', 'reasonix-desktop'].sort().join('|'),
+    ['D:\\proj\\a', 'desktop-202605240306-1', 'D:\\工作台', 'D:\\另一个项目', 'reasonix-desktop'].sort().join('|'),
   reasonixFixture.projects.map((p) => p.projectDir).join('|')
 )
 check(
-  '活跃会话取最近有动静的（新账的行更新）',
+  '活跃会话取最近有动静的（认领不改变时间戳）',
   reasonixFixture.active?.sessionId === 'reasonix-desktop',
   String(reasonixFixture.active?.sessionId)
 )
 check(
-  '新账池子没有 meta，水位退回最后一次请求的输入',
-  reasonixFixture.sessions.find((s) => s.sessionId === 'reasonix-desktop')?.contextUsed === 800,
-  String(reasonixFixture.sessions.find((s) => s.sessionId === 'reasonix-desktop')?.contextUsed)
+  '认领是消费式的：会话 + 池子的用量之和 == 官方账本总量',
+  reasonixFixture.totals.inputTokens === 1000 + 2000 + 300 + 500 + 900 + 800 + 500
 )
-check('子代理的调用并进原会话（老账 2 个 + 新账 1 个池子）', reasonixFixture.totals.sessions === 3)
 
 const reasonixStatBefore = statSync(reasonixLedgerPath)
 const reasonixStatsFileBefore = statSync(join(reasonixStatsRoot, '2026-10-01.jsonl'))
@@ -1902,15 +2007,15 @@ check(
 )
 
 check(
-  '只有一本账也照读：老账缺失 → 新账 1 池 2 调用；新账缺失 → 老账 2 会话 4 调用',
+  '只有一本账也照读：老账缺失 → 新账 2 真会话 + 1 池 3 调用；新账缺失 → 老账 2 会话 4 调用',
   (() => {
     const emptyRoot = mkdtempSync(join(tmpdir(), 'wbtm-reasonix-empty-'))
     try {
       const onlyStats = collectReasonixSnapshot({ reasonixDir: emptyRoot, statsDir: reasonixStatsRoot, now: FIXED_NOW })
       const onlyLedger = collectReasonixSnapshot({ reasonixDir: reasonixRoot, statsDir: emptyRoot, now: FIXED_NOW })
       return (
-        onlyStats.totals.calls === 2 &&
-        onlyStats.totals.sessions === 1 &&
+        onlyStats.totals.calls === 3 &&
+        onlyStats.totals.sessions === 3 &&
         onlyLedger.totals.calls === 4 &&
         onlyLedger.totals.sessions === 2
       )
@@ -1927,9 +2032,8 @@ rmSync(reasonixDesktopRoot, { recursive: true, force: true })
 
 section('Reasonix 新版按项目落盘的会话')
 
-/* 夹具只摆新版结构 —— 老目录 desktop-sessions-v5 完全不存在。
-   引擎从 2026-10 起把会话写进 projects/<项目 slug>/sessions/，采集器必须能读它，
-   否则「当前活跃会话」会一直停在最后一个老会话上（标题与 cwd 都跟着错）。 */
+/* 这一组专测**降级**：会话目录在、但 wire 是空的（引擎换了格式，或还没写到那步）。
+   此时一条调用也认领不出去，全部退回池子 —— 采集器不能把会话硬编出来。 */
 const reasonixProjectRoot = mkdtempSync(join(tmpdir(), 'wbtm-reasonix-project-'))
 const reasonixProjectStats = join(reasonixProjectRoot, 'stats')
 mkdirSync(reasonixProjectStats, { recursive: true })
@@ -1985,23 +2089,19 @@ const reasonixProjectFixture = collectReasonixSnapshot({
 })
 const reasonixProjectPool = reasonixProjectFixture.sessions.find((s) => s.sessionId === 'reasonix-desktop')
 
-check('新版按项目落盘的会话照样读出用量', reasonixProjectFixture.totals.calls === 1, String(reasonixProjectFixture.totals.calls))
+check('新版按项目落盘的流水照样读出用量', reasonixProjectFixture.totals.calls === 1, String(reasonixProjectFixture.totals.calls))
 check(
-  '配套事件流不算会话（只有一个池子）',
+  '会话没有 wire 就认领不出去 —— 退回一个池子，不会被当成真会话',
   reasonixProjectFixture.totals.sessions === 1,
   String(reasonixProjectFixture.totals.sessions)
 )
 check('活跃会话就是它', reasonixProjectFixture.active?.sessionId === 'reasonix-desktop', String(reasonixProjectFixture.active?.sessionId))
 check(
-  '池子标题取 .jsonl.meta 的 preview（＝首条用户输入）',
-  reasonixProjectPool?.title === '帮我看下新版数据采集',
+  '池子的标题是「历史记录（无会话归属）」，不再借别人的名字',
+  reasonixProjectPool?.title === '历史记录（无会话归属）',
   reasonixProjectPool?.title
 )
-check(
-  '池子 cwd 从正文开头提（双反斜杠还原成单反斜杠）',
-  reasonixProjectPool?.cwd === 'D:\\AI\\github\\wb-token-meter',
-  reasonixProjectPool?.cwd
-)
+check('池子不编造 cwd（界面按会话名分组）', reasonixProjectPool?.cwd === '', `[${reasonixProjectPool?.cwd}]`)
 check(
   '新版仓里没有 config.toml 时窗口留 0（界面退回只报已用量）',
   reasonixProjectPool?.contextSize === 0,
@@ -2042,9 +2142,9 @@ if (!hasReasonix) {
   if (hasReasonixStats) {
     check('新版流水有思考 token', reasonixReal.totals.reasoningTokens > 0, String(reasonixReal.totals.reasoningTokens))
     check(
-      '桌面池子借到了活跃会话的标题',
-      (reasonixReal.sessions.find((s) => s.sessionId === 'reasonix-desktop')?.title ?? '').length > 0,
-      reasonixReal.sessions.find((s) => s.sessionId === 'reasonix-desktop')?.title
+      '新版会话按 wire 认领出来了（不止一个池子）',
+      reasonixReal.sessions.some((s) => s.sessionId !== 'reasonix-desktop' && s.title.length > 0),
+      reasonixReal.sessions.map((s) => s.sessionId).join(' / ')
     )
   }
   check(
@@ -2059,11 +2159,10 @@ if (!hasReasonix) {
   )
   check('缓存命中不超过输入', reasonixReal.totals.cachedTokens <= reasonixReal.totals.inputTokens)
   check('有活跃会话', reasonixReal.active !== null)
-  /* 标题 / 工作目录只有老账本（meta.json）才拿得到 —— 只有新版数据的机器上这两项天然为空 */
-  if (existsSync(join(reasonixDirPath, 'usage.jsonl'))) {
-    check('至少一个会话带标题', reasonixReal.sessions.some((s) => s.title.length > 0))
-    check('至少一个会话带工作目录', reasonixReal.sessions.some((s) => s.cwd.length > 0))
-  }
+  /* 标题与工作目录现在两条路都有：老账取 meta.json 的 summary / workspace，
+     新账取 .jsonl.meta 的 preview 与正文开头注入的 Current workspace 段 */
+  check('至少一个会话带标题', reasonixReal.sessions.some((s) => s.title.length > 0))
+  check('至少一个会话带工作目录', reasonixReal.sessions.some((s) => s.cwd.length > 0))
 }
 
 check(

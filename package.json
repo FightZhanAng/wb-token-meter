@@ -1,6 +1,6 @@
 {
   "name": "wb-token-meter",
-  "version": "0.12.2",
+  "version": "0.12.3",
   "private": true,
   "description": "Token 计量器 —— 托盘常驻，看得见 WorkBuddy、Qoder CN、Kimi Code、ZCode、Xiaomi MiMo、Reasonix、DeepSeek Harness、TRAE SOLO CN、OpenCode 的本地用量与 OpenCode Go 的订阅额度",
   "author": "tomcato",

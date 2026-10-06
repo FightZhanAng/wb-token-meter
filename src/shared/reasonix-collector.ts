@@ -57,7 +57,6 @@
  *      拿不到，窗口留 0；新账池子从桌面端 config.toml 的 providers 解析窗口
  *      （见「模型上下文窗口」），按最后一次请求的模型算。
  */
-import { DatabaseSync } from 'node:sqlite'
 import { closeSync, openSync, readdirSync, readFileSync, readSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { buildSnapshot, type SourceSession } from './aggregate'
@@ -84,12 +83,14 @@ export interface ReasonixSessionMeta {
   lastPromptTokens: number
 }
 
-/** 一份缓存表同时管 usage.jsonl 与 *.meta.json，键是文件绝对路径 */
+/** 一份缓存表同时管 usage.jsonl、*.meta.json 与 *.wire.jsonl，键是文件绝对路径 */
 interface ReasonixCacheEntry {
   mtimeMs: number
   size: number
   rows: ReasonixCallRow[]
   meta: ReasonixSessionMeta | null
+  /** 只有 *.wire.jsonl 会填这一项：按会话的调用账 */
+  wire?: ReasonixWireUsage[]
 }
 
 export type ReasonixParseCache = Map<string, ReasonixCacheEntry>
@@ -300,104 +301,143 @@ function readStatsRows(statsDir: string, cache?: ReasonixParseCache): { rows: Re
 interface DesktopSessionInfo {
   sessionId: string
   cwd: string
-  /** events.frames 最后一次写入 —— 「最近有动静的会话」就是它最大的那个 */
+  /** 会话正文最后一次写入 —— 「最近有动静的会话」就是它最大的那个 */
   lastWrite: number
-  /** 新版会话的标题（.jsonl.meta 的 preview）；老目录的标题另在 session-ui-v1.sqlite 里 */
+  /** 会话标题（.jsonl.meta 的 preview ＝首条用户输入） */
   title?: string
-  /** 新版会话的正文文件；cwd 要按需从它的开头提 */
+  /** 会话正文文件；cwd 要按需从它的开头提 */
   sourceFile?: string
+  /** wire 里的调用账；没有 wire 文件就是空（老会话，或引擎换了格式） */
+  usages?: ReasonixWireUsage[]
+}
+
+
+
+
+
+/* ------------------------------------------- 新版按会话的调用账（wire） */
+
+/**
+ * wire 里的一条 usage —— 引擎每调一次模型就往 <会话>.wire.jsonl 追一条。
+ *
+ * 这是**唯一带会话归属**的账：官方按天账本（stats/<日期>.jsonl）只有
+ * day/source/model，归不到会话，所有调用只能挤进一个池子 —— 于是「两个会话
+ * 各自用了多少」根本答不出来，界面上一栏只能显示一条假会话（用户报的就是这个）。
+ *
+ * 与官方账本同源：实测 2026-10-06 那天两边 185 行按四个 token 数逐行一一对应，
+ * 一个不多一个不少 —— 所以拿它做**会话归属**、拿官方账本做**时间**，各取所长。
+ */
+export interface ReasonixWireUsage {
+  inputTokens: number
+  outputTokens: number
+  cachedTokens: number
+  reasoningTokens: number
+  /** 模型引用（<provider>/<model>）；嵌在 usage.costQuote.modelRef 里 */
+  model: string
 }
 
 /**
- * 扫新版桌面端的会话目录（<appData>/reasonix/desktop-sessions-v5/by-id）。
- * 每个会话一个子目录：header.json 带 cwd，events.frames 是只追加的事件流
- * （私有容器格式，不解析内容，只 stat 它的 mtime 当活跃时刻）。
- * 目录不存在 / 是老版本就返回空表，不报错。
+ * 解析 wire.jsonl 的一行。这个文件里绝大多数行跟用量无关
+ * （stream_attempt / tool_dispatch / tool_result / message / turn_*），
+ * 只有 kind === 'usage' 的是账。坏行返回 null（追加写被强杀会留半行）。
  */
-function readDesktopSessions(desktopRoot: string): Map<string, DesktopSessionInfo> {
-  const byId = join(desktopRoot, 'desktop-sessions-v5', 'by-id')
-  let entries
+export function parseReasonixWireLine(line: string): ReasonixWireUsage | null {
+  if (!line) return null
+  let raw: unknown
   try {
-    entries = readdirSync(byId, { withFileTypes: true })
+    raw = JSON.parse(line)
   } catch {
-    return new Map()
+    return null
+  }
+  if (!raw || typeof raw !== 'object') return null
+
+  const record = raw as { kind?: unknown; usage?: unknown }
+  if (record.kind !== 'usage' || !record.usage || typeof record.usage !== 'object') return null
+  const usage = record.usage as Record<string, unknown>
+
+  const inputTokens = num(usage.promptTokens)
+  const outputTokens = num(usage.completionTokens)
+  // 与其它源一致：一次调用至少得留下点 token，否则不进账
+  if (inputTokens <= 0 && outputTokens <= 0) return null
+
+  // 模型名嵌在 costQuote 里（usage 本身没有 model 字段）；取不到就留空，
+  // 上层会退回会话级模型
+  const quote = (usage.costQuote ?? {}) as Record<string, unknown>
+  return {
+    inputTokens,
+    outputTokens,
+    cachedTokens: num(usage.cacheHitTokens),
+    reasoningTokens: num(usage.reasoningTokens),
+    model: str(quote.modelRef)
+  }
+}
+
+/** 读一份 wire.jsonl。引擎哪天换了格式也只会读到空表 —— 上层退回「一个池子」的老行为 */
+function readWireUsages(file: string, cache?: ReasonixParseCache): ReasonixWireUsage[] {
+  const hit = readCached(file, cache)
+  if (!hit) return []
+  if (hit.fresh) return hit.entry.wire ?? []
+
+  let text: string
+  try {
+    text = readFileSync(file, 'utf8')
+  } catch {
+    return []
   }
 
-  const sessions = new Map<string, DesktopSessionInfo>()
-  for (const entry of entries) {
-    // 点开头的（.content-v1 / .query-cache …）是配套存储，不是会话
-    if (!entry.isDirectory() || entry.name.startsWith('.')) continue
-    const dir = join(byId, entry.name)
-    let cwd = ''
-    try {
-      const header = JSON.parse(readFileSync(join(dir, 'header.json'), 'utf8')) as { cwd?: unknown }
-      if (typeof header?.cwd === 'string') cwd = header.cwd
-    } catch {
-      /* 没有头文件的会话照样参与活跃评选，cwd 留空 */
-    }
-    let lastWrite = 0
-    try {
-      lastWrite = statSync(join(dir, 'events.frames')).mtimeMs
-    } catch {
-      /* 连事件流都没写过的会话轮不到「最近活跃」 */
-    }
-    sessions.set(entry.name, { sessionId: entry.name, cwd, lastWrite })
+  const usages: ReasonixWireUsage[] = []
+  for (const line of text.split('\n')) {
+    const usage = parseReasonixWireLine(line)
+    if (usage) usages.push(usage)
   }
-  return sessions
+
+  store(file, { ...hit.entry, wire: usages }, cache)
+  return usages
+}
+
+/** 认领用的键：一次调用的四个 token 数 —— 官方账本与 wire 唯一重合的东西 */
+function usageSig(input: number, output: number, cached: number, reasoning: number): string {
+  return `${input}|${output}|${cached}|${reasoning}`
 }
 
 /**
- * 从界面库（<appData>/reasonix/desktop/session-ui-v1.sqlite）挖会话标题。
- * 库里没有标题栏 —— 桌面端的会话名就是首条用户输入，submission 记录的
- * contentJson.text 带原文，按 revision 最低的那条取。库被锁 / 不存在返回空表。
+ * 把官方账本的行按 token 值「认领」给 wire 会话。
+ *
+ * 为什么靠值认领：官方账本没有会话字段，wire 没有时间戳 —— 两边唯一的共同点
+ * 就是每次调用的四个 token 数。实测同一天两边逐行对应（185 ↔ 185），认领得
+ * 干干净净；值撞车时归属可能分错，但**总量永远守恒**（认领是消费式的，一行
+ * 只归一个会话）。认领后的行沿用它自己的时间戳，所以天 / 活跃分布照旧是准的。
  */
-function readDesktopTitles(desktopRoot: string): Map<string, string> {
-  const titles = new Map<string, string>()
-  let db: DatabaseSync | null = null
-  try {
-    db = new DatabaseSync(join(desktopRoot, 'desktop', 'session-ui-v1.sqlite'), { readOnly: true })
-    const rows = db
-      .prepare("SELECT key, payload FROM records WHERE kind = 'submission'")
-      .all() as Array<{ key: string; payload: string | Uint8Array }>
-
-    const first = new Map<string, { revision: number; text: string }>()
-    for (const row of rows) {
-      let record: { ref?: { sessionId?: unknown }; revision?: unknown; contentJson?: unknown }
-      try {
-        const text = typeof row.payload === 'string' ? row.payload : new TextDecoder().decode(row.payload)
-        record = JSON.parse(text)
-      } catch {
-        continue
-      }
-      const sessionId = typeof record.ref?.sessionId === 'string' ? record.ref.sessionId : ''
-      if (!sessionId) continue
-      const content = typeof record.contentJson === 'string' ? record.contentJson : ''
-      let prompt = ''
-      try {
-        const parsed = JSON.parse(content) as { text?: unknown }
-        if (typeof parsed.text === 'string') prompt = parsed.text.replace(/\s+/g, ' ').trim()
-      } catch {
-        continue
-      }
-      if (!prompt) continue
-      // revision 是字符串数字；取最小的（＝最早的那句话），缺失的视为无穷大永不参选
-      const parsed = Number.parseInt(String(record.revision ?? ''), 10)
-      const revision = Number.isFinite(parsed) ? parsed : Number.POSITIVE_INFINITY
-      const prev = first.get(sessionId)
-      if (!prev || revision < prev.revision) {
-        first.set(sessionId, { revision, text: prompt })
-      }
+function claimStatsRows(
+  statsRows: ReasonixCallRow[],
+  sessions: Map<string, DesktopSessionInfo>
+): { poolRows: ReasonixCallRow[]; claimedBySession: Map<string, ReasonixCallRow[]> } {
+  const claims = new Map<string, string[]>()
+  for (const [sessionId, info] of sessions) {
+    for (const usage of info.usages ?? []) {
+      const key = usageSig(usage.inputTokens, usage.outputTokens, usage.cachedTokens, usage.reasoningTokens)
+      const bucket = claims.get(key)
+      if (bucket) bucket.push(sessionId)
+      else claims.set(key, [sessionId])
     }
-
-    for (const [sessionId, entry] of first) {
-      titles.set(sessionId, entry.text.slice(0, 200))
-    }
-  } catch {
-    return new Map()
-  } finally {
-    db?.close()
   }
-  return titles
+
+  const poolRows: ReasonixCallRow[] = []
+  const claimedBySession = new Map<string, ReasonixCallRow[]>()
+  for (const row of statsRows) {
+    const key = usageSig(row.inputTokens, row.outputTokens, row.cachedTokens, row.reasoningTokens)
+    const bucket = claims.get(key)
+    const owner = bucket && bucket.length ? bucket.pop() : undefined
+    if (!owner) {
+      poolRows.push(row)
+      continue
+    }
+    const claimed: ReasonixCallRow = { ...row, sessionId: owner }
+    const list = claimedBySession.get(owner)
+    if (list) list.push(claimed)
+    else claimedBySession.set(owner, [claimed])
+  }
+  return { poolRows, claimedBySession }
 }
 
 /* -------------------------------------- 新版（2.x）按项目落盘的会话 */
@@ -470,16 +510,19 @@ function readSessionWorkspace(file: string): string {
 }
 
 /**
- * 扫新版（2.x）的会话目录：<home>/projects/<项目 slug>/sessions/<时间戳>-<模型>.jsonl。
+ * 扫新版（2.x）的会话目录：<home>/projects/<项目 slug>/sessions/<会话 id>.jsonl。
  *
- * 为什么非读不可：老目录 desktop-sessions-v5/by-id 自 2026-10-01 起就不写了 ——
- * 新版把会话挪进了 projects/ 下，只认老目录的话「当前活跃会话」会永远停在最后一个
- * 老会话上，标题与 cwd 都跟着错位。
+ * 一次会话落成一组文件：正文 <id>.jsonl、配套 <id>.jsonl.meta（标题与模型）、
+ * 事件流 .events.jsonl / .wire.jsonl，另有 .ckpt / .blobs 等目录。
+ * 判据是**旁边有同名 .jsonl.meta** —— 有它才算一次正式会话。
  *
- * 活跃度取会话本体的 mtime，标题取配套 .jsonl.meta 的 preview。cwd 不在这里读：
- * 它藏在正文开头，等选出活跃会话再按需提，省得把每个会话的正文都读一遍。
+ * 标题取 meta 的 preview（＝首条用户输入）；调用账取隔壁的 wire（见上）；
+ * cwd 不在这里读 —— 它藏在正文开头，只对真正有调用的会话按需提一次。
  */
-function readProjectSessions(desktopRoot: string): Map<string, DesktopSessionInfo> {
+function readProjectSessions(
+  desktopRoot: string,
+  cache?: ReasonixParseCache
+): Map<string, DesktopSessionInfo> {
   const sessions = new Map<string, DesktopSessionInfo>()
   let projects
   try {
@@ -498,8 +541,6 @@ function readProjectSessions(desktopRoot: string): Map<string, DesktopSessionInf
       continue
     }
     for (const file of files) {
-      // 一次会话落成好几个文件：<id>.jsonl 是正文，.events.jsonl / .wire.jsonl 是配套
-      // 事件流，另有 .ckpt / .blobs 等目录。只认正文，判据是旁边有同名 .jsonl.meta。
       if (!file.isFile() || !file.name.endsWith('.jsonl')) continue
       if (file.name.endsWith('.events.jsonl') || file.name.endsWith('.wire.jsonl')) continue
       const path = join(dir, file.name)
@@ -512,7 +553,14 @@ function readProjectSessions(desktopRoot: string): Map<string, DesktopSessionInf
         continue // 没有配套 meta 的 .jsonl 不是一次正式会话
       }
       const sessionId = file.name.slice(0, -'.jsonl'.length)
-      sessions.set(sessionId, { sessionId, cwd: '', lastWrite: stat.mtimeMs, title, sourceFile: path })
+      sessions.set(sessionId, {
+        sessionId,
+        cwd: '',
+        lastWrite: stat.mtimeMs,
+        title,
+        sourceFile: path,
+        usages: readWireUsages(join(dir, `${sessionId}.wire.jsonl`), cache)
+      })
     }
   }
   return sessions
@@ -641,42 +689,33 @@ export function collectReasonixSnapshot(options: ReasonixCollectOptions): Snapsh
   const ledgerPath = join(reasonixDir, 'usage.jsonl')
   const ledgerRows = readReasonixLedger(ledgerPath, cache)
   const stats = statsDir ? readStatsRows(statsDir, cache) : { rows: [], files: 0 }
-  const rows = [...ledgerRows, ...stats.rows]
-  if (!rows.length) {
-    const where = statsDir ? `${ledgerPath} 与 ${statsDir}` : ledgerPath
-    warnings.push(`未读到 Reasonix 用量流水（${where}），用量将显示为 0`)
-  }
 
   const { metas, files: metaFiles } = readSessionMetas(reasonixDir, cache)
 
-  // 新账池子的标题 / cwd 从桌面端的会话目录借：调用归不到具体会话，
-  // 但「当前活跃会话」显示的就是最近有动静的那一个
-  let desktopSessions = new Map<string, DesktopSessionInfo>()
-  let desktopTitles = new Map<string, string>()
-  let desktopActiveId = ''
+  // 官方按天账本没有会话字段 —— 靠 wire 的调用账按 token 值逐行认领：
+  // 认出来的归各自会话，认不出来的（旧版写的那些天，或 wire 读不到）留在池子里
+  let poolRows = stats.rows
   let contextWindows = new Map<string, number>()
+  const sessionRows: ReasonixCallRow[] = []
   if (statsDir) {
     // 新版桌面端的家当都在同一个根下（stats/ 的父目录），不再单开一个选项
     const desktopRoot = dirname(statsDir)
-    desktopSessions = readDesktopSessions(desktopRoot)
-    desktopTitles = readDesktopTitles(desktopRoot)
-    // 引擎在 2026-10 把会话挪进了 projects/<项目>/sessions/，老目录 desktop-sessions-v5
-    // 自 2026-10-01 起停写 —— 两代都并进来，谁最后有动静谁代表「当前活跃会话」
-    for (const [id, info] of readProjectSessions(desktopRoot)) {
-      desktopSessions.set(id, info)
-      if (info.title) desktopTitles.set(id, info.title)
-    }
-    let newest = 0
-    for (const [id, info] of desktopSessions) {
-      if (info.lastWrite >= newest) {
-        newest = info.lastWrite
-        desktopActiveId = id
-      }
-    }
-    // 新版的 cwd 只藏在正文开头，按需提一次 —— 全量提要把每个会话的正文都读一遍
-    const activeInfo = desktopSessions.get(desktopActiveId)
-    if (activeInfo && !activeInfo.cwd && activeInfo.sourceFile) {
-      activeInfo.cwd = readSessionWorkspace(activeInfo.sourceFile)
+    const projectSessions = readProjectSessions(desktopRoot, cache)
+    const claimed = claimStatsRows(stats.rows, projectSessions)
+    poolRows = claimed.poolRows
+    for (const [sessionId, claimedRows] of claimed.claimedBySession) {
+      const info = projectSessions.get(sessionId)
+      if (!info) continue
+      // 有调用的会话才算真会话：给它备一份 meta，标题 / cwd / 上下文水位一次给齐。
+      // cwd 藏在正文开头，只对有调用的会话读一次 —— 没调用的会话不必碰正文
+      const usages = info.usages ?? []
+      metas.set(sessionId, {
+        title: info.title ?? '',
+        workspace: info.cwd || (info.sourceFile ? readSessionWorkspace(info.sourceFile) : ''),
+        // 上下文水位 = 最后一次请求的 prompt —— 那正是当前上下文
+        lastPromptTokens: usages.length ? usages[usages.length - 1].inputTokens : 0
+      })
+      sessionRows.push(...claimedRows)
     }
     // 模型窗口同样在桌面端根下；读不到就全体留 0，界面退回「只报已用量」
     try {
@@ -684,6 +723,12 @@ export function collectReasonixSnapshot(options: ReasonixCollectOptions): Snapsh
     } catch {
       /* 没有配置文件不算错误 —— 老版本引擎本来就不落模型目录 */
     }
+  }
+
+  const rows = [...ledgerRows, ...poolRows, ...sessionRows]
+  if (!rows.length) {
+    const where = statsDir ? `${ledgerPath} 与 ${statsDir}` : ledgerPath
+    warnings.push(`未读到 Reasonix 用量流水（${where}），用量将显示为 0`)
   }
 
   // 上下文水位 = 会话最后一次请求的 prompt；流水账本身不带上下文测量，
@@ -716,10 +761,9 @@ export function collectReasonixSnapshot(options: ReasonixCollectOptions): Snapsh
   const sessions: SourceSession[] = []
   for (const [sessionId, calls] of callsBySession) {
     const info = metas.get(sessionId)
-    // 新账池子（reasonix-<source>，没有 meta）借最近活跃桌面会话的标题与 cwd；
-    // 老账会话有自己的 meta，一概不借
+    // 池子 = 认领不出去的那些调用（旧版写的天，或 wire 读不出来时的兜底）。
+    // 它没有会话归属，再借别人的名字就是指鹿为马 —— 给个能一眼认出来的名字
     const isPool = !info && sessionId.startsWith('reasonix-')
-    const desktop = isPool ? desktopSessions.get(desktopActiveId) : undefined
     // 「当前上下文」的窗口按最后一次请求的模型算 —— 那正是正在用的那个模型；
     // 老账的模型名不带 provider 前缀（旧引擎的模型目录不落本地），查不到就留 0
     const lastModel = lastRequest.get(sessionId)?.model ?? ''
@@ -727,10 +771,10 @@ export function collectReasonixSnapshot(options: ReasonixCollectOptions): Snapsh
       sessionId,
       // 按工作目录分组：会话名（code-Agent / desktop-…）跟项目没关系
       projectDir: info?.workspace || sessionId,
-      cwd: info?.workspace ?? desktop?.cwd ?? '',
-      title: isPool ? (desktopTitles.get(desktopActiveId) ?? '') : (info?.title ?? ''),
+      cwd: info?.workspace ?? '',
+      title: isPool ? '历史记录（无会话归属）' : (info?.title ?? ''),
       contextUsed: info?.lastPromptTokens ?? lastRequest.get(sessionId)?.inputTokens ?? 0,
-      contextSize: isPool ? (contextWindows.get(lastModel) ?? 0) : 0,
+      contextSize: contextWindows.get(lastModel) ?? 0,
       lastActivity: calls[calls.length - 1].timestamp,
       // 归档会话的用量并进了原会话名（见文件头），这里不标归档，
       // 否则「当前活跃会话」会选不出任何东西
