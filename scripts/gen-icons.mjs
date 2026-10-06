@@ -245,6 +245,11 @@ const iconPath = join(iconDir, 'icon.png')
 const iconRgba256 = rasterize(256, meterSampler)
 writeFileSync(iconPath, encodePng(256, 256, iconRgba256))
 
+/* macOS 的 .icns 要 1024×1024 起步 —— 256 那张 electron-builder 会直接拒绝转。
+   同一套 sampler 放大即可（图形是按比例定义的，不糊）。 */
+const icon1024Path = join(iconDir, 'icon-1024.png')
+writeFileSync(icon1024Path, encodePng(1024, 1024, rasterize(1024, meterSampler)))
+
 const icoSizes = [16, 24, 32, 48, 64, 128, 256]
 const icoFrames = icoSizes.map((size) => {
   const rgba = size === 256 ? iconRgba256 : rasterize(size, meterSampler)
@@ -259,5 +264,6 @@ for (let percent = 0; percent <= 100; percent += 10) {
 }
 
 console.log(`icon  -> ${iconPath}`)
+console.log(`icon  -> ${icon1024Path} (1024x1024, mac 的 .icns 从这张转)`)
 console.log(`ico   -> ${icoPath} (${icoSizes.join('/')}, ${icoFrames.length} 帧)`)
 console.log(`tray  -> ${trayDir}/tray-0..100.png (11 帧)`)

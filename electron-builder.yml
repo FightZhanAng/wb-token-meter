@@ -40,6 +40,30 @@ win:
       arch:
         - x64
 
+# macOS。两个架构各出一份：Intel（x64）与 Apple 芯片（arm64）——
+# 合并成 universal 会让体积翻倍，而这个应用本身很小，分开更好。
+mac:
+  # electron-builder 在 mac 上把这张 1024 的 png 转成 .icns；
+  # 256 那张它会拒绝（icns 要求 512 起步）
+  icon: resources/icon-1024.png
+  category: public.app-category.utilities
+  # dmg 给人装；zip 是 electron-updater 在 mac 上做差分的载体，少了它
+  # 应用内的更新检查会报「更新源上找不到版本信息」
+  target:
+    - target: dmg
+      arch:
+        - arm64
+        - x64
+    - target: zip
+      arch:
+        - arm64
+        - x64
+  # 带架构后缀 —— 两个架构同名会互相覆盖
+  artifactName: wb-token-meter-${version}-${arch}.${ext}
+  # 签名 / 公证靠 CI 的 CSC_LINK + CSC_KEY_PASSWORD + APPLE_ID 那套 secret 驱动；
+  # 没配时 electron-builder 只警告、照样出包，但那样的 dmg 用户双击是
+  # 「已损坏，无法打开」—— 所以配齐证书是发出去的前提，不是可选项
+
 nsis:
   oneClick: false
   perMachine: false

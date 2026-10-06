@@ -10,18 +10,17 @@ on:
 permissions:
   contents: write
 
+env:
+  # CI 的 runner 能直连 GitHub，不要用国内镜像（scripts/dist.mjs 里的默认值
+  # 是 npmmirror，这里显式覆盖掉）
+  ELECTRON_MIRROR: https://github.com/electron/electron/releases/download/
+  ELECTRON_BUILDER_BINARIES_MIRROR: https://github.com/electron-userland/electron-builder-binaries/releases/download/
+
 jobs:
+  # 两个平台各建各的，产物只传成 artifact，发 Release 交给最下面的 release job ——
+  # 让两边各自去 gh release create 会撞「已存在」：一先一后又得把两个 job 串起来等
   windows:
     runs-on: windows-latest
-
-    # 放在 job 级别：pnpm install 期间 @electron/get 也要读 ELECTRON_MIRROR
-    env:
-      # CI 的 runner 能直连 GitHub，不要用国内镜像（scripts/dist.mjs 里的默认值
-      # 是 npmmirror，这里显式覆盖掉）
-      ELECTRON_MIRROR: https://github.com/electron/electron/releases/download/
-      ELECTRON_BUILDER_BINARIES_MIRROR: https://github.com/electron-userland/electron-builder-binaries/releases/download/
-      GH_TOKEN: ${{ github.token }}
-
     steps:
       - uses: actions/checkout@v4
 
@@ -49,26 +48,89 @@ jobs:
 
       # package.json 的 dist 脚本里已经带了 --publish never。
       # 少了它，electron-builder 在 CI + tag 环境下会「隐式发布」，
-      # 抢在下面的 gh release 之前失败，把整个打包步骤带崩。
+      # 抢在 gh release 之前失败，把整个打包步骤带崩。
       - name: 打包
         run: pnpm dist
 
-      - name: 发布 Release
-        if: startsWith(github.ref, 'refs/tags/')
-        # Windows runner 默认 shell 是 pwsh，通配符不会展开，必须显式用 bash。
-        # latest.yml 与 blockmap 不能少：应用内的更新检查先去 Release 拉 latest.yml
-        # 才知道有没有新版本，blockmap 是差分下载用的。
-        shell: bash
-        run: >
-          gh release create "${{ github.ref_name }}"
-          release/*-setup.exe release/*-portable.exe
-          release/latest.yml release/*.blockmap
-          --generate-notes
-
-      - name: 留档构建产物
-        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: wb-token-meter-windows
-          path: release/*.exe
+          name: dist-windows
+          path: |
+            release/*-setup.exe
+            release/*-portable.exe
+            release/latest.yml
+            release/*.blockmap
           if-no-files-found: error
+
+  # macOS。两个架构各出一份 dmg + zip（见 electron-builder.yml 的 mac 段）
+  macos:
+    runs-on: macos-latest
+    env:
+      # 签名与公证。没配这几个 secret 时 electron-builder 只会警告、照样出包 ——
+      # 但那样的 dmg 用户双击是「已损坏，无法打开」，所以**正式发版前必须在
+      # 仓库 secrets 里配齐**，否则这个平台等于白打：
+      #   MAC_CSC_LINK               开发者证书 .p12 的 base64 或下载直链
+      #   MAC_CSC_KEY_PASSWORD       证书密码
+      #   APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID   公证用
+      CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+      CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: 安装依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 类型检查
+        run: pnpm typecheck
+
+      - name: 核心逻辑自检
+        run: pnpm test:ci
+
+      - name: 打包
+        run: pnpm dist:mac
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-macos
+          path: |
+            release/*.dmg
+            release/*.zip
+            release/latest-mac.yml
+            release/*.blockmap
+          if-no-files-found: error
+
+  release:
+    needs: [windows, macos]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      # latest.yml / latest-mac.yml 与 blockmap 都不能少：应用内的更新检查先去
+      # Release 拉清单才知道有没有新版本，blockmap 是差分下载用的。
+      # Windows runner 默认 shell 是 pwsh、通配符不展开，这里显式用 bash。
+      - name: 发布 Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            dist/*-setup.exe dist/*-portable.exe dist/latest.yml dist/*.blockmap \
+            dist/*.dmg dist/*.zip dist/latest-mac.yml \
+            --repo "${{ github.repository }}" \
+            --generate-notes
