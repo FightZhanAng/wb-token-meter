@@ -99,7 +99,18 @@ jobs:
         run: pnpm test:ci
 
       - name: 打包
-        run: pnpm dist:mac
+        # 没配证书时必须先把 CSC_LINK 摘掉再打包：electron-builder 判断的是
+        # `cscLink == null`（见 app-builder-lib/out/macPackager.js），空字符串
+        # 过得了这一关，随后被 resolve 成项目根目录、报 "… not a file" 把打包
+        # 带崩。配了 MAC_CSC_LINK 之后这段自动走签名分支，不用再动。
+        run: |
+          if [ -z "$CSC_LINK" ]; then
+            echo "没有配 MAC_CSC_LINK —— 跳过签名，出未签名包"
+            unset CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID
+          else
+            echo "检测到证书 —— 走签名 + 公证"
+          fi
+          pnpm dist:mac
 
       - uses: actions/upload-artifact@v4
         with:
