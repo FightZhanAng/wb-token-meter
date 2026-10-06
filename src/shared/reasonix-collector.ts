@@ -33,11 +33,16 @@
  *   1) 行里**没有 session 字段**，聚合库（cache/usage-catalog 的 sqlite）也只到
  *      day/source/model 为止 —— 调用没法归到具体会话，所有调用按 `source`
  *      落进 `reasonix-<source>` 一个池子（当前是 reasonix-desktop），项目维度
- *      就停在池子名上。但会话的**元信息**在兄弟目录里能借到：
- *      desktop-sessions-v5/by-id/<会话>/header.json 带 cwd，events.frames 的
- *      mtime 定「最近有动静」；界面库 desktop/session-ui-v1.sqlite 的
- *      submission 记录带用户原文 —— 界面的会话名就是首条用户输入，照 same
- *      规矩取来当池子的标题（只影响「当前活跃会话」那格的显示）。
+ *      就停在池子名上。但会话的**元信息**在兄弟目录里能借到 —— 两代落盘位置都得看，
+ *      引擎在 2026-10 换了地方，只认老目录会让「当前活跃会话」永远停在最后一个老会话上：
+ *        · 老位置 desktop-sessions-v5/by-id/<会话>/：header.json 带 cwd，
+ *          events.frames 的 mtime 定「最近有动静」；界面库
+ *          desktop/session-ui-v1.sqlite 的 submission 记录带用户原文 —— 会话名
+ *          就是首条用户输入，照 same 规矩取来当标题。这套自 2026-10-01 21:54 起停写。
+ *        · 新位置 projects/<项目 slug>/sessions/<时间戳>-<模型>.jsonl：标题取配套
+ *          .jsonl.meta 的 preview，cwd 要从正文开头注入的 system 提示里提（没有
+ *          header.json）。谁最后有动静谁代表活跃会话。
+ *      两块合起来只影响「当前活跃会话」那格的显示。
  *   2) "turn":true 的是回合边界标记行，不带 token 字段，解析时跳过。
  *   3) `requests` 目前恒为 1（一次调用一行）；哪天出现聚合行，调用数会少算。
  *
@@ -53,7 +58,7 @@
  *      （见「模型上下文窗口」），按最后一次请求的模型算。
  */
 import { DatabaseSync } from 'node:sqlite'
-import { readdirSync, readFileSync, statSync } from 'node:fs'
+import { closeSync, openSync, readdirSync, readFileSync, readSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { buildSnapshot, type SourceSession } from './aggregate'
 import type { CallRecord, Snapshot } from './types'
@@ -297,6 +302,10 @@ interface DesktopSessionInfo {
   cwd: string
   /** events.frames 最后一次写入 —— 「最近有动静的会话」就是它最大的那个 */
   lastWrite: number
+  /** 新版会话的标题（.jsonl.meta 的 preview）；老目录的标题另在 session-ui-v1.sqlite 里 */
+  title?: string
+  /** 新版会话的正文文件；cwd 要按需从它的开头提 */
+  sourceFile?: string
 }
 
 /**
@@ -389,6 +398,124 @@ function readDesktopTitles(desktopRoot: string): Map<string, string> {
     db?.close()
   }
   return titles
+}
+
+/* -------------------------------------- 新版（2.x）按项目落盘的会话 */
+
+/**
+ * 从新版会话的 .jsonl.meta 里取标题。桌面端的会话名就是首条用户输入，
+ * 这份配套文件把它以 preview 的形式记下来了。
+ */
+export function parseReasonixSessionPreview(text: string): string {
+  let raw: unknown
+  try {
+    raw = JSON.parse(text)
+  } catch {
+    return ''
+  }
+  if (!raw || typeof raw !== 'object') return ''
+  // preview 长了会带省略号，压成一行即可 —— 与老账的 summary 同样处理
+  return str((raw as Record<string, unknown>).preview).replace(/\s+/g, ' ').trim().slice(0, 200)
+}
+
+/**
+ * 从会话正文的一行里提工作目录。新版会话没有 header.json，cwd 只出现在
+ * `Current workspace: "<路径>"` 那一段，而那段是被注入到**首条 user 消息**里的
+ * （system 那条反而不带）。这一段的路径在正文里多转义了一层，双反斜杠要还原。
+ */
+export function parseReasonixMessageWorkspace(line: string): string {
+  if (!line) return ''
+  let raw: unknown
+  try {
+    raw = JSON.parse(line)
+  } catch {
+    return ''
+  }
+  if (!raw || typeof raw !== 'object') return ''
+  const content = (raw as { content?: unknown }).content
+  if (typeof content !== 'string') return ''
+  const match = content.match(/Current workspace:\s*"([^"\n]+)"/)
+  if (!match) return ''
+  return match[1].replace(/\\\\/g, '\\')
+}
+
+/** 只读文件开头 —— 会话正文几百 KB，要的东西在前几行 */
+function readFileHead(file: string, bytes: number): string {
+  let fd: number | null = null
+  try {
+    fd = openSync(file, 'r')
+    const buffer = Buffer.alloc(bytes)
+    const read = readSync(fd, buffer, 0, bytes, 0)
+    return buffer.subarray(0, read).toString('utf8')
+  } catch {
+    return ''
+  } finally {
+    if (fd !== null) {
+      try {
+        closeSync(fd)
+      } catch {
+        /* 读都失败了，关不上也没别的办法 */
+      }
+    }
+  }
+}
+
+/** 从会话正文开头几行里提 cwd —— 注入落在首条 user 消息上，所以不能只看首行 */
+function readSessionWorkspace(file: string): string {
+  for (const line of readFileHead(file, 256 * 1024).split('\n').slice(0, 8)) {
+    const cwd = parseReasonixMessageWorkspace(line)
+    if (cwd) return cwd
+  }
+  return ''
+}
+
+/**
+ * 扫新版（2.x）的会话目录：<home>/projects/<项目 slug>/sessions/<时间戳>-<模型>.jsonl。
+ *
+ * 为什么非读不可：老目录 desktop-sessions-v5/by-id 自 2026-10-01 起就不写了 ——
+ * 新版把会话挪进了 projects/ 下，只认老目录的话「当前活跃会话」会永远停在最后一个
+ * 老会话上，标题与 cwd 都跟着错位。
+ *
+ * 活跃度取会话本体的 mtime，标题取配套 .jsonl.meta 的 preview。cwd 不在这里读：
+ * 它藏在正文开头，等选出活跃会话再按需提，省得把每个会话的正文都读一遍。
+ */
+function readProjectSessions(desktopRoot: string): Map<string, DesktopSessionInfo> {
+  const sessions = new Map<string, DesktopSessionInfo>()
+  let projects
+  try {
+    projects = readdirSync(join(desktopRoot, 'projects'), { withFileTypes: true })
+  } catch {
+    return sessions
+  }
+
+  for (const project of projects) {
+    if (!project.isDirectory() || project.name.startsWith('.')) continue
+    const dir = join(desktopRoot, 'projects', project.name, 'sessions')
+    let files
+    try {
+      files = readdirSync(dir, { withFileTypes: true })
+    } catch {
+      continue
+    }
+    for (const file of files) {
+      // 一次会话落成好几个文件：<id>.jsonl 是正文，.events.jsonl / .wire.jsonl 是配套
+      // 事件流，另有 .ckpt / .blobs 等目录。只认正文，判据是旁边有同名 .jsonl.meta。
+      if (!file.isFile() || !file.name.endsWith('.jsonl')) continue
+      if (file.name.endsWith('.events.jsonl') || file.name.endsWith('.wire.jsonl')) continue
+      const path = join(dir, file.name)
+      const stat = statOf(path)
+      if (!stat) continue
+      let title: string
+      try {
+        title = parseReasonixSessionPreview(readFileSync(`${path}.meta`, 'utf8'))
+      } catch {
+        continue // 没有配套 meta 的 .jsonl 不是一次正式会话
+      }
+      const sessionId = file.name.slice(0, -'.jsonl'.length)
+      sessions.set(sessionId, { sessionId, cwd: '', lastWrite: stat.mtimeMs, title, sourceFile: path })
+    }
+  }
+  return sessions
 }
 
 /* ------------------------------------------------------- 模型上下文窗口 */
@@ -533,12 +660,23 @@ export function collectReasonixSnapshot(options: ReasonixCollectOptions): Snapsh
     const desktopRoot = dirname(statsDir)
     desktopSessions = readDesktopSessions(desktopRoot)
     desktopTitles = readDesktopTitles(desktopRoot)
+    // 引擎在 2026-10 把会话挪进了 projects/<项目>/sessions/，老目录 desktop-sessions-v5
+    // 自 2026-10-01 起停写 —— 两代都并进来，谁最后有动静谁代表「当前活跃会话」
+    for (const [id, info] of readProjectSessions(desktopRoot)) {
+      desktopSessions.set(id, info)
+      if (info.title) desktopTitles.set(id, info.title)
+    }
     let newest = 0
     for (const [id, info] of desktopSessions) {
       if (info.lastWrite >= newest) {
         newest = info.lastWrite
         desktopActiveId = id
       }
+    }
+    // 新版的 cwd 只藏在正文开头，按需提一次 —— 全量提要把每个会话的正文都读一遍
+    const activeInfo = desktopSessions.get(desktopActiveId)
+    if (activeInfo && !activeInfo.cwd && activeInfo.sourceFile) {
+      activeInfo.cwd = readSessionWorkspace(activeInfo.sourceFile)
     }
     // 模型窗口同样在桌面端根下；读不到就全体留 0，界面退回「只报已用量」
     try {

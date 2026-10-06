@@ -53,8 +53,10 @@ import {
 } from '../src/shared/qoder-collector'
 import {
   collectReasonixSnapshot,
+  parseReasonixMessageWorkspace,
   parseReasonixMeta,
   parseReasonixContextWindows,
+  parseReasonixSessionPreview,
   parseReasonixStatsLine,
   parseReasonixUsageLine
 } from '../src/shared/reasonix-collector'
@@ -1637,6 +1639,33 @@ check(
 check('没有窗口的 override 不进表', reasonixWindows.get('opencode-go-3d75/missing') === undefined)
 check('providers 之外的 name 不会串块', reasonixWindows.get('plain-provider/context7') === undefined)
 
+section('Reasonix 新版会话文件解析')
+
+check(
+  'meta 的 preview 当标题，空白压成一行',
+  parseReasonixSessionPreview(JSON.stringify({ preview: '第一句   话\n第二句' })) === '第一句 话 第二句',
+  parseReasonixSessionPreview(JSON.stringify({ preview: '第一句   话\n第二句' }))
+)
+check('meta 里没有 preview 就是空标题', parseReasonixSessionPreview(JSON.stringify({ id: 'x' })) === '')
+check('meta 坏 JSON 返回空标题', parseReasonixSessionPreview('{ 半行') === '')
+
+const reasonixWorkspaceLine = (role: string, content: string): string => JSON.stringify({ role, content })
+check(
+  'cwd 从注入的 workspace 段里提，双反斜杠还原成单反斜杠',
+  parseReasonixMessageWorkspace(
+    reasonixWorkspaceLine('user', '<workspace>\nCurrent workspace: "D:\\\\AI\\\\github\\\\wb-token-meter". Shell commands')
+  ) === 'D:\\AI\\github\\wb-token-meter',
+  parseReasonixMessageWorkspace(
+    reasonixWorkspaceLine('user', '<workspace>\nCurrent workspace: "D:\\\\AI\\\\github\\\\wb-token-meter". Shell commands')
+  )
+)
+check(
+  '注入段落在首条 user 上，system 那条没有 —— 返回空',
+  parseReasonixMessageWorkspace(reasonixWorkspaceLine('system', 'You are Reasonix, a coding agent.')) === ''
+)
+check('坏 JSON 返回空', parseReasonixMessageWorkspace('{ 半行') === '')
+check('空行返回空', parseReasonixMessageWorkspace('') === '')
+
 section('Reasonix 目录扫描（临时夹具）')
 
 const reasonixRoot = mkdtempSync(join(tmpdir(), 'wbtm-reasonix-'))
@@ -1893,6 +1922,93 @@ check(
 
 rmSync(reasonixRoot, { recursive: true, force: true })
 rmSync(reasonixDesktopRoot, { recursive: true, force: true })
+
+/* ------------------------------- Reasonix 新版按项目落盘的会话（2.x） */
+
+section('Reasonix 新版按项目落盘的会话')
+
+/* 夹具只摆新版结构 —— 老目录 desktop-sessions-v5 完全不存在。
+   引擎从 2026-10 起把会话写进 projects/<项目 slug>/sessions/，采集器必须能读它，
+   否则「当前活跃会话」会一直停在最后一个老会话上（标题与 cwd 都跟着错）。 */
+const reasonixProjectRoot = mkdtempSync(join(tmpdir(), 'wbtm-reasonix-project-'))
+const reasonixProjectStats = join(reasonixProjectRoot, 'stats')
+mkdirSync(reasonixProjectStats, { recursive: true })
+writeFileSync(
+  join(reasonixProjectStats, '2026-10-06.jsonl'),
+  [
+    JSON.stringify({
+      ts: isoOf(FIXED_NOW - 200),
+      source: 'desktop',
+      model: 'opencode-go-3d75/deepseek-flash',
+      prompt: 500,
+      completion: 50,
+      reasoning: 20,
+      cache_hit: 400,
+      cache_miss: 100,
+      total: 550,
+      requests: 1
+    }),
+    ''
+  ].join('\n'),
+  'utf8'
+)
+
+const reasonixProjectSessions = join(reasonixProjectRoot, 'projects', 'd--ai-github-wb-token-meter', 'sessions')
+mkdirSync(reasonixProjectSessions, { recursive: true })
+const reasonixProjectId = '20261006-074640.643018400-deepseek-flash'
+/* 注入的 <workspace> 段落在首条 user 消息上（system 那条不带），路径多转义一层 */
+writeFileSync(
+  join(reasonixProjectSessions, `${reasonixProjectId}.jsonl`),
+  [
+    JSON.stringify({ role: 'system', content: 'You are Reasonix, a coding agent.' }),
+    JSON.stringify({
+      role: 'user',
+      content: '<workspace>\nCurrent workspace: "D:\\\\AI\\\\github\\\\wb-token-meter". Shell commands'
+    })
+  ].join('\n'),
+  'utf8'
+)
+writeFileSync(
+  join(reasonixProjectSessions, `${reasonixProjectId}.jsonl.meta`),
+  JSON.stringify({ id: reasonixProjectId, model: 'opencode-go-3d75/deepseek-flash', preview: '帮我看下新版数据采集' }),
+  'utf8'
+)
+/* 配套事件流与索引文件不该被当成第二个会话 */
+writeFileSync(join(reasonixProjectSessions, `${reasonixProjectId}.events.jsonl`), '{}\n', 'utf8')
+writeFileSync(join(reasonixProjectSessions, `${reasonixProjectId}.wire.jsonl`), '{}\n', 'utf8')
+writeFileSync(join(reasonixProjectSessions, `${reasonixProjectId}.display-index.json`), '{}\n', 'utf8')
+
+const reasonixProjectFixture = collectReasonixSnapshot({
+  reasonixDir: join(reasonixProjectRoot, 'no-such-home'),
+  statsDir: reasonixProjectStats,
+  now: FIXED_NOW
+})
+const reasonixProjectPool = reasonixProjectFixture.sessions.find((s) => s.sessionId === 'reasonix-desktop')
+
+check('新版按项目落盘的会话照样读出用量', reasonixProjectFixture.totals.calls === 1, String(reasonixProjectFixture.totals.calls))
+check(
+  '配套事件流不算会话（只有一个池子）',
+  reasonixProjectFixture.totals.sessions === 1,
+  String(reasonixProjectFixture.totals.sessions)
+)
+check('活跃会话就是它', reasonixProjectFixture.active?.sessionId === 'reasonix-desktop', String(reasonixProjectFixture.active?.sessionId))
+check(
+  '池子标题取 .jsonl.meta 的 preview（＝首条用户输入）',
+  reasonixProjectPool?.title === '帮我看下新版数据采集',
+  reasonixProjectPool?.title
+)
+check(
+  '池子 cwd 从正文开头提（双反斜杠还原成单反斜杠）',
+  reasonixProjectPool?.cwd === 'D:\\AI\\github\\wb-token-meter',
+  reasonixProjectPool?.cwd
+)
+check(
+  '新版仓里没有 config.toml 时窗口留 0（界面退回只报已用量）',
+  reasonixProjectPool?.contextSize === 0,
+  String(reasonixProjectPool?.contextSize)
+)
+
+rmSync(reasonixProjectRoot, { recursive: true, force: true })
 
 section('Reasonix 真实数据')
 
