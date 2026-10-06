@@ -39,8 +39,28 @@ OpenCode Go 更特别：它连 token 都不给看，只有订阅额度的占用�
 
 到 [Releases](https://github.com/FightZhanAng/wb-token-meter/releases) 下载：
 
+**Windows**
+
 - `wb-token-meter-<版本>-setup.exe` —— 安装版，带开始菜单与桌面快捷方式
 - `wb-token-meter-<版本>-portable.exe` —— 免安装版，双击即用
+
+**macOS**
+
+- `wb-token-meter-<版本>-arm64.dmg` —— Apple 芯片（M 系列）
+- `wb-token-meter-<版本>-x64.dmg` —— Intel 芯片
+
+> 这些包**还没签名**（Apple 开发者证书要 $99/年，尚未配），所以首次打开会被
+> Gatekeeper 拦成「**已损坏，无法打开**」—— 那是缺签名，不是文件坏了。
+> 绕过一次即可，之后正常：
+>
+> ```bash
+> xattr -cr "/Applications/Token 计量器.app"
+> ```
+>
+> 或者不用命令：在 Finder 里**右键点这个 app → 选「打开」→ 再点一次「打开」**。
+>
+> 证书配齐后（见 `.github/workflows/release.yml` 顶部那五个 secret），这段说明
+> 就可以删掉。
 
 ![界面预览](docs/preview.png)
 
