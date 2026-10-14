@@ -392,6 +392,74 @@ check('口径对得上时不报假警告', !wbFixture.warnings.some((w) => w.inc
 
 rmSync(wbRoot, { recursive: true, force: true })
 
+/*
+ * 回归用例（跨会话同计费键）。2026-10 审查发现：日/模型粒度的去重集合建在
+ * 「会话循环内」，只在一个会话里去重，而会话维的主循环是全局去重的 ——
+ * 同一个计费键落在两个会话里时，sessions 维只算一份、days/models 维算两份，
+ * 积分凭空变大，而 core-test 上方那三条恒等式断言在旧夹具下抓不到它。
+ *
+ * 夹具刻意让 req-dup-1 同时出现在 sess_dup_a 与 sess_dup_b，
+ * 且两个会话的 credit_json 都认这个键 —— 只有这样 billingRounds 才会取两次积分。
+ */
+section('WorkBuddy 计费键：跨会话重复只算一次')
+
+const wbDupNow = Date.now()
+const wbDupRoot = mkdtempSync(join(tmpdir(), 'wbtm-wb-dup-'))
+mkdirSync(join(wbDupRoot, 'projects', 'proj_dup'), { recursive: true })
+
+writeFileSync(
+  join(wbDupRoot, 'projects', 'proj_dup', 'sess_dup_a.jsonl'),
+  [
+    // 与 b 会话共用 req-dup-1，只是一处是「父会话的原生记录」、一处是「复制来的」
+    wbLine({ ts: wbDupNow - 5000, traceId: 'trace-dup-a1', convReqId: 'req-dup-1', input: 1000, output: 100 }),
+    wbLine({ ts: wbDupNow - 4000, traceId: 'trace-dup-a2', convReqId: 'req-dup-1', input: 800, output: 60 }),
+    // a 独有的计费回合，用来确认去重没有把正常的那一份也抹掉
+    wbLine({ ts: wbDupNow - 3000, traceId: 'trace-dup-a3', convReqId: 'req-dup-2', input: 500, output: 40 })
+  ].join('\n') + '\n'
+)
+writeFileSync(
+  join(wbDupRoot, 'projects', 'proj_dup', 'sess_dup_b.jsonl'),
+  wbLine({ ts: wbDupNow - 4500, traceId: 'trace-dup-b1', convReqId: 'req-dup-1', input: 1000, output: 100 }) + '\n'
+)
+
+const wbDupDb = new DatabaseSync(join(wbDupRoot, 'workbuddy.db'))
+wbDupDb.exec(`
+  CREATE TABLE sessions (
+    id TEXT PRIMARY KEY, title TEXT, cwd TEXT, model TEXT, status TEXT, updated_at INTEGER
+  );
+  CREATE TABLE session_usage (
+    session_id TEXT PRIMARY KEY, used INTEGER, size INTEGER, updated_at INTEGER, credit_json TEXT
+  );
+`)
+const insertWbDupSession = wbDupDb.prepare(
+  'INSERT INTO sessions (id, title, cwd, model, status, updated_at) VALUES (?, ?, ?, ?, ?, ?)'
+)
+insertWbDupSession.run('sess_dup_a', '重复键会话 A', 'D:\\proj\\dup', 'demo-model', 'idle', wbDupNow - 3000)
+insertWbDupSession.run('sess_dup_b', '重复键会话 B', 'D:\\proj\\dup', 'demo-model', 'idle', wbDupNow - 4500)
+const insertWbDupUsage = wbDupDb.prepare(
+  'INSERT INTO session_usage (session_id, used, size, updated_at, credit_json) VALUES (?, ?, ?, ?, ?)'
+)
+// 同一个键在两个会话的账本里都认 —— 数据库侧就是重复记账，本地侧只能算一次
+insertWbDupUsage.run('sess_dup_a', 2300, 300000, wbDupNow - 3000, JSON.stringify({ 'req-dup-1': 4, 'req-dup-2': 1 }))
+insertWbDupUsage.run('sess_dup_b', 1000, 300000, wbDupNow - 4500, JSON.stringify({ 'req-dup-1': 4 }))
+wbDupDb.close()
+
+const wbDup = collectSnapshot({ workbuddyDir: wbDupRoot, now: wbDupNow })
+
+check('跨会话重复：已归因不翻倍', near(wbDup.totals.attributedCredits, 5),
+  String(wbDup.totals.attributedCredits))
+check('跨会话重复：日积分之和 == 已归因积分',
+  near(sum(wbDup.days.map((d) => d.credits)), wbDup.totals.attributedCredits),
+  `${sum(wbDup.days.map((d) => d.credits))} vs ${wbDup.totals.attributedCredits}`)
+check('跨会话重复：模型积分之和 == 已归因积分',
+  near(sum(wbDup.models.map((m) => m.credits)), wbDup.totals.attributedCredits),
+  `${sum(wbDup.models.map((m) => m.credits))} vs ${wbDup.totals.attributedCredits}`)
+check('跨会话重复：今日积分也只算一次', near(wbDup.today.credits, 5), String(wbDup.today.credits))
+// token 是两边都真实发生的，不能跟着积分一起被去重掉
+check('跨会话重复不影响 token 合计', wbDup.totals.calls === 4, String(wbDup.totals.calls))
+
+rmSync(wbDupRoot, { recursive: true, force: true })
+
 /* ------------------------------------------------ 3c. 版本比较与更新状态 */
 
 section('版本比较')

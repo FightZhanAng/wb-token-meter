@@ -864,7 +864,10 @@ function bootstrap(): void {
             // 切完一轮之后还挂着骨架 —— 分两种情况，判定相反：
             // - traecn：1.5 秒远不够（扫密钥 ~21 秒），这时挂着骨架**是对的**
             // - 其余源：都是毫秒级，真值早该到了，这时还挂着就是漏了
-            if (pendingAfter > 0) {
+            // pendingAfter 是 { blocks, title } 对象，比较必须取 .blocks ——
+            // 直接拿对象跟 0 比会走对象转数字得到 NaN，NaN > 0 恒假，
+            // 于是这一整段永远不进分支，pending.ok 永远为真、什么缺陷都测不出来。
+            if (pendingAfter.blocks > 0) {
               pendingHeld.push({ source: target, title: pendingTitle || '(无标题)' })
               if (target !== 'traecn') stablePendingLeaks.push(target)
             }

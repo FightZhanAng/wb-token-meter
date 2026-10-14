@@ -386,18 +386,24 @@ interface BillingRound {
 /**
  * 把 transcript 摊平成计费回合列表。
  *
- * 同一个计费键在一个会话里只算一次，否则「一回合多轮工具调用」会把积分
- * 放大好几倍。没有任何积分记录的回合直接跳过 —— 调用方只关心算得出钱的部分。
+ * 同一个计费键全局只算一次，否则「一回合多轮工具调用」会把积分放大好几倍。
+ * 没有任何积分记录的回合直接跳过 —— 调用方只关心算得出钱的部分。
+ *
+ * 去重集合必须是**函数级**、不能建在会话循环里：主循环的 creditedKeys 也是
+ * 跨会话去重的，两处口径必须一致，否则同一计费键落在两个会话里时
+ * sessions 维只算一份、days/models 维却算两份，积分凭空变大。
+ * 会话被分叉/复制、或子代理 transcript 归到父会话而父会话自己也有同一回合时，
+ * 就会出现这种跨会话重复。
  */
 function billingRounds(
   transcripts: ScannedTranscript[],
   usageMeta: Map<string, UsageRow>
 ): BillingRound[] {
   const out: BillingRound[] = []
+  const seen = new Set<string>()
   for (const transcript of transcripts) {
     const usageRow = usageMeta.get(transcript.sessionId)
     if (!usageRow) continue
-    const seen = new Set<string>()
     for (const call of transcript.calls) {
       const key = billingKey(call)
       if (!key || seen.has(key)) continue
