@@ -1,8 +1,10 @@
 /**
- * TRAE SOLO CN（TraeWork CN）桌面端用量采集。
+ * Trae CN 桌面端用量采集。
  *
  * 账本只有一个文件：
- *   %APPDATA%\TRAE SOLO CN\ModularData\ai-agent\database.db   —— SQLCipher 4 加密的 SQLite
+ *   %APPDATA%\Trae CN\ModularData\ai-agent\database.db   —— SQLCipher 4 加密的 SQLite
+ * （2026-10 起产品从 TRAE SOLO CN 升级成 Trae CN —— 只改名、不迁数据，
+ * 旧目录 TRAE SOLO CN 会并存但被冻结，路径选择见 main/paths.ts 的 traeCnBaseName()）
  * 旁边还有 -wal / -shm。用量记在 server_history_info 表里 `source = 'llm_default'`
  * 那些行的 extra_info JSON 上（exact_* 系列）。顶层的 token_usage 列与
  * exact_total_tokens_v1 逐行相等（实测 246/246，0 失配），所以只认 extra_info。
@@ -24,7 +26,7 @@
  *
  * 1) 密钥是**裸 32 字节**（`PRAGMA key = "x'…'"` 那一档）：enc_key = rawkey，
  *    **不做 PBKDF2**；mac_key = PBKDF2-HMAC-SHA512(rawkey, salt ^ 0x3A, 2 轮, 32B)。
- *    更麻烦的是它**只在 TraeWork 进程的内存里** —— 磁盘 5.7 万个文件、注册表、
+ *    更麻烦的是它**只在 Trae CN 进程的内存里** —— 磁盘 5.7 万个文件、注册表、
  *    凭据管理器、DPAPI 块、进程环境块、以及由 ICUBE_MACHINE_ID 派生的 69 种组合，
  *    全都 0 命中。所以密钥得由主进程先去取（main/traecn-key.ts），
  *    拿不到时整个源显示 0 —— 这不是「读不到数据」，是「压根没有钥匙」。
@@ -47,7 +49,7 @@
  *
  * 账本里**没有**窗口大小 —— database.db 是用量账，记的是「这次花了多少」，
  * 不是「允许花多少」。窗口在另一个库里：Electron 宿主的全局状态库
- * `%APPDATA%\TRAE SOLO CN\User\globalStorage\state.vscdb`（**明文 SQLite，
+ * `%APPDATA%\Trae CN\User\globalStorage\state.vscdb`（**明文 SQLite，
  * 不需要密钥**），ItemTable 里两张 `…AI.agent.model.model_list_map` 键存着
  * 完整的模型目录，per-model 带 `context_window_size: {max, default}`。
  *
@@ -259,7 +261,7 @@ function decryptOnce(dbPath: string, key: Buffer, dir: string): SnapshotAttempt 
  * 为什么单独一个库、单独一条读取路径：database.db 是 ai-agent sidecar 的
  * SQLCipher 账本（要扫进程内存才拿得到钥匙），而模型目录是 Electron 宿主写的
  * 明文 VS Code 状态库。两者进程不同、加密与否不同，**目录这一半不依赖密钥** ——
- * 所以别把它塞进解密流程里，那会让「TraeWork 没在跑就全 0」这条限制平白扩大
+ * 所以别把它塞进解密流程里，那会让「Trae CN 没在跑就全 0」这条限制平白扩大
  * 到水位上。
  *
  * 只取 context_window_size.default（生效值），刻意忽略 max：见文件头的说明。
@@ -292,7 +294,7 @@ export function readTraeCnContextWindows(statePath: string): Map<string, number>
     }
   }
 
-  // 先试只读直开：这条最便宜。state.vscdb 带 -wal，TraeWork 正在跑时直开
+  // 先试只读直开：这条最便宜。state.vscdb 带 -wal，Trae CN 正在跑时直开
   // 也能读到 WAL 里的最新数据（与 zcode 的 readDatabase 同一套分寸）。
   if (attempt(statePath)) return windows
 
@@ -373,7 +375,7 @@ type TraeCnCall = CallRecord & { agentType: string }
 export interface TraeCnCollectOptions {
   /** database.db 的完整路径 */
   dbPath: string
-  /** 32 字节裸密钥；null 表示还没取到（TraeWork 没在运行） */
+  /** 32 字节裸密钥；null 表示还没取到（Trae CN 没在运行） */
   key: Buffer | null
   /**
    * 模型目录 state.vscdb 的完整路径 —— 上下文窗口从这里查。
@@ -388,7 +390,7 @@ export interface TraeCnCollectOptions {
 }
 
 /**
- * 读一次 TRAE SOLO CN 的账，摊成一张 Snapshot。
+ * 读一次 Trae CN 的账，摊成一张 Snapshot。
  *
  * 密钥缺失、库不存在、快照反复拍糊，都**不抛异常** —— 只留一条 warning 与一张
  * 全 0 的快照。主进程的轮询是 20 秒一次，在这里抛异常只会让整个面板停摆，
@@ -401,15 +403,15 @@ export function collectTraeCnSnapshot(options: TraeCnCollectOptions): Snapshot {
   const empty = (): Snapshot =>
     buildSnapshot([], { kind: 'traecn', dir, files: 0, dbRows: 0, now, warnings })
 
-  // 窗口目录独立于密钥：key 为空也先读，省得 TraeWork 没开时把水位一并丢掉
+  // 窗口目录独立于密钥：key 为空也先读，省得 Trae CN 没开时把水位一并丢掉
   const windows = options.statePath ? readTraeCnContextWindows(options.statePath) : new Map<string, number>()
 
   if (!options.key) {
-    warnings.push('没取到 TRAE SOLO CN 的数据库密钥（TraeWork CN 没在运行？），用量将显示为 0')
+    warnings.push('没取到 Trae CN 的数据库密钥（Trae CN 没在运行？），用量将显示为 0')
     return empty()
   }
   if (!existsSync(options.dbPath)) {
-    warnings.push(`未找到 TRAE SOLO CN 的用量库（${options.dbPath}），用量将显示为 0`)
+    warnings.push(`未找到 Trae CN 的用量库（${options.dbPath}），用量将显示为 0`)
     return empty()
   }
 
@@ -427,7 +429,7 @@ export function collectTraeCnSnapshot(options: TraeCnCollectOptions): Snapshot {
     }
     if (!plainPath) {
       warnings.push(
-        `TRAE SOLO CN 的用量库连拍 ${SNAPSHOT_TRIES} 次都不完整（${lastIntegrity}），本次用量显示为 0`
+        `Trae CN 的用量库连拍 ${SNAPSHOT_TRIES} 次都不完整（${lastIntegrity}），本次用量显示为 0`
       )
       return empty()
     }
@@ -515,7 +517,7 @@ export function collectTraeCnSnapshot(options: TraeCnCollectOptions): Snapshot {
         })
       }
 
-      if (!calls.length) warnings.push('TRAE SOLO CN 的账本里没有读到任何模型调用，用量将显示为 0')
+      if (!calls.length) warnings.push('Trae CN 的账本里没有读到任何模型调用，用量将显示为 0')
       return buildSnapshot(sessions, {
         kind: 'traecn',
         dir,

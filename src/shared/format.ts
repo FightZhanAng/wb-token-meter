@@ -63,7 +63,7 @@ export function hasTokens(kind: SourceKind): boolean {
  * DeepSeek Harness 也一样（pi-ai 把 reasoning 折进了 output）。
  * Reasonix 老流水把思考折进 completion、不单记，但 2026-06 起新版按天流水
  * 单记了 reasoning（仍是输出的子集）—— 有真数据就不该藏，照常显示。
- * TRAE SOLO CN 同理：exact_reasoning_tokens_v1 单记，但语义标记写明
+ * Trae CN 同理：exact_reasoning_tokens_v1 单记，但语义标记写明
  * `provider_raw_usage_completion_includes_reasoning`，它已经在 output 里了，
  * 所以只作明细、不加进合计。
  */
@@ -114,7 +114,7 @@ export function sourceLabel(kind: SourceKind): string {
   if (kind === 'mimo') return 'MiMo'
   if (kind === 'reasonix') return 'Reasonix'
   if (kind === 'dsh') return 'DeepSeek Harness'
-  if (kind === 'traecn') return 'TRAE SOLO CN'
+  if (kind === 'traecn') return 'Trae CN'
   if (kind === 'opencode-desktop') return 'OpenCode'
   if (kind === 'opencode') return 'OpenCode Go'
   return 'Kimi Code'

@@ -121,17 +121,30 @@ export function dshDir(): string {
 }
 
 /**
- * TRAE SOLO CN（TraeWork CN）的数据目录 —— 用量库 database.db 就在这一层。
+ * 数据目录的基名。2026-10 起 TRAE SOLO CN 升级成 Trae CN —— 只改了名，
+ * 数据不迁移：新版写 <appData>/Trae CN，旧版停在 <appData>/TRAE SOLO CN。
+ * 升级后两个目录会并存（旧的那份被冻结），所以按存在与否优先新版、旧版兜底；
+ * 两个都没有时仍返回新版名（路径照常拼出来，只是读不到，与「目录没建」等价）。
+ */
+function traeCnBaseName(): string {
+  const appData = app.getPath('appData')
+  if (existsSync(join(appData, 'Trae CN'))) return 'Trae CN'
+  if (existsSync(join(appData, 'TRAE SOLO CN'))) return 'TRAE SOLO CN'
+  return 'Trae CN'
+}
+
+/**
+ * Trae CN 的数据目录 —— 用量库 database.db 就在这一层。
  *
  * 它用的是 Electron 的标准 userData 基址，目录名取 product.json 里的
- * win32NameVersion（'TraeWork CN' 是应用名，数据目录却是 'TRAE SOLO CN'，
- * 两者不一致，别照名字猜）。库本身是 SQLCipher 4 加密的，
+ * win32NameVersion（应用名与数据目录名不一致，别照名字猜；升级前后名字也变过一次，
+ * 见 traeCnBaseName()）。库本身是 SQLCipher 4 加密的，
  * 密钥只能从运行中的进程内存里取，见 shared/traecn-collector.ts 的说明。
  */
 export function traeCnDir(): string {
   const override = process.env['WB_TOKEN_METER_TRAECN_DIR']
   if (override) return override
-  return join(app.getPath('appData'), 'TRAE SOLO CN', 'ModularData', 'ai-agent')
+  return join(app.getPath('appData'), traeCnBaseName(), 'ModularData', 'ai-agent')
 }
 
 /** 用量库的完整路径 —— 取密钥（按文件问谁锁着它）与采集都认它 */
@@ -140,7 +153,7 @@ export function traeCnDbPath(): string {
 }
 
 /**
- * TRAE SOLO CN 的**模型目录** —— VS Code 通用的全局状态库，明文 SQLite。
+ * Trae CN 的**模型目录** —— VS Code 通用的全局状态库，明文 SQLite。
  *
  * 注意它不在 traeCnDir() 底下：那个是 ai-agent 的私有目录（SQLCipher 账本
  * 在那里），而模型目录由 Electron 宿主写在标准 userData 的 User\globalStorage 下。
@@ -152,7 +165,7 @@ export function traeCnStatePath(): string {
   if (override) return override
   return join(
     app.getPath('appData'),
-    'TRAE SOLO CN',
+    traeCnBaseName(),
     'User',
     'globalStorage',
     'state.vscdb'

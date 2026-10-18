@@ -1,7 +1,7 @@
 # Token 计量器
 
 **一个用量面板，同时看得见 [WorkBuddy](https://www.workbuddy.cn/)、Qoder CN、Kimi Code、
-ZCode、Xiaomi MiMo、Reasonix、DeepSeek Harness、TRAE SOLO CN、OpenCode 与 OpenCode Go 的消耗。**
+ZCode、Xiaomi MiMo、Reasonix、DeepSeek Harness、Trae CN、OpenCode 与 OpenCode Go 的消耗。**
 
 WorkBuddy 采用积分制，界面上只显示积分、看不到 token 消耗。但每次模型调用的
 官方 token 数据其实都写在本地磁盘上 —— 这个工具把它读出来，做成常驻托盘的用量面板。
@@ -9,16 +9,20 @@ WorkBuddy 采用积分制，界面上只显示积分、看不到 token 消耗。
 Qoder CN 反过来：积分与上下文水位写在本地，token 一个都不给 ——
 每次调用只留一笔积分，界面就按积分画。
 Kimi Code、ZCode、Xiaomi MiMo、Reasonix、DeepSeek Harness 与 OpenCode 没有积分
-这一层，本地留的正好就是 token 用量本身。TRAE SOLO CN 也是只有 token，
-但它的账本加了密，还得先从运行中的进程里取到钥匙（见下）。
-OpenCode Go 更特别：它连 token 都不给看，只有订阅额度的占用比例，得联网去问。
+这一层，本地留的正好就是 token 用量本身。Trae CN 的账本也**只有 token**，
+但它是加过密的，得先从运行中的进程里取到钥匙；它的**积分**反过来只存在于
+云端，要联网查（见下）。OpenCode Go 更特别：它连 token 都不给看，
+只有订阅额度的占用比例，也得联网去问。
 面板右上角（或托盘菜单的「数据源」）可以随时切换看哪一个，几边的账本各算各的、互不影响。
 
 > 非官方第三方工具，与 WorkBuddy、Qoder、Kimi Code、ZCode、小米、Reasonix、
 > DeepSeek、TRAE、opencode 官方均无关。
-> 除 OpenCode Go 的额度查询和更新检查外，所有数据都在本地读取和计算，不修改任何原始文件。
-> 出站请求只有两个：`GET https://opencode.ai/zen/go/v1/usage`（带本机凭证读来的 key，
-> 拿那三个百分比）和更新检查（去本仓库的 Release 拉 `latest.yml`）—— 都不发送任何本地数据。
+> 除 OpenCode Go 的额度查询、Trae CN 的积分查询和更新检查外，所有数据都在本地读取和计算，
+> 不修改任何原始文件。
+> 出站请求只有三个：`GET https://opencode.ai/zen/go/v1/usage`（带本机凭证读来的 key，
+> 拿那三个百分比）、`POST https://api.trae.cn/trae/api/v2/pay/user_current_entitlement_list`
+> （带从 Trae CN 进程内存里取到的那支登录凭证，拿积分余额）和更新检查（去本仓库的 Release
+> 拉 `latest.yml`）—— 除各自的凭证本身外，都不发送任何本地数据。
 
 ## 版本与更新
 
@@ -263,16 +267,19 @@ ZCode / Reasonix 的 input 都含缓存。所以：
 折进 output 了，界面上「· 思考」整行收起。
 
 
-### TRAE SOLO CN 桌面端（只有 token，账本加密）
+### Trae CN 桌面端（本地只有 token、账本加密；另有云端积分）
 
-数据目录取 Electron 的标准 userData 基址（目录名叫 `TRAE SOLO CN`，而应用名是
-`TraeWork CN` —— 两者不一致，别照名字猜）：
+数据目录取 Electron 的标准 userData 基址。**2026-10 起产品从 `TRAE SOLO CN` 升级成
+`Trae CN` —— 只改名、不迁数据**：新版写 `%APPDATA%\Trae CN`，升级后旧目录
+`%APPDATA%\TRAE SOLO CN` 会并存但被冻结，采集器优先读新目录、旧目录兜底
+（路径选择在 `src/main/paths.ts` 的 `traeCnBaseName()`）。目录名取 product.json 的
+`win32NameVersion`，跟显示名不一定一致，别照名字猜：
 
 | 数据源 | 位置 | 内容 |
 |---|---|---|
-| 用量库 | `%APPDATA%\TRAE SOLO CN\ModularData\ai-agent\database.db` | **SQLCipher 4 加密**的 SQLite；`server_history_info` 表里 `source = 'llm_default'` 那些行的 `extra_info` JSON：`exact_prompt_tokens_v1` / `exact_output_tokens_v1` / `exact_cache_read_input_tokens_v1` / `exact_reasoning_tokens_v1`、模型 `config_name`、工作目录 `workspace_folder` |
+| 用量库 | `%APPDATA%\Trae CN\ModularData\ai-agent\database.db` | **SQLCipher 4 加密**的 SQLite；`server_history_info` 表里 `source = 'llm_default'` 那些行的 `extra_info` JSON：`exact_prompt_tokens_v1` / `exact_output_tokens_v1` / `exact_cache_read_input_tokens_v1` / `exact_reasoning_tokens_v1`、模型 `config_name`、工作目录 `workspace_folder` |
 | 会话标题 | 同库 `chat_session` 表 | `session_title`，按 `conversation_id` 关联（实测它等于 `chat_session.session_id`） |
-| **模型目录** | `%APPDATA%\TRAE SOLO CN\User\globalStorage\state.vscdb` | **明文** SQLite（VS Code 通用状态库，**不需要密钥**）；`ItemTable` 里两张 `…AI.agent.model.model_list_map` 键，`context_window_size.default` 就是上下文窗口 |
+| **模型目录** | `%APPDATA%\Trae CN\User\globalStorage\state.vscdb` | **明文** SQLite（VS Code 通用状态库，**不需要密钥**）；`ItemTable` 里两张 `…AI.agent.model.model_list_map` 键，`context_window_size.default` 就是上下文窗口 |
 
 ```
 输入 = exact_prompt_tokens_v1          ← 已含缓存读，跟 WorkBuddy 那一档一样
@@ -290,11 +297,12 @@ ZCode / Reasonix 的 input 都含缓存。所以：
   base64 各种变体）、注册表、Windows 凭据管理器、DPAPI 块、进程环境块，以及由
   `ICUBE_MACHINE_ID` 派生的几十种组合，全部 0 命中。所以先用 Restart Manager 问
   「谁锁着这个库」，再去那个进程的可读内存里捞 64 位 hex 候选，逐个拿**第 1 页的
-  HMAC** 验——验签才是判据，捞到什么不算数。实测一次全量扫描 ~680 MB / 21 秒，
-  所以主进程**必须缓存密钥**，20 秒一轮的刷新扛不住这个代价；TraeWork 重启会换钥，
-  缓存失效靠「第 1 页 HMAC 验不过」来发现。取密钥全在 `src/main/traecn-key.ts`，
+  HMAC** 验——验签才是判据，捞到什么不算数。实测一次全量扫描 ~680 MB、20~30 秒
+  （它还顺带捞云端积分要的那支 JWT，见下），所以主进程**必须缓存密钥**，
+  20 秒一轮的刷新扛不住这个代价；Trae CN 重启会换钥，缓存失效靠「第 1 页 HMAC
+  验不过」来发现。取密钥全在 `src/main/traecn-key.ts`，
   解密 / 聚合在纯 Node 的 `src/shared/traecn-collector.ts`。
-  **TraeWork CN 没在运行时取不到钥匙，这个源会显示 0 并给一条说明** ——
+  **Trae CN 没在运行时取不到钥匙，这个源会显示 0 并给一条说明** ——
   这不是「读不到数据」，是压根没有钥匙。
 - **SQLCipher 的 CBC 不做 PKCS#7 校验**，Node / OpenSSL 这边必须
   `setAutoPadding(false)`。不设会出现「逐页 HMAC 全对、AES 解密全错」
@@ -320,9 +328,41 @@ ZCode / Reasonix 的 input 都含缓存。所以：
 
 已知边界：模型下线 / 分组改名会让查表落空，此时仍退化成「只报已用 token」；解密只在
 内存 / `%TEMP%` 里做，用完即删，不碰原始文件。20 秒一轮的刷新按 db + `-wal` 的文件戳
-（size + mtime）判「库动没动」，没动就直接复用上一份快照 —— TraeWork 关着的时候库是
+（size + mtime）判「库动没动」，没动就直接复用上一份快照 —— Trae CN 关着的时候库是
 死的，重解只是把同一个解密价每轮再付一遍；手动「刷新」绕开缓存，永远真读。
 
+
+#### Trae CN 的积分在云端，只能联网问
+
+这个源的**本地账本只记 token** —— 权益包、总额、已消耗全是服务端才算得出来的，
+磁盘上根本没有积分字段。所以积分单独走一条链路：
+
+```
+POST https://api.trae.cn/trae/api/v2/pay/user_current_entitlement_list
+Authorization: Cloud-IDE-JWT <token>       体：{}
+```
+
+拿回 `usage_summary.{consumed_amount, total_amount, consumption_ratio}` 与一列额度包
+（`user_entitlement_pack_list[].entitlement_base_info.quota.credits_limit`）。
+面板上它是一张单独的「积分」卡，画法与 OpenCode Go 的额度卡一致。
+
+- **用 v2，不用 v1**：`v1/pay/user_current_entitlement_list` 同样返回 200，但响应里
+  **没有 `usage_summary`**（只有按次数的额度），拿不到「已用 / 总额」。
+- **凭证还是从内存里捞**，而且与库密钥**同一趟扫描**（`src/main/traecn-key.ts`）——
+  两支凭证锁在同一批进程里，为第二支再付一遍 21 秒的扫描不划算。磁盘上
+  `%USERPROFILE%\.trae-cn\trae-jwt-token` 那支是过期的 CLI token，恒 401；有效的那支
+  JWT 只活在进程内存里。正则在内存里是贪婪的，候选会**长过真身**（实测同一次扫描
+  出现 1004 / 1005 / 1007 三种长度），所以**不是挑第一支用，而是一支一支打接口验**：
+  200 才算数（`src/main/traecn-usage.ts`）。验通过的那支只缓存在内存里，**不落盘、
+  不进日志**。
+- 解析在纯 Node 的 `src/shared/traecn-credits.ts`：同一个 `display_desc` 的额度包
+  合并求和（「签到奖励」实测 9 条、一天一条），没有 `credits_limit` 的包（「免费」
+  那条）跳过。
+- **它与 WorkBuddy / Qoder CN 的积分不是一本账**：那两家读的是本地账本里的计费记录，
+  这家是云端余额。所以这一层单独一张卡，**也不参与「积分 ↔ token 比价」** ——
+  硬把云端余额塞进比价，只会把本地 token 按一个不相干的价格换算成一堆假积分。
+- 门槛跟 token 一样：**Trae CN 没在运行时取不到凭证，积分卡显示「取不到」而不是 0**。
+  两条链路互不影响 —— 一边读不到，另一边照常显示。
 
 ### OpenCode 桌面端（只有 token）
 
@@ -434,9 +474,10 @@ pnpm dist          # 打包 Windows 安装包与免安装版到 release/
 | `WB_TOKEN_METER_REASONIX_DIR` | 覆盖 Reasonix 旧版数据目录（`usage.jsonl` 在里面），默认 `~/.reasonix` |
 | `WB_TOKEN_METER_REASONIX_STATS_DIR` | 覆盖 Reasonix 新版按天流水目录，默认 `<APPDATA>\Roaming\reasonix\stats` |
 | `WB_TOKEN_METER_DSH_DIR` | 覆盖 DeepSeek Harness 数据目录（会话日志在里面），默认 `~/.dsh` |
-| `WB_TOKEN_METER_TRAECN_DIR` | 覆盖 TRAE SOLO CN 数据目录（加密用量库 `database.db` 在里面），默认 `%APPDATA%\TRAE SOLO CN\ModularData\ai-agent` |
-| `WB_TOKEN_METER_TRAECN_STATE` | 覆盖 TRAE SOLO CN 的模型目录（明文 `state.vscdb`，上下文窗口在里面），默认 `%APPDATA%\TRAE SOLO CN\User\globalStorage\state.vscdb` |
-| `WB_TOKEN_METER_TRAECN_KEY` | 直接给出 TRAE SOLO CN 的库密钥（64 位 hex）—— 只给 `test:core` 的真实数据断言用，免得为了跑一次自检去扫 21 秒内存 |
+| `WB_TOKEN_METER_TRAECN_DIR` | 覆盖 Trae CN 数据目录（加密用量库 `database.db` 在里面），默认 `%APPDATA%\Trae CN\ModularData\ai-agent`（旧目录 `TRAE SOLO CN` 会自动兜底） |
+| `WB_TOKEN_METER_TRAECN_STATE` | 覆盖 Trae CN 的模型目录（明文 `state.vscdb`，上下文窗口在里面），默认 `%APPDATA%\Trae CN\User\globalStorage\state.vscdb` |
+| `WB_TOKEN_METER_TRAECN_KEY` | 直接给出 Trae CN 的库密钥（64 位 hex）—— 只给 `test:core` 的真实数据断言用，免得为了跑一次自检去扫 21 秒内存 |
+| `WB_TOKEN_METER_TRAECN_CREDITS_URL` | 覆盖 Trae CN 积分查询端点（测试用），默认官方 v2 地址 |
 | `WB_TOKEN_METER_OPENCODE_DIR` | 覆盖 OpenCode 数据目录（用量库 `opencode.db` 与凭证 `auth.json` 都在里面），默认 `~/.local/share/opencode` |
 | `WB_TOKEN_METER_OPENCODE_CACHE_DIR` | 覆盖 OpenCode 引擎的缓存目录（模型目录 `models.json` 在里面），默认 `~/.cache/opencode` |
 | `WB_TOKEN_METER_OPENCODE_URL` | 覆盖额度查询端点（测试用），默认官方地址 |
@@ -543,7 +584,7 @@ GitHub Downloads 会卡在证书吊销检查上）。两边都靠 `ELECTRON_MIRR
   Qoder CN 反过来，大数直接报积分、副行是调用次数），下面一行是输入 / 输出 / 调用次数
 - **上下文** —— 带红线区的仪表：已用量、指针、以及会话的工作目录；
   模型上限未知时只报已用量（Qoder CN 按快照里的水位比例画）
-- **结构** —— 输入 / 缓存命中 / 输出 / 思考 的分布（WorkBuddy / ZCode / MiMo / Reasonix / TRAE SOLO CN / OpenCode 单列思考，其余源不单列；
+- **结构** —— 输入 / 缓存命中 / 输出 / 思考 的分布（WorkBuddy / ZCode / MiMo / Reasonix / Trae CN / OpenCode 单列思考，其余源不单列；
   Qoder CN 没有 token，这张卡整块收起）
 - **14 天** —— 每日 token 柱状图（Qoder CN 画积分），**补齐空档**：没有用量的日子画成 0 高度。
   只画「有数据的那些天」会让柱子等距排列，看起来是条连续时间轴，实际日期却在跳
@@ -625,7 +666,7 @@ solid 降级模式（透明不可见时的逃生通道）没有这套待遇 —�
 
 | 菜单项 | 能改什么 |
 |---|---|
-| 数据源 | WorkBuddy / Qoder CN / Kimi Code / ZCode / MiMo / Reasonix / DeepSeek Harness / TRAE SOLO CN / OpenCode / OpenCode Go |
+| 数据源 | WorkBuddy / Qoder CN / Kimi Code / ZCode / MiMo / Reasonix / DeepSeek Harness / Trae CN / OpenCode / OpenCode Go |
 | 外观 | 跟随系统 / 浅色 / 深色 |
 | 胶囊主题 | 跟随面板 / 记录纸 / 深靛 / 琥珀夜光 / 碳黑 |
 | 桌面胶囊 | 显示 / 隐藏 |
@@ -707,11 +748,11 @@ solid 降级模式（透明不可见时的逃生通道）没有这套待遇 —�
   不并进父会话，会作为独立会话出现在排行里（与 ZCode 的 `subagent_child` 同样处理）。
 - DeepSeek Harness 的会话日志是追加写的，正在跑的那个会话可能还没把最后一步 flush 下来，
   所以「今日」会滞后几十秒；首次全量扫描本机 15 个会话约 0.5 秒，之后靠 mtime 缓存跳过。
-- TRAE SOLO CN 的**用量库**密钥只在运行中的 TraeWork 进程内存里，**App 没在跑时
-  token 显示 0** 并给一条说明；密钥一旦取到就缓存，TraeWork 重启换钥靠「第 1 页
+- Trae CN 的**用量库**密钥只在运行中的 Trae CN 进程内存里，**App 没在跑时
+  token 显示 0** 并给一条说明；密钥一旦取到就缓存，Trae CN 重启换钥靠「第 1 页
   HMAC 验不过」发现并重扫（一次全量扫描约 21 秒）。库在被写入时快照可能撕裂，解密
   带重试兜底。
-- 但 TRAE SOLO CN 的**上下文窗口不受这条限制**：它在明文的 `state.vscdb` 里，
+- 但 Trae CN 的**上下文窗口不受这条限制**：它在明文的 `state.vscdb` 里，
   不需要密钥。窗口查表按 `${agent_type}/${config_name}`（`agent_type` 取自账本顶层列），
   模型下线或分组改名才会查不到而退化成「只报已用 token」。
 - OpenCode 桌面端与 CLI **共用同一个引擎库**，拆不出哪条会话来自桌面端

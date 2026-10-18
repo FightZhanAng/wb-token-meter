@@ -19,6 +19,7 @@ import { zstdCompressSync } from 'node:zlib'
 import { OpencodeUsage } from '../src/main/opencode-usage'
 import type { OpencodeUsageOptions } from '../src/main/opencode-usage'
 import { ModelsDevCatalog } from '../src/main/modelsdev'
+import { TraeCnUsage } from '../src/main/traecn-usage'
 import { collectSnapshot, localDate, parseUsageLine } from '../src/shared/collector'
 import {
   collectDshSnapshot,
@@ -46,6 +47,12 @@ import {
   recentSamples,
   windowOf
 } from '../src/shared/opencode-quota'
+import {
+  DEFAULT_CREDITS_ENDPOINT,
+  describeCreditPacks,
+  describeCreditsHttpError,
+  parseCreditsResponse
+} from '../src/shared/traecn-credits'
 import {
   collectQoderSnapshot,
   parseQoderTitleLine,
@@ -2573,12 +2580,12 @@ if (!hasDsh) {
 check('DSH 目录不存在不崩', collectDshSnapshot({ dshDir: join(homedir(), '.dsh-nonexistent') }).sessions.length === 0)
 check('路径为空不崩', collectDshSnapshot({ dshDir: '' }).sessions.length === 0)
 
-/* ---------------------------------------------- 6c. TRAE SOLO CN 数据源 */
+/* ---------------------------------------------- 6c. Trae CN 数据源 */
 
-section('TRAE SOLO CN 用量库解密（临时夹具）')
+section('Trae CN 用量库解密（临时夹具）')
 
 /*
- * 真实账本是 SQLCipher 4 加密的，而密钥只存在于 TraeWork 进程的内存里 ——
+ * 真实账本是 SQLCipher 4 加密的，而密钥只存在于 Trae CN 进程的内存里 ——
  * CI 上既没有库、也没有钥匙。所以这里**在明文里现建一个同构库，再按实物规则逐页加密**：
  * 页布局、裸 key、不补位的 CBC、以及带残留旧帧的 WAL 都照实来。
  * 这一段专门盯三件最容易写错的事：
@@ -3078,24 +3085,26 @@ writeFileSync(traeCnStampDb, Buffer.concat([...traeCnSealedA.sealed, Buffer.allo
 check('库长了文件戳就变', traeCnFileStamp(traeCnStampDb) !== traeCnStamp1)
 check('库不存在时文件戳为 null 而不是抛异常', traeCnFileStamp(join(traeCnRoot, 'nope.db')) === null)
 
-section('TRAE SOLO CN 真实数据')
+section('Trae CN 真实数据')
 
+/* 2026-10 起产品从 TRAE SOLO CN 升级成 Trae CN（只改名、不迁数据），两个目录可能并存
+   —— 与 src/main/paths.ts 的 traeCnBaseName() 同口径：优先新目录、旧目录兜底。 */
+const traeCnAppData = process.env['APPDATA'] ?? join(homedir(), 'AppData', 'Roaming')
+const traeCnBase = existsSync(join(traeCnAppData, 'Trae CN'))
+  ? 'Trae CN'
+  : existsSync(join(traeCnAppData, 'TRAE SOLO CN'))
+    ? 'TRAE SOLO CN'
+    : 'Trae CN'
 const traeCnRealDir =
   process.env['WB_TOKEN_METER_TRAECN_DIR'] ??
-  join(process.env['APPDATA'] ?? join(homedir(), 'AppData', 'Roaming'), 'TRAE SOLO CN', 'ModularData', 'ai-agent')
+  join(traeCnAppData, traeCnBase, 'ModularData', 'ai-agent')
 const traeCnRealDb = join(traeCnRealDir, 'database.db')
 const traeCnRealState =
   process.env['WB_TOKEN_METER_TRAECN_STATE'] ??
-  join(
-    process.env['APPDATA'] ?? join(homedir(), 'AppData', 'Roaming'),
-    'TRAE SOLO CN',
-    'User',
-    'globalStorage',
-    'state.vscdb'
-  )
+  join(traeCnAppData, traeCnBase, 'User', 'globalStorage', 'state.vscdb')
 const traeCnKeyHex = process.env['WB_TOKEN_METER_TRAECN_KEY'] ?? ''
 
-/* 密钥只在 TraeWork 进程的内存里，磁盘 / 注册表 / DPAPI 全无落点 ——
+/* 密钥只在 Trae CN 进程的内存里，磁盘 / 注册表 / DPAPI 全无落点 ——
    所以真实数据这一段必须由外部把密钥递进来（WB_TOKEN_METER_TRAECN_KEY=<64 hex>），
    否则只能跳过。CI 上必然跳过，属正常。 */
 if (!existsSync(traeCnRealDb) || !/^[0-9a-fA-F]{64}$/.test(traeCnKeyHex)) {
@@ -4325,6 +4334,173 @@ async function main(): Promise<void> {
       check('目录里没有模型窗口也算失败', (await catalog.pull()) === false)
     })
 
+    /* --------------------------------------------- Trae CN 云端积分 */
+
+    section('Trae CN 云端积分')
+
+    /* 实测响应裁剪版：usage_summary + 两个有效额度包 + 一条无上限的「免费」+
+       「签到奖励」重复三条 —— 合并与跳过就靠这几条验。 */
+    const TRAECN_CREDITS_BODY = JSON.stringify({
+      is_credits_billing: true,
+      usage_summary: { consumed_amount: 499.2716, consumption_ratio: 0.0924577037037037, total_amount: 5400 },
+      user_entitlement_pack_list: [
+        { display_desc: '老用户福利', entitlement_base_info: { quota: { credits_limit: 4000 } } },
+        { display_desc: '免费', entitlement_base_info: { quota: { enable_solo_ide: true } } },
+        { display_desc: '每月登录赠送', entitlement_base_info: { quota: { credits_limit: 500 } } },
+        { display_desc: '签到奖励', entitlement_base_info: { quota: { credits_limit: 100 } } },
+        { display_desc: '签到奖励', entitlement_base_info: { quota: { credits_limit: 100 } } },
+        { display_desc: '签到奖励', entitlement_base_info: { quota: { credits_limit: 100 } } }
+      ]
+    })
+
+    const creditsParsed = parseCreditsResponse(JSON.parse(TRAECN_CREDITS_BODY))
+    check(
+      '解析出已用与总额',
+      creditsParsed?.consumed === 499.2716 && creditsParsed?.total === 5400,
+      JSON.stringify(creditsParsed)
+    )
+    check('比例取服务端给的值', creditsParsed?.ratio === 0.0924577037037037, String(creditsParsed?.ratio))
+    check(
+      '额度包按 desc 合并、按上限降序',
+      describeCreditPacks(creditsParsed?.packs ?? []) === '老用户福利 4000 · 每月登录赠送 500 · 签到奖励 300',
+      describeCreditPacks(creditsParsed?.packs ?? [])
+    )
+    check('没有 credits_limit 的包被跳过', (creditsParsed?.packs ?? []).every((pack) => pack.desc !== '免费'))
+
+    check('少了 usage_summary 就不认这本账', parseCreditsResponse({ user_entitlement_pack_list: [] }) === null)
+    check('usage_summary 不是对象也不认', parseCreditsResponse({ usage_summary: 'x' }) === null)
+    check('响应压根不是对象也返回 null', parseCreditsResponse(null) === null)
+    check(
+      '服务端没给比例就按 已用÷总额 算',
+      parseCreditsResponse({ usage_summary: { consumed_amount: 500, total_amount: 1000 } })?.ratio === 0.5
+    )
+    check(
+      '比例越界时退回自算',
+      parseCreditsResponse({ usage_summary: { consumed_amount: 500, total_amount: 1000, consumption_ratio: 3 } })
+        ?.ratio === 0.5
+    )
+    const zeroTotalCredits = parseCreditsResponse({ usage_summary: { consumed_amount: 12, total_amount: 0 } })
+    check(
+      '总额为 0 时比例按 0，已用照旧',
+      zeroTotalCredits?.ratio === 0 && zeroTotalCredits?.consumed === 12,
+      JSON.stringify(zeroTotalCredits)
+    )
+    check('负数被夹回 0', parseCreditsResponse({ usage_summary: { consumed_amount: -5, total_amount: -1 } })?.consumed === 0)
+    check('401 的文案说的是凭证、不是网络', describeCreditsHttpError(401).includes('登录凭证'))
+    check('500 的文案带状态码', describeCreditsHttpError(500).includes('500'))
+    check('默认端点指向 v2 权益接口', DEFAULT_CREDITS_ENDPOINT.endsWith('/api/v2/pay/user_current_entitlement_list'))
+
+    /* 假 fetch：按顺序吐预先排好的响应，并记下每次请求的头与体。
+       积分这支不碰真网络 —— 扫描内存捞 JWT 是另一条链路，这里只验「拿到候选之后」。 */
+    const fakeCreditsFetch = (
+      replies: { status: number; body?: unknown }[]
+    ): { impl: typeof fetch; calls: { url: string; headers: Record<string, string>; method: string; body: unknown }[] } => {
+      const calls: { url: string; headers: Record<string, string>; method: string; body: unknown }[] = []
+      let index = 0
+      const impl = (async (url: unknown, init?: RequestInit): Promise<Response> => {
+        calls.push({
+          url: String(url),
+          headers: (init?.headers as Record<string, string>) ?? {},
+          method: init?.method ?? 'GET',
+          body: init?.body
+        })
+        const reply = replies[Math.min(index, replies.length - 1)]
+        index += 1
+        return new Response(reply.body === undefined ? '' : JSON.stringify(reply.body), {
+          status: reply.status,
+          headers: { 'content-type': 'application/json' }
+        })
+      }) as unknown as typeof fetch
+      return { impl, calls }
+    }
+
+    const CREDITS_AUTH_FAIL = { status: 401, body: { code: 1001, message: 'unauthorized' } }
+    const CREDITS_OK = { status: 200, body: JSON.parse(TRAECN_CREDITS_BODY) as unknown }
+    const CREDITS_ENDPOINT = 'http://127.0.0.1:1/trae/api/v2/pay/user_current_entitlement_list'
+
+    const picking = fakeCreditsFetch([CREDITS_AUTH_FAIL, CREDITS_OK])
+    const pickUsage = new TraeCnUsage({ endpoint: CREDITS_ENDPOINT, now: () => clock, fetchImpl: picking.impl })
+    check('候选里只有一支有效也能验出来', (await pickUsage.pull(['jwt_stale', 'jwt_real'])) === true)
+    check('作废那支也真试过', picking.calls.length === 2, String(picking.calls.length))
+    check(
+      '请求头是 Cloud-IDE-JWT + 候选',
+      picking.calls[0]?.headers['authorization'] === 'Cloud-IDE-JWT jwt_stale',
+      picking.calls[0]?.headers['authorization'] ?? '(空)'
+    )
+    check('打到注入的端点用 POST + 空 JSON 体', picking.calls[0]?.url === CREDITS_ENDPOINT && picking.calls[0]?.method === 'POST' && picking.calls[0]?.body === '{}')
+    check(
+      '账上落了已用 / 总额',
+      pickUsage.current().data?.consumed === 499.2716 && pickUsage.current().data?.total === 5400,
+      JSON.stringify(pickUsage.current().data)
+    )
+    check('凭证描述只说来源、不含 token', pickUsage.credentialLabel().includes('内存') && !pickUsage.credentialLabel().includes('jwt_real'))
+
+    tick(60_000 + 1)
+    check('验过的凭证被缓存，下一轮只带它', (await pickUsage.pull([])) === true && picking.calls.length === 3)
+    check(
+      '缓存的就是那支有效的',
+      picking.calls[2]?.headers['authorization'] === 'Cloud-IDE-JWT jwt_real',
+      picking.calls[2]?.headers['authorization'] ?? '(空)'
+    )
+    tick(1_000)
+    check('最小间隔内不再发请求', (await pickUsage.pull([])) === false && picking.calls.length === 3)
+    check('force 能顶开节流', (await pickUsage.pull([], true)) === true && picking.calls.length === 4)
+
+    const allDead = fakeCreditsFetch([CREDITS_AUTH_FAIL])
+    const deadUsage = new TraeCnUsage({ endpoint: CREDITS_ENDPOINT, now: () => clock, fetchImpl: allDead.impl })
+    check('全部候选都不认账时 pull=false', (await deadUsage.pull(['a', 'b', 'c'])) === false)
+    check('每支候选都试了一次', allDead.calls.length === 3, String(allDead.calls.length))
+    check('错误说的是凭证失效', (deadUsage.current().error ?? '').includes('登录凭证'))
+    check('从没成功过就不算 stale', deadUsage.current().stale === false && deadUsage.current().fetchedAt === 0)
+    check('取不到积分时 data 为空', deadUsage.current().data === null)
+
+    const capped = fakeCreditsFetch([CREDITS_AUTH_FAIL])
+    const cappedUsage = new TraeCnUsage({ endpoint: CREDITS_ENDPOINT, now: () => clock, fetchImpl: capped.impl })
+    check(
+      '候选多过上限时只验前 40 支',
+      (await cappedUsage.pull(Array.from({ length: 60 }, (_, index) => `jwt_${index}`))) === false
+    )
+    check('也就是 40 次请求', capped.calls.length === 40, String(capped.calls.length))
+
+    const emptyUsage = new TraeCnUsage({
+      endpoint: CREDITS_ENDPOINT,
+      now: () => clock,
+      fetchImpl: fakeCreditsFetch([]).impl
+    })
+    check('压根没候选就不发请求', (await emptyUsage.pull([])) === false)
+    check('提示说的是没取到凭证', (emptyUsage.current().error ?? '').includes('没取到 Trae CN 的登录凭证'))
+
+    let networkCalls = 0
+    const throwingFetch = (async (): Promise<Response> => {
+      networkCalls += 1
+      throw new Error('boom')
+    }) as unknown as typeof fetch
+    const brokenUsage = new TraeCnUsage({ endpoint: CREDITS_ENDPOINT, now: () => clock, fetchImpl: throwingFetch })
+    check('网络错误时 pull=false', (await brokenUsage.pull(['a', 'b', 'c'])) === false)
+    check('网络错误不再把剩下几支也打一遍', networkCalls === 1, String(networkCalls))
+    check('网络错误的原因如实报出来', brokenUsage.current().error === 'boom', String(brokenUsage.current().error))
+
+    const timeoutFetch = (async (): Promise<Response> => {
+      throw Object.assign(new Error('timed out'), { name: 'TimeoutError' })
+    }) as unknown as typeof fetch
+    const timeoutUsage = new TraeCnUsage({ endpoint: CREDITS_ENDPOINT, now: () => clock, fetchImpl: timeoutFetch })
+    check('超时被翻成中文', (await timeoutUsage.pull(['a'])) === false && timeoutUsage.current().error === '请求超时')
+
+    const nonCreditsBody = fakeCreditsFetch([{ status: 200, body: { user_entitlement_pack_list: [] } }])
+    const wrongShape = new TraeCnUsage({ endpoint: CREDITS_ENDPOINT, now: () => clock, fetchImpl: nonCreditsBody.impl })
+    check('200 但响应里没有 usage_summary 也算失败', (await wrongShape.pull(['a'])) === false)
+    check('这种失败会说出少了什么', (wrongShape.current().error ?? '').includes('usage_summary'))
+
+    const flaky = fakeCreditsFetch([CREDITS_OK, CREDITS_AUTH_FAIL])
+    const flakyUsage = new TraeCnUsage({ endpoint: CREDITS_ENDPOINT, now: () => clock, fetchImpl: flaky.impl })
+    check('第一次成功', (await flakyUsage.pull(['good'])) === true)
+    tick(60_000 + 1)
+    check('之后失败时 pull=false', (await flakyUsage.pull(['good'])) === false)
+    check('旧值留着不丢', flakyUsage.current().data?.total === 5400, JSON.stringify(flakyUsage.current().data))
+    check('并标记为陈旧', flakyUsage.current().stale === true)
+    check('失败原因也带着', (flakyUsage.current().error ?? '').length > 0, String(flakyUsage.current().error))
+    check('退避期内不再发请求', (await flakyUsage.pull(['good'])) === false && flaky.calls.length === 2)
+
     /* --------------------------------------------- 多源隔离 */
 
     section('十个数据源互不影响')
@@ -4348,7 +4524,7 @@ async function main(): Promise<void> {
     const dshCache = new Map()
     collectDshSnapshot({ dshDir: dshDirPath, cache: dshCache, now: FIXED_NOW })
     collectOpencodeSnapshot({ opencodeDir: opencodeDataPath, cacheDir: opencodeCachePath, now: FIXED_NOW })
-    /* TRAE SOLO CN 没有解析缓存（每次都要重新解密），这里再采一次是为了证明
+    /* Trae CN 没有解析缓存（每次都要重新解密），这里再采一次是为了证明
        回放出来的结果稳定、且不会串到别的源 */
     const traeCnRepeat = collectTraeCnSnapshot({ dbPath: traeCnDbFile, key: traeCnKey, now: FIXED_NOW })
 
@@ -4433,7 +4609,7 @@ async function main(): Promise<void> {
     check('读到 Reasonix 数据时缓存确实用上了', !hasReasonix || reasonixCache.size > 0, `${reasonixCache.size} 项`)
     check('读到 DSH 数据时缓存确实用上了', !hasDsh || dshCache.size > 0, `${dshCache.size} 项`)
     check(
-      'TRAE SOLO CN 反复采集结果一致（没有会串味的共享状态）',
+      'Trae CN 反复采集结果一致（没有会串味的共享状态）',
       traeCnRepeat.totals.calls === traeCnB.totals.calls && traeCnRepeat.totals.inputTokens === traeCnB.totals.inputTokens,
       `${traeCnRepeat.totals.calls} 次 / ${traeCnRepeat.totals.inputTokens} token`
     )
@@ -4453,7 +4629,7 @@ async function main(): Promise<void> {
         sourceLabel('qoder') === 'Qoder CN' &&
         sourceLabel('reasonix') === 'Reasonix' &&
         sourceLabel('dsh') === 'DeepSeek Harness' &&
-        sourceLabel('traecn') === 'TRAE SOLO CN' &&
+        sourceLabel('traecn') === 'Trae CN' &&
         SOURCE_ORDER.length === 10,
       SOURCE_ORDER.join('/')
     )

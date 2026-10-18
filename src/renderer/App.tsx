@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState, type JSX, type ReactNode } from 'react'
 import type {
   AppInfo,
+  CreditsInfo,
   DayStat,
   PendingReason,
   QuotaInfo,
@@ -35,6 +36,7 @@ import {
   tokenPerCredit
 } from '@shared/format'
 import { describeReset, quotaLevel, quotaWindowLabel } from '@shared/opencode-quota'
+import { describeCreditPacks } from '@shared/traecn-credits'
 import { updateBusy, updateNeedsAttention, updateStatusText } from '@shared/update'
 
 /* ------------------------------------------------------------ 小工具 */
@@ -122,12 +124,12 @@ function PendingBlock({ reason }: { reason: PendingReason }): JSX.Element {
   return (
     <div className="pending">
       <div className="pending-title">
-        {reason === 'key-scan' ? '正在读取 TraeWork 的数据库密钥' : '正在读取用量数据'}
+        {reason === 'key-scan' ? '正在读取 Trae CN 的数据库密钥' : '正在读取用量数据'}
         <span className="pending-dots">{dots}</span>
       </div>
       <div className="pending-hint">
         {reason === 'key-scan'
-          ? '这个源的账本是加密的，密钥只存在于 TraeWork 的进程内存里。首次启动要扫一遍它的内存（约 20 秒），拿到后本窗口一直有效。'
+          ? '这个源的账本是加密的，密钥只存在于 Trae CN 的进程内存里。首次启动要扫一遍它的内存（约 20 秒），拿到后本窗口一直有效。'
           : '稍候，数据马上就到。'}
       </div>
     </div>
@@ -410,6 +412,67 @@ function QuotaSource({ quota, now }: { quota: QuotaInfo; now: number }): JSX.Ele
           在 opencode 里执行 <code>/connect</code> 连一次 OpenCode Go，凭证会写到 <code>{quota.credential}</code>。
         </div>
       ) : null}
+    </>
+  )
+}
+
+/**
+ * Trae CN 云端积分卡。
+ *
+ * 形状刻意和额度卡保持一致（quota-row / quota-track / quota-meta 那几档 class
+ * 直接复用）：两条都是「联网查来的水位」，用户不该看出两套画法。
+ * 差别只在数字的表示 —— 这边有绝对值（已用 / 总额），所以进度条旁边报的是
+ * 「498.88 / 5400 积分」，而不是三个时间窗的百分比。
+ */
+function CreditsCard({ credits, now }: { credits: CreditsInfo; now: number }): JSX.Element {
+  const never = credits.fetchedAt === 0
+  if (never) {
+    return (
+      <div className="quota-notice">
+        {credits.error ? <>取不到积分：{credits.error}</> : '正在查询积分…'}
+      </div>
+    )
+  }
+  return (
+    <>
+      <div className="quota-rows">
+        <div className={`quota-row${credits.percent >= 90 ? ' danger' : ''}`}>
+          <div className="quota-label">已用</div>
+          <div className="quota-track">
+            <div
+              className={`quota-fill ${quotaLevel(credits.percent)}`}
+              style={{ width: `${Math.min(100, Math.max(0, credits.percent))}%` }}
+            />
+          </div>
+          <div className="quota-percent">{credits.percent}%</div>
+          <div className="quota-reset">
+            <span>
+              {formatCredits(credits.consumed)} / {formatCredits(credits.total)} 积分
+            </span>
+          </div>
+        </div>
+      </div>
+      {credits.packs.length ? (
+        <div className="quota-note">额度包：{describeCreditPacks(credits.packs)}</div>
+      ) : null}
+      {credits.stale ? (
+        <div className="quota-notice">
+          上次刷新失败：{credits.error}；显示的是 {formatClock(credits.fetchedAt)} 的数据。
+        </div>
+      ) : null}
+      <div className="quota-meta">
+        <span>接口</span>
+        <code>{credits.endpoint}</code>
+      </div>
+      <div className="quota-meta">
+        <span>凭证</span>
+        <code>{credits.credential}</code>
+      </div>
+      <div className="quota-meta">
+        <span>更新</span>
+        <span>{`${formatClock(credits.fetchedAt)}（${relativeTime(credits.fetchedAt, now)}）`}</span>
+      </div>
+      <div className="quota-note">积分来自 api.trae.cn 的在线接口 —— 本地账本没有积分字段，只能联网查。</div>
     </>
   )
 }
@@ -1099,6 +1162,21 @@ export default function App(): JSX.Element {
           )
         ) : (
           <>
+            {/* 积分 —— 只有 Trae CN 有这一层：本地账本没有积分字段，得联网查。
+                排在今日之前：它是「还剩多少额度」的抬头，比「今天用了多少」更该先看到。 */}
+            {snapshot?.credits ? (
+              <Channel
+                name="积分"
+                note={
+                  snapshot.credits.fetchedAt
+                    ? `更新于 ${relativeTime(snapshot.credits.fetchedAt, now)}`
+                    : undefined
+                }
+              >
+                <CreditsCard credits={snapshot.credits} now={now} />
+              </Channel>
+            ) : null}
+
             {/* 今日 —— 正在记录的那个通道 */}
             <Channel name="今日" live>
               <div className="counter">

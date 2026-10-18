@@ -102,11 +102,13 @@ export interface Totals extends TokenBundle {
  * 数据源。各边的账本口径都不同，界面必须知道自己在看哪一本：
  * WorkBuddy 有积分（token 只是副产品），Qoder CN 有积分但**没有 token**
  * （服务端只回积分与上下文水位），Kimi Code / ZCode / MiMo / Reasonix /
- * DeepSeek Harness / OpenCode / TRAE SOLO CN 只有 token，OpenCode Go 连 token
+ * DeepSeek Harness / OpenCode / Trae CN 只有 token，OpenCode Go 连 token
  * 都没有 —— 只有订阅额度的占用比例，而且还是联网查的。
  * `opencode-desktop` 是 OpenCode 桌面端（opencode 引擎，与 CLI 共用本地库）
  * 的用量，与联网查额度的 `opencode`（OpenCode Go）是两本账。
- * `traecn` 是唯一**要先去别的进程内存里取密钥**的源（SQLCipher 加密库）。
+ * `traecn` 是唯一**要先去别的进程内存里取密钥**的源（SQLCipher 加密库），
+ * 也是唯一两本账都读的源：本地账记 token，云端账记积分（见 CreditsInfo）——
+ * 后者是联网查的，两者谁读不到都不该把对方拖成 0。
  */
 export type SourceKind =
   | 'workbuddy'
@@ -143,10 +145,12 @@ export interface Snapshot {
   warnings: string[]
   /** 只有 OpenCode Go 会填：订阅额度水位，其它源没有这一层 */
   quota?: QuotaInfo
+  /** 只有 Trae CN 会填：云端积分余额，其它源没有这一层（见 CreditsInfo） */
+  credits?: CreditsInfo
   /**
    * 这一份快照**还没读完**，正在补采。
    *
-   * 为什么需要它：`traecn` 的用量库要扫 TraeWork 进程内存才拿得到密钥（~680MB /
+   * 为什么需要它：`traecn` 的用量库要扫 Trae CN 进程内存才拿得到密钥（~680MB /
    * 21 秒），而首屏不能等 —— 主进程先把「空账 + 密钥没取到」这张快照推上去，
    * 扫完再推真的那张。两张都是合法的 Snapshot，光看内容分不出「读完了，确实是 0」
    * 和「还没读到，暂且是 0」。这个字段就是那个区别。
@@ -163,7 +167,7 @@ export interface Snapshot {
 /**
  * 「还没读完」的原因。界面据此说人话，而不是让用户对着一个 0 猜。
  *
- * - `key-scan`：正在从 TraeWork 进程内存里捞数据库密钥（只在 traecn 出现，
+ * - `key-scan`：正在从 Trae CN 进程内存里捞数据库密钥（只在 traecn 出现，
  *   且只在启动后的第一拍）。这是唯一需要解释「为什么要等」的档位 —— 其余源
  *   都是毫秒级，慢一分钟用户会以为卡死了。
  * - `collect`：主进程正在解密 / 聚合这一轮。
@@ -212,6 +216,47 @@ export interface QuotaInfo {
   credential: string
   /** 最近的采样点，按时间升序 */
   history: UsageSample[]
+}
+
+/* ------------------------------------------------------------ Trae CN 云端积分 */
+
+/**
+ * 一个额度包的上限。同一个 display_desc 会重复出现好几条（「签到奖励」实测 9 条，
+ * 一天一条），解析时已按 desc 合并求和，所以这里是「这一类一共给了多少」，
+ * 不是单张券的额度。
+ */
+export interface CreditPack {
+  desc: string
+  limit: number
+}
+
+/**
+ * Trae CN 的云端积分水位。**只有 traecn 会填** —— 本地那本 SQLCipher 账只记
+ * token，积分（权益包 / 总额 / 已消耗）是服务端才算得出来的，只能联网查。
+ *
+ * 与 QuotaInfo 分开、而不是复用它：QuotaInfo 的语义是「订阅额度在三个时间窗里
+ * 各占了百分之几」（OpenCode Go 那本账，只有百分比），而这里是「一共给了多少
+ * 积分、用掉多少」的绝对值，形状与口径都不一样，硬塞进一个类型只会让两边都别扭。
+ */
+export interface CreditsInfo {
+  /** 已消耗积分 */
+  consumed: number
+  /** 总积分额度 */
+  total: number
+  /** 已用比例 0..100（服务端给的是 0..1，这里换算好，界面直接用） */
+  percent: number
+  /** 额度包明细，按上限从大到小；服务端没给就是空数组 */
+  packs: CreditPack[]
+  /** 最近一次成功拉取的时刻；从未成功过为 0 */
+  fetchedAt: number
+  /** 上次拉取失败，当前显示的是旧值 */
+  stale: boolean
+  /** 上次失败原因；成功时为 null */
+  error: string | null
+  /** 查询端点（展示用） */
+  endpoint: string
+  /** 凭证来源描述，绝不含 token 内容 */
+  credential: string
 }
 
 /* ------------------------------------------------------------ 版本与更新 */
