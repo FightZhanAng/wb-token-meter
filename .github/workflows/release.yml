@@ -127,6 +127,15 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
+      # checkout 必须排在 download-artifact 之前：checkout 会清理工作目录，
+      # 排在后面会把刚下载的 dist/ 删掉 —— 于是 `ls dist/*-setup.exe` 一个都
+      # 匹配不到、gh 立刻退出（v0.12.8 第二次挂在这里，exit 1、耗时不到 1 秒）。
+      # 这个 job 检出仓库只为读 tag 注释，不参与打包。
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -142,33 +151,42 @@ jobs:
       # 轻量 tag（没有注释）时退回自动生成的说明，不至于空正文。
       #
       # 这个 job 原来没有 checkout，工作目录里没有 .git —— 直接 `git tag -l`
-      # 会以 exit 128 把整步带崩（v0.12.8 就是这么挂的：两个平台的包都打好了、
-      # 只差最后发布）。所以先检出仓库，只为拿 tag 注释，不参与打包。
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
+      # 会以 exit 128 把整步带崩（v0.12.8 第一次就是这么挂的：两个平台的包都
+      # 打好了、只差最后发布）。
       - name: 发布 Release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          set -euo pipefail
-          # 用 git tag 的 %(contents) 原样取注释。不要 sed 删空行 —— 空行是
-          # markdown 的段落分隔，删掉整篇会挤成一坨。
-          notes=$(git tag -l --format='%(contents)' "${{ github.ref_name }}")
+          set -uo pipefail
+          tag="${{ github.ref_name }}"
+          # 显式再拉一次这个 tag：checkout 的 fetch-tags 行为在不同版本里不一致，
+          # 而这一步只靠 tag 注释，拿不到就退化成自动说明（不让整步崩掉）。
+          git fetch --force origin "refs/tags/${tag}:refs/tags/${tag}" 2>/dev/null || true
+
+          echo "== 诊断 =="
+          echo "ref_name=${tag}"
+          git rev-parse --is-inside-work-tree 2>&1 || true
+          git tag -l | tail -5 || true
+          ls dist/ | head -20 || true
+
+          notes=$(git tag -l --format='%(contents)' "$tag" 2>/dev/null) || notes=""
+          echo "注释长度 ${#notes}"
+
+          # 产物清单先算出来：glob 一个都没匹配时 gh 会直接报错退出，
+          # 与其让它报「no matches found」，不如在这里说清楚。
+          files=$(ls dist/*-setup.exe dist/*-portable.exe dist/latest.yml dist/*.blockmap \
+                   dist/*.dmg dist/*.zip dist/latest-mac.yml 2>/dev/null)
+          echo "待上传文件:"; printf '%s\n' "$files"
+
           if [ -n "$notes" ]; then
             printf '%s\n' "$notes" > release-notes.md
-            gh release create "${{ github.ref_name }}" \
-              dist/*-setup.exe dist/*-portable.exe dist/latest.yml dist/*.blockmap \
-              dist/*.dmg dist/*.zip dist/latest-mac.yml \
+            gh release create "$tag" $files \
               --repo "${{ github.repository }}" \
-              --title "${{ github.ref_name }}" \
+              --title "$tag" \
               --notes-file release-notes.md
           else
-            gh release create "${{ github.ref_name }}" \
-              dist/*-setup.exe dist/*-portable.exe dist/latest.yml dist/*.blockmap \
-              dist/*.dmg dist/*.zip dist/latest-mac.yml \
+            gh release create "$tag" $files \
               --repo "${{ github.repository }}" \
               --generate-notes
           fi
