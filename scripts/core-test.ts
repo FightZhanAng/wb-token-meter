@@ -3406,6 +3406,15 @@ opencodeFixtureDb.exec(`
     id TEXT PRIMARY KEY, title TEXT, directory TEXT, project_id TEXT,
     time_created INTEGER, time_updated INTEGER, time_archived INTEGER
   );
+  /* 2.x 引擎的表：升级后引擎把写入整体搬到这里，旧表当场停写 */
+  CREATE TABLE session_message (
+    id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER,
+    time_created INTEGER, time_updated INTEGER, data TEXT
+  );
+  CREATE TABLE session_v2 (
+    id TEXT PRIMARY KEY, title TEXT, directory TEXT, project_id TEXT,
+    time_created INTEGER, time_updated INTEGER, time_archived INTEGER
+  );
 `)
 const insertOpencodeMessage = opencodeFixtureDb.prepare(
   'INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?)'
@@ -3451,6 +3460,56 @@ const insertOpencodeSession = opencodeFixtureDb.prepare(
 insertOpencodeSession.run('sess_a', '夹具会话 A', 'D:\\proj\\a', 'global', FIXED_NOW - 9000, FIXED_NOW - 1000, 0)
 insertOpencodeSession.run('sess_b', '夹具会话 B', 'D:\\proj\\b', 'proj_b', FIXED_NOW - 9000, FIXED_NOW - 2000, FIXED_NOW)
 insertOpencodeSession.run('sess_c', '夹具会话 C', 'D:\\proj\\c', 'global', FIXED_NOW - 9000, FIXED_NOW - 1800, 0)
+
+/*
+ * 2.x 引擎那半边。三个刻意安排：
+ *   - m1 在新表里再放一份（升级回填就是这样），同 id 必须只算一次；
+ *   - m7 只在新表里（升级后产生的用量），必须算进来；
+ *   - sess_d 只在新表里，标题要从 session_v2 取。
+ * model 是嵌套的 `{id, providerID}`，与旧表的平铺字段不同，这里正好验证映射。
+ */
+const insertOpencodeModernMessage = opencodeFixtureDb.prepare(
+  'INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?, ?, ?)'
+)
+const ocModernTokens = (
+  input: number,
+  output: number,
+  reasoning: number,
+  cacheRead: number,
+  cacheWrite: number,
+  modelId = 'demo-model',
+  providerId = 'demo-provider',
+  type = 'assistant'
+): string =>
+  JSON.stringify({
+    time: { created: 0 },
+    type,
+    model: { id: modelId, providerID: providerId, variant: 'default' },
+    tokens: {
+      input,
+      output,
+      reasoning,
+      cache: { read: cacheRead, write: cacheWrite }
+    },
+    cost: 0
+  })
+insertOpencodeModernMessage.run('m1', 'sess_a', 'assistant', 1, FIXED_NOW - 3000, FIXED_NOW - 3000, ocModernTokens(1000, 100, 40, 500, 100))
+/* sess_d 刻意排得比 sess_a 更早：活跃评选仍是 sess_a，别让新表抢走既有断言 */
+insertOpencodeModernMessage.run('m7', 'sess_d', 'assistant', 1, FIXED_NOW - 8000, FIXED_NOW - 8000, ocModernTokens(400, 20, 5, 600, 0))
+/* 压缩摘要那次请求也带真实 tokens（引擎记成 compaction），同样要算 */
+insertOpencodeModernMessage.run(
+  'm8',
+  'sess_d',
+  'compaction',
+  2,
+  FIXED_NOW - 7000,
+  FIXED_NOW - 7000,
+  ocModernTokens(100, 8, 0, 0, 0, 'demo-model', 'demo-provider', 'compaction')
+)
+const insertOpencodeModernSession = opencodeFixtureDb.prepare(
+  'INSERT INTO session_v2 (id, title, directory, project_id, time_created, time_updated, time_archived) VALUES (?, ?, ?, ?, ?, ?, ?)'
+)
+insertOpencodeModernSession.run('sess_d', '夹具会话 D', 'D:\\proj\\d', 'global', FIXED_NOW - 9000, FIXED_NOW - 7000, 0)
 opencodeFixtureDb.close()
 /* 模型目录：同名模型挂在两个 provider 下，窗口必须按 provider 分流 */
 writeFileSync(
@@ -3469,16 +3528,21 @@ const opencodeFixture = collectOpencodeSnapshot({
   now: FIXED_NOW
 })
 check('kind 标记为 opencode-desktop', opencodeFixture.kind === 'opencode-desktop')
-check('扫到 3 个会话', opencodeFixture.totals.sessions === 3, String(opencodeFixture.totals.sessions))
-check('零用量与坏 JSON 的行被丢掉', opencodeFixture.totals.calls === 4, String(opencodeFixture.totals.calls))
+check('扫到 4 个会话（新旧表各一半）', opencodeFixture.totals.sessions === 4, String(opencodeFixture.totals.sessions))
+check('零用量与坏 JSON 的行被丢掉', opencodeFixture.totals.calls === 6, String(opencodeFixture.totals.calls))
+check(
+  '两张表同 id 的行只算一次（升级回填不能翻倍）',
+  opencodeFixture.totals.calls === 6,
+  String(opencodeFixture.totals.calls)
+)
 check(
   '输入 = input + 缓存读 + 缓存写（与 MiMo 同口径）',
-  opencodeFixture.totals.inputTokens === 1000 + 500 + 100 + 200 + 1800 + 300 + 700 + 300,
+  opencodeFixture.totals.inputTokens === 1000 + 500 + 100 + 200 + 1800 + 300 + 700 + 300 + 400 + 600 + 100,
   String(opencodeFixture.totals.inputTokens)
 )
-check('缓存命中只算 cache.read', opencodeFixture.totals.cachedTokens === 2600, String(opencodeFixture.totals.cachedTokens))
-check('输出求和', opencodeFixture.totals.outputTokens === 187, String(opencodeFixture.totals.outputTokens))
-check('思考 token 单列', opencodeFixture.totals.reasoningTokens === 50, String(opencodeFixture.totals.reasoningTokens))
+check('缓存命中只算 cache.read', opencodeFixture.totals.cachedTokens === 2600 + 600, String(opencodeFixture.totals.cachedTokens))
+check('输出求和', opencodeFixture.totals.outputTokens === 187 + 20 + 8, String(opencodeFixture.totals.outputTokens))
+check('思考 token 单列', opencodeFixture.totals.reasoningTokens === 50 + 5, String(opencodeFixture.totals.reasoningTokens))
 check(
   '所有粒度的积分都是 0',
   opencodeFixture.totals.credits === 0 &&
@@ -3501,8 +3565,14 @@ check('模型不在目录里时窗口留 0', opencodeFixture.sessions.find((s) =
 check('已归档会话不参与活跃评选', opencodeFixture.active?.sessionId === 'sess_a', String(opencodeFixture.active?.sessionId))
 check('会话标题来自 session 表', opencodeFixture.sessions[0]?.title === '夹具会话 A', opencodeFixture.sessions[0]?.title)
 check(
+  '只在新表的会话从 session_v2 取标题与目录',
+  opencodeFixture.sessions.find((s) => s.sessionId === 'sess_d')?.title === '夹具会话 D',
+  String(opencodeFixture.sessions.find((s) => s.sessionId === 'sess_d')?.title)
+)
+check(
   '按会话所在目录分组',
-  opencodeFixture.projects.map((p) => p.projectDir).sort().join('/') === 'D:\\proj\\a/D:\\proj\\b/D:\\proj\\c'
+  opencodeFixture.projects.map((p) => p.projectDir).sort().join('/') === 'D:\\proj\\a/D:\\proj\\b/D:\\proj\\c/D:\\proj\\d',
+  opencodeFixture.projects.map((p) => p.projectDir).sort().join('/')
 )
 
 const opencodeFixtureStatBefore = statSync(opencodeFixtureDbPath)
@@ -3516,6 +3586,93 @@ check(
 
 rmSync(opencodeFixtureRoot, { recursive: true, force: true })
 rmSync(opencodeFixtureCache, { recursive: true, force: true })
+
+/*
+ * 两张表都可能单独存在：全新安装的 2.x 库没有 message / session，
+ * 很旧的 1.x 库没有 session_message / session_v2。缺表必须当成空表，
+ * 不能因为一条 SELECT 报错就把整份快照丢成 0（那样面板会静默变空）。
+ */
+section('OpenCode 桌面端缺表兜底（只有新表 / 只有旧表）')
+
+const opencodeOnlyModernRoot = mkdtempSync(join(tmpdir(), 'wbtm-opencode-modern-'))
+const opencodeOnlyModernDb = new DatabaseSync(join(opencodeOnlyModernRoot, 'opencode.db'))
+opencodeOnlyModernDb.exec(`
+  CREATE TABLE session_message (
+    id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER,
+    time_created INTEGER, time_updated INTEGER, data TEXT
+  );
+  CREATE TABLE session_v2 (
+    id TEXT PRIMARY KEY, title TEXT, directory TEXT, project_id TEXT,
+    time_created INTEGER, time_updated INTEGER, time_archived INTEGER
+  );
+`)
+opencodeOnlyModernDb
+  .prepare('INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?, ?, ?)')
+  .run(
+    'm1',
+    'sess_x',
+    'assistant',
+    1,
+    FIXED_NOW - 1000,
+    FIXED_NOW - 1000,
+    JSON.stringify({
+      time: { created: 0 },
+      type: 'assistant',
+      model: { id: 'demo-model', providerID: 'demo-provider', variant: 'default' },
+      tokens: { input: 200, output: 40, reasoning: 0, cache: { read: 100, write: 0 } },
+      cost: 0
+    })
+  )
+opencodeOnlyModernDb
+  .prepare('INSERT INTO session_v2 (id, title, directory, project_id, time_created, time_updated, time_archived) VALUES (?, ?, ?, ?, ?, ?, ?)')
+  .run('sess_x', '只有新表的会话', 'D:\\proj\\x', 'global', FIXED_NOW - 9000, FIXED_NOW - 1000, 0)
+opencodeOnlyModernDb.close()
+const opencodeOnlyModern = collectOpencodeSnapshot({
+  opencodeDir: opencodeOnlyModernRoot,
+  cacheDir: opencodeFixtureCache,
+  now: FIXED_NOW
+})
+check('只有新表也能读到调用', opencodeOnlyModern.totals.calls === 1, String(opencodeOnlyModern.totals.calls))
+check(
+  '只有新表时输入 = input + cache.read',
+  opencodeOnlyModern.totals.inputTokens === 300,
+  String(opencodeOnlyModern.totals.inputTokens)
+)
+check('只有新表时没有 warning（缺旧表不算错）', opencodeOnlyModern.warnings.length === 0, JSON.stringify(opencodeOnlyModern.warnings))
+rmSync(opencodeOnlyModernRoot, { recursive: true, force: true })
+
+const opencodeOnlyLegacyRoot = mkdtempSync(join(tmpdir(), 'wbtm-opencode-legacy-'))
+const opencodeOnlyLegacyDb = new DatabaseSync(join(opencodeOnlyLegacyRoot, 'opencode.db'))
+opencodeOnlyLegacyDb.exec(`
+  CREATE TABLE message (
+    id TEXT PRIMARY KEY, session_id TEXT,
+    time_created INTEGER, time_updated INTEGER, data TEXT
+  );
+  CREATE TABLE session (
+    id TEXT PRIMARY KEY, title TEXT, directory TEXT, project_id TEXT,
+    time_created INTEGER, time_updated INTEGER, time_archived INTEGER
+  );
+`)
+opencodeOnlyLegacyDb
+  .prepare('INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?)')
+  .run('m1', 'sess_y', FIXED_NOW - 1000, FIXED_NOW - 1000, ocTokens(200, 40, 0, 100, 0))
+opencodeOnlyLegacyDb
+  .prepare('INSERT INTO session (id, title, directory, project_id, time_created, time_updated, time_archived) VALUES (?, ?, ?, ?, ?, ?, ?)')
+  .run('sess_y', '只有旧表的会话', 'D:\\proj\\y', 'global', FIXED_NOW - 9000, FIXED_NOW - 1000, 0)
+opencodeOnlyLegacyDb.close()
+const opencodeOnlyLegacy = collectOpencodeSnapshot({
+  opencodeDir: opencodeOnlyLegacyRoot,
+  cacheDir: opencodeFixtureCache,
+  now: FIXED_NOW
+})
+check('只有旧表也能读到调用', opencodeOnlyLegacy.totals.calls === 1, String(opencodeOnlyLegacy.totals.calls))
+check(
+  '只有旧表时输入 = input + cache.read',
+  opencodeOnlyLegacy.totals.inputTokens === 300,
+  String(opencodeOnlyLegacy.totals.inputTokens)
+)
+check('只有旧表时没有 warning', opencodeOnlyLegacy.warnings.length === 0, JSON.stringify(opencodeOnlyLegacy.warnings))
+rmSync(opencodeOnlyLegacyRoot, { recursive: true, force: true })
 
 section('OpenCode 桌面端真实数据')
 

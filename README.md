@@ -372,9 +372,17 @@ Authorization: Cloud-IDE-JWT <token>       体：{}
 
 | 数据源 | 位置 | 内容 |
 |---|---|---|
-| 用量库 | `~/.local/share/opencode/opencode.db` → `message` | 每条助手消息的 `data` JSON：`tokens.input` / `output` / `reasoning` / `cache.read` / `cache.write`，外加 `modelID` / `providerID` / `time.created` |
-| 会话元数据 | 同库 `session` 表 | 标题、工作目录、创建 / 更新 / 归档时间（`parent_id` 非空的子代理会话按独立会话计入） |
+| 用量库（1.x 引擎） | `~/.local/share/opencode/opencode.db` → `message` | 每条助手消息的 `data` JSON：`tokens.input` / `output` / `reasoning` / `cache.read` / `cache.write`，外加平铺的 `modelID` / `providerID` / `time.created` |
+| 用量库（2.x 引擎） | 同库 `session_message` 表 | 同名字段，但 `model` 变成嵌套的 `{ id, providerID }`；`type` 是 `assistant` / `compaction` 等，**只要带 `tokens` 就是一笔真实开销**（压缩摘要那次请求同样烧 token） |
+| 会话元数据 | 同库 `session`（1.x）/ `session_v2`（2.x） | 标题、工作目录、创建 / 更新 / 归档时间（`parent_id` 非空的子代理会话按独立会话计入） |
 | 模型目录 | `~/.cache/opencode/models.json` | `provider.models.<模型>.limit.context` —— 上下文窗口按 `provider/model` 查 |
+
+**两张用量表都要读，只认一张就只有半份账。** 引擎 2.2.5（2026-11-04 起）把写入整体
+搬到 `session_message` / `session_v2`，旧表当场停写；升级时它还会把旧行回填进新表
+（同 id、`tokens` 逐字段相同）。所以合并规则是**新表优先、按消息 id 去重**：不去重会把
+升级前的历史算两遍，只读旧表则升级后的用量全是 0（本机实测就是这个现象，面板「今日」
+恒为 0、上下文停在上一次升级前）。缺表（全新安装只有新表、很旧的库只有旧表）按空表
+处理，不算错误、不报 warning。
 
 口径与 MiMo 一脉相承（同源的表结构）：
 
@@ -386,11 +394,11 @@ Authorization: Cloud-IDE-JWT <token>       体：{}
 也就是它的 `input` 同样是**不含缓存读**的纯新增输入。`part` 表里 `step-finish`
 那份 tokens 与 `message` 完全同值（副本），所以只取 `message` 级。
 
-这个库比别的源大得多（本机 732 MB，其中 `event` 表 569 MB、`message` 101 MB），
-所以这个源**不做「复制三件套」的读库兜底** —— 复制 700 MB 只为读两千行不划算；
-只读直开，失败就报「未能读取」。同理，它只碰 `message` / `session` 两张表，
-`event` / `part` 一概不看。桌面端正在运行时照样读得到：SQLite 的只读连接
-不会挡住写者。
+这个库比别的源大得多（本机 1.3 GB，其中 `event` 表占大头、`message` 101 MB），
+所以这个源**不做「复制三件套」的读库兜底** —— 复制 1 GB 只为读两千行不划算；
+只读直开，失败就报「未能读取」。同理，它只碰 `message` / `session_message` /
+`session` / `session_v2` 四张表，`event` / `part` 一概不看。桌面端正在运行时照样
+读得到：SQLite 的只读连接不会挡住写者。
 
 ### OpenCode Go（只有额度，联网查询）
 
