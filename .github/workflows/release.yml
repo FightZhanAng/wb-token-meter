@@ -140,12 +140,23 @@ jobs:
       # tag 也是带注释的（`git tag -a vX.Y.Z -m "…"`），直接取注释才是人写过的
       # 那份说明。--generate-notes 只会把 commit 标题拼成一串，读起来是机器拼的。
       # 轻量 tag（没有注释）时退回自动生成的说明，不至于空正文。
+      #
+      # 这个 job 原来没有 checkout，工作目录里没有 .git —— 直接 `git tag -l`
+      # 会以 exit 128 把整步带崩（v0.12.8 就是这么挂的：两个平台的包都打好了、
+      # 只差最后发布）。所以先检出仓库，只为拿 tag 注释，不参与打包。
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: 发布 Release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          notes=$(git tag -l --format='%(contents)' "${{ github.ref_name }}" | sed '/^$/d')
+          set -euo pipefail
+          # 用 git tag 的 %(contents) 原样取注释。不要 sed 删空行 —— 空行是
+          # markdown 的段落分隔，删掉整篇会挤成一坨。
+          notes=$(git tag -l --format='%(contents)' "${{ github.ref_name }}")
           if [ -n "$notes" ]; then
             printf '%s\n' "$notes" > release-notes.md
             gh release create "${{ github.ref_name }}" \
