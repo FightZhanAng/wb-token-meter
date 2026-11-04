@@ -135,13 +135,29 @@ jobs:
       # latest.yml / latest-mac.yml 与 blockmap 都不能少：应用内的更新检查先去
       # Release 拉清单才知道有没有新版本，blockmap 是差分下载用的。
       # Windows runner 默认 shell 是 pwsh、通配符不展开，这里显式用 bash。
+      #
+      # 正文取 tag 的注释而不是 --generate-notes：本仓库的提交信息是中文的，
+      # tag 也是带注释的（`git tag -a vX.Y.Z -m "…"`），直接取注释才是人写过的
+      # 那份说明。--generate-notes 只会把 commit 标题拼成一串，读起来是机器拼的。
+      # 轻量 tag（没有注释）时退回自动生成的说明，不至于空正文。
       - name: 发布 Release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${{ github.ref_name }}" \
-            dist/*-setup.exe dist/*-portable.exe dist/latest.yml dist/*.blockmap \
-            dist/*.dmg dist/*.zip dist/latest-mac.yml \
-            --repo "${{ github.repository }}" \
-            --generate-notes
+          notes=$(git tag -l --format='%(contents)' "${{ github.ref_name }}" | sed '/^$/d')
+          if [ -n "$notes" ]; then
+            printf '%s\n' "$notes" > release-notes.md
+            gh release create "${{ github.ref_name }}" \
+              dist/*-setup.exe dist/*-portable.exe dist/latest.yml dist/*.blockmap \
+              dist/*.dmg dist/*.zip dist/latest-mac.yml \
+              --repo "${{ github.repository }}" \
+              --title "${{ github.ref_name }}" \
+              --notes-file release-notes.md
+          else
+            gh release create "${{ github.ref_name }}" \
+              dist/*-setup.exe dist/*-portable.exe dist/latest.yml dist/*.blockmap \
+              dist/*.dmg dist/*.zip dist/latest-mac.yml \
+              --repo "${{ github.repository }}" \
+              --generate-notes
+          fi
