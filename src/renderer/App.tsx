@@ -38,7 +38,7 @@ import {
 import { describeReset, quotaLevel, quotaWindowLabel } from '@shared/opencode-quota'
 import { describeCreditPacks } from '@shared/traecn-credits'
 import { updateBusy, updateNeedsAttention, updateStatusText } from '@shared/update'
-import { applySystemTheme } from './theme'
+import { applyTheme } from './theme'
 
 /* ------------------------------------------------------------ 小工具 */
 
@@ -722,6 +722,24 @@ function ThemeGlyph({ mode }: { mode: ThemeMode }): JSX.Element {
   )
 }
 
+/**
+ * 设置：齿轮。用 heroicons v2 的 cog-6-tooth（20/solid，MIT）—— 现成图标在小尺寸
+ * 上打磨过，8 齿在 15px 的按钮里还能分出齿和中心孔；自己拿极坐标拼齿反而容易拼歪。
+ * 只内联这一枚 path，不为此多装一个图标库。
+ */
+function SettingsGlyph(): JSX.Element {
+  return (
+    <svg viewBox="0 0 20 20" aria-hidden="true">
+      <path
+        fill="currentColor"
+        fillRule="evenodd"
+        clipRule="evenodd"
+        d="M7.84 1.804A1 1 0 0 1 8.82 1h2.36a1 1 0 0 1 .98.804l.331 1.652a6.993 6.993 0 0 1 1.929 1.115l1.598-.54a1 1 0 0 1 1.186.447l1.18 2.044a1 1 0 0 1-.205 1.251l-1.267 1.113a7.047 7.047 0 0 1 0 2.228l1.267 1.113a1 1 0 0 1 .206 1.25l-1.18 2.045a1 1 0 0 1-1.187.447l-1.598-.54a6.993 6.993 0 0 1-1.929 1.115l-.33 1.652a1 1 0 0 1-.98.804H8.82a1 1 0 0 1-.98-.804l-.331-1.652a6.993 6.993 0 0 1-1.929-1.115l-1.598.54a1 1 0 0 1-1.186-.447l-1.18-2.044a1 1 0 0 1 .205-1.251l1.267-1.114a7.05 7.05 0 0 1 0-2.227L1.821 7.773a1 1 0 0 1-.206-1.25l1.18-2.045a1 1 0 0 1 1.187-.447l1.598.54A6.992 6.992 0 0 1 7.51 3.456l.33-1.652ZM7.5 10a2.5 2.5 0 1 1 5 0 2.5 2.5 0 0 1-5 0Z"
+      />
+    </svg>
+  )
+}
+
 /* ------------------------------------------------------------ 主组件 */
 
 export default function App(): JSX.Element {
@@ -739,6 +757,14 @@ export default function App(): JSX.Element {
    * 合成一个状态就不用管「菜单没关又开弹窗」这种组合 —— 打开弹窗时菜单自然收掉了。
    */
   const [about, setAbout] = useState<'closed' | 'menu' | 'version'>('closed')
+  /**
+   * 设置独立成一个弹层。
+   *
+   * 更新设置（自动检查 / 自动下载 / 立即检查）原来摊在底栏里，两条常驻开关占着
+   * 一整行 —— 那是「一年改一次」的东西，不该天天占地方。底栏只留版本号，
+   * 这里给它们一个正经的家，以后加别的设置也有地方放。
+   */
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const [appInfo, setAppInfo] = useState<AppInfo | null>(null)
 
   const load = useCallback(async (force: boolean) => {
@@ -785,34 +811,22 @@ export default function App(): JSX.Element {
     [load]
   )
 
-  /**
-   * 设置一变就把 `<html data-theme>` 重写一遍。
-   *
-   * 实测：Electron 改完 `themeSource` 之后，页面的 `prefers-color-scheme`
-   * 已经变了（`matchMedia().matches` 读到的是新值），但 MediaQueryList 的
-   * change 事件不一定派发 —— 表现就是「外观按钮文字变了，界面颜色没变」。
-   * 所以凡是知道「设置改了」的地方都显式调一次，别指望事件。
-   */
-  const syncTheme = useCallback(() => {
-    applySystemTheme()
-    // 万一浏览器进程还没把新的 prefers-color-scheme 推过来，下一帧再补一次（幂等）
-    window.requestAnimationFrame(applySystemTheme)
-  }, [])
-
   /** 系统 → 浅色 → 深色 → 系统。想要哪一档都能一键点到，不必去翻托盘菜单 */
   const cycleTheme = useCallback(async () => {
     const api = window.meter
     if (!api) return
     const next = THEME_ORDER[(THEME_ORDER.indexOf(theme) + 1) % THEME_ORDER.length]
+    // 先在本地落定，不必等 IPC 回来 —— 这一档是明确的，没有猜的余地
     setTheme(next)
+    applyTheme(next)
     try {
       const saved = await api.updateSettings({ theme: next })
       setTheme(saved.theme)
-      syncTheme()
+      applyTheme(saved.theme)
     } catch (cause) {
       setError(String(cause))
     }
-  }, [theme, syncTheme])
+  }, [theme])
 
   /** 标题栏那枚 GitHub 图标：交给系统浏览器打开，别在应用里嵌一层壳 */
   const openHome = useCallback(async () => {
@@ -847,10 +861,10 @@ export default function App(): JSX.Element {
       const offSettings = api.onSettings((settings) => {
         setSource(settings.source)
         setTheme(settings.theme)
+        // 托盘、快捷键、另一个窗口改外观，走的都是这条广播
+        applyTheme(settings.theme)
         setAutoCheck(settings.autoCheckUpdate)
         setAutoDownload(settings.autoDownloadUpdate)
-        // 托盘菜单、快捷键、别的窗口改外观，走的都是这条广播
-        syncTheme()
       })
       const offUpdate = api.onUpdate((next) => setUpdate(next))
       const timer = window.setInterval(() => setNow(Date.now()), 30_000)
@@ -864,18 +878,21 @@ export default function App(): JSX.Element {
       setError(String(cause))
       return
     }
-  }, [load, syncTheme])
+  }, [load])
 
   // 弹层都能用 Esc 收掉 —— 菜单和弹窗都是「看一眼就关」的东西，
   // 逼用户把鼠标跑回去点遮罩或关闭按钮不值当
   useEffect(() => {
-    if (about === 'closed') return
+    if (about === 'closed' && !settingsOpen) return
     const onKey = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') setAbout('closed')
+      if (event.key === 'Escape') {
+        setAbout('closed')
+        setSettingsOpen(false)
+      }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [about])
+  }, [about, settingsOpen])
 
   /** 「关于 → 退出」：和托盘里那一项走同一条 IPC（先置 isQuitting 再退出） */
   const quitApp = useCallback(async () => {
@@ -1086,6 +1103,23 @@ export default function App(): JSX.Element {
   }
   const updateWorking = updateBusy(updateState.status)
   const updateAlerts = updateNeedsAttention(updateState.status)
+  /**
+   * 设置里那枚主按钮：同一时刻只有一件事可做 —— 检查 / 下载 / 装 / 去发布页。
+   * 由状态自己决定它是什么，界面不用摆一排按钮让人猜该点哪个。
+   */
+  const updateAction =
+    updateState.status === 'downloaded'
+      ? { label: '重启并安装', style: 'primary', run: 'install' as const }
+      : updateState.status === 'available' && updateState.canDownload
+        ? { label: '下载更新', style: 'primary', run: 'download' as const }
+        : updateState.status === 'unsupported'
+          ? { label: '打开发布页', style: 'ghost', run: 'page' as const }
+          : { label: '检查更新', style: 'ghost', run: 'check' as const }
+  const updateActionLabel = updateWorking
+    ? updateState.status === 'downloading'
+      ? '下载中…'
+      : '检查中…'
+    : updateAction.label
 
   // 「关于 → 版本」弹窗的内容。主进程还没答话时先摆省略号，不留空行
   const aboutRows: Array<[string, string]> = [
@@ -1132,16 +1166,13 @@ export default function App(): JSX.Element {
                   <button
                     type="button"
                     role="menuitem"
-                    disabled={updateWorking}
                     onClick={() => {
                       setAbout('closed')
-                      void runUpdateAction('check')
+                      setSettingsOpen(true)
                     }}
                   >
-                    检查更新
-                    <span className="menu-hint" title={updateState.message || undefined}>
-                      {updateStatusText(updateState)}
-                    </span>
+                    设置
+                    <span className="menu-hint">更新</span>
                   </button>
                   <span className="menu-rule" aria-hidden="true" />
                   <button type="button" role="menuitem" onClick={() => void quitApp()}>
@@ -1186,6 +1217,26 @@ export default function App(): JSX.Element {
             >
               <ThemeGlyph mode={theme} />
               {themeShort(theme)}
+            </button>
+            <button
+              type="button"
+              className={`icon-button${updateAlerts ? ' alert' : ''}`}
+              // 出错时不亮红点（那不是「等你操作」），但把原因挂进 tooltip，
+              // 底栏不报状态之后这里是唯一能看到的更新信息
+              title={
+                updateAlerts || updateState.status === 'error'
+                  ? `设置 · ${updateStatusText(updateState)}`
+                  : '设置'
+              }
+              aria-label="设置"
+              aria-haspopup="dialog"
+              onClick={() => {
+                setAbout('closed')
+                setSettingsOpen(true)
+              }}
+            >
+              <SettingsGlyph />
+              {updateAlerts ? <span className="dot" aria-hidden="true" /> : null}
             </button>
             <button type="button" className="primary" disabled={busy} onClick={() => void load(true)}>
               {busy ? '刷新中…' : '刷新'}
@@ -1501,80 +1552,97 @@ export default function App(): JSX.Element {
       </div>
 
       {/*
-        底栏固定在窗口底部（body 才是滚动区），版本号与更新状态始终看得见 ——
-        埋进滚动内容里就等于藏起来了，而「我这是哪个版本」正是要找的时候才看的信息。
+        底栏只留版本号：它钉在窗口最下沿，永远看得见 —— 埋进滚动内容里就等于藏起来了，
+        而「我这是哪个版本」正是要找的时候才看的信息。
+        更新动作与那两条开关已经搬进设置面板；有新版本时设置按钮上会亮一枚点。
       */}
       <footer className="app-footer">
-        <div className="foot-row">
-          <span className="foot-version" title="当前运行的版本">
-            v{updateState.current || '—'}
-          </span>
-          <span
-            className={`foot-state${updateAlerts ? ' alert' : ''}`}
-            data-status={updateState.status}
-            title={updateState.notes || undefined}
-          >
-            {updateStatusText(updateState)}
-          </span>
-
-          <span className="foot-actions">
-            {updateWorking ? (
-              <button type="button" className="ghost" disabled>
-                {updateState.status === 'downloading' ? '下载中…' : '检查中…'}
-              </button>
-            ) : updateState.status === 'downloaded' ? (
-              <button type="button" className="primary" onClick={() => void runUpdateAction('install')}>
-                重启并安装
-              </button>
-            ) : updateState.status === 'available' && updateState.canDownload ? (
-              <button type="button" className="primary" onClick={() => void runUpdateAction('download')}>
-                下载更新
-              </button>
-            ) : updateState.status === 'unsupported' ? (
-              <button type="button" className="ghost" onClick={() => void runUpdateAction('page')}>
-                打开发布页
-              </button>
-            ) : (
-              <button
-                type="button"
-                className="ghost"
-                title={updateState.message || undefined}
-                onClick={() => void runUpdateAction('check')}
-              >
-                检查更新
-              </button>
-            )}
-
-            {updateState.status === 'available' && updateState.canDownload ? (
-              <button type="button" className="ghost" onClick={() => void runUpdateAction('page')}>
-                发布页
-              </button>
-            ) : null}
-          </span>
-        </div>
-
-        <div className="foot-row switches">
-          <label className="switch">
-            <input
-              type="checkbox"
-              checked={autoCheck}
-              onChange={(event) => void setUpdateFlag({ autoCheckUpdate: event.target.checked })}
-            />
-            <span className="track" aria-hidden="true" />
-            启动时自动检查更新
-          </label>
-          <label className={`switch${autoCheck ? '' : ' muted'}`}>
-            <input
-              type="checkbox"
-              checked={autoDownload}
-              disabled={!autoCheck}
-              onChange={(event) => void setUpdateFlag({ autoDownloadUpdate: event.target.checked })}
-            />
-            <span className="track" aria-hidden="true" />
-            发现新版本后自动下载
-          </label>
-        </div>
+        <span className="foot-version" title="当前运行的版本">
+          v{updateState.current || '—'}
+        </span>
       </footer>
+
+      {/*
+        设置：和「关于」同一套弹层语言（遮罩 + 白卡），但内容是「能改的东西」。
+        更新原本摊在底栏，两条开关常驻占一整行；现在收进来，底栏只留版本号。
+      */}
+      {settingsOpen ? (
+        <div className="about-layer" role="dialog" aria-modal="true" aria-label="设置">
+          <div className="menu-backdrop" onClick={() => setSettingsOpen(false)} />
+          <div className="settings-card">
+            <div className="settings-head">
+              <span className="settings-title">设置</span>
+              <span className="settings-version">v{updateState.current || appInfo?.version || '—'}</span>
+            </div>
+
+            <div className="settings-group">
+              <div className="settings-group-title">更新</div>
+
+              <div className="settings-row">
+                <div className="settings-row-main">
+                  <div className="settings-row-name">检查新版本</div>
+                  <div
+                    className={`settings-row-note${updateAlerts ? ' alert' : ''}`}
+                    data-status={updateState.status}
+                    title={updateState.notes || undefined}
+                  >
+                    {updateStatusText(updateState)}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  className={updateAction.style}
+                  disabled={updateWorking}
+                  onClick={() => void runUpdateAction(updateAction.run)}
+                >
+                  {updateActionLabel}
+                </button>
+              </div>
+
+              <label className="switch settings-switch">
+                <span className="settings-switch-main">
+                  <span className="settings-row-name">启动时自动检查更新</span>
+                  <span className="settings-row-note">之后每 24 小时查一次</span>
+                </span>
+                <input
+                  type="checkbox"
+                  checked={autoCheck}
+                  onChange={(event) => void setUpdateFlag({ autoCheckUpdate: event.target.checked })}
+                />
+                <span className="track" aria-hidden="true" />
+              </label>
+
+              <label className={`switch settings-switch${autoCheck ? '' : ' muted'}`}>
+                <span className="settings-switch-main">
+                  <span className="settings-row-name">发现新版本后自动下载</span>
+                  <span className="settings-row-note">关掉只做提示，自己去发布页下载</span>
+                </span>
+                <input
+                  type="checkbox"
+                  checked={autoDownload}
+                  disabled={!autoCheck}
+                  onChange={(event) => void setUpdateFlag({ autoDownloadUpdate: event.target.checked })}
+                />
+                <span className="track" aria-hidden="true" />
+              </label>
+            </div>
+
+            <div className="settings-foot">
+              {/* 主按钮已经是「打开发布页」时，这里不再重复一次 */}
+              {updateAction.run === 'page' ? (
+                <span />
+              ) : (
+                <button type="button" className="ghost" onClick={() => void runUpdateAction('page')}>
+                  打开发布页
+                </button>
+              )}
+              <button type="button" className="primary" onClick={() => setSettingsOpen(false)}>
+                完成
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {/*
         「关于 → 版本」：一个盖住整页的弹层。刻意做成应用自己的样式而不是系统对话框 ——

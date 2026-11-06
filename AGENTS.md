@@ -302,11 +302,11 @@ WB_TOKEN_METER_FAKE_UPDATE=<当前版本号> env -u ELECTRON_RUN_AS_NODE \
 
 - **机头分三行，别再合并回去**（用户明确要求）：
   1. `.app-caption` —— 窗口 chrome：整条可拖拽 + `.app-caption-guard` 给系统三键占位。
-     左角只有**一个「关于」**（版本 / 检查更新 / 退出）—— 菜单栏本来就该待在标题栏里，
+     左角只有**一个「关于」**（版本 / 设置 / 退出）—— 菜单栏本来就该待在标题栏里，
      它和三键分处两头、谁也压不到谁，是这一格唯一的应用控件。
      **别把标题或别的按钮搬进来**：跟「− □ ✕」同处一行，系统一换缩放就会互相压
      （用户明确不接受）。
-  2. `.app-id-row` —— 标题 / 更新时间 + GitHub / 外观 / 刷新。
+  2. `.app-id-row` —— 标题 / 更新时间 + GitHub / 外观 / 设置 / 刷新。
   3. `.app-nav` —— 数据源切换。
 - **`CAPTION_HEIGHT = 36`（主进程）与 `.app-caption` 的
   `min-height: env(titlebar-area-height, 0px)` 是一对常数，改一个必须改另一个。**

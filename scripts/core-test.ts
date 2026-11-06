@@ -550,8 +550,17 @@ check('面板渲染当前版本号', appSource.includes('foot-version'))
 check('底栏在滚动区之外',
   appSource.indexOf('className="app-footer"') > appSource.indexOf('className="app-body"'),
   `${appSource.indexOf('className="app-body"')} → ${appSource.indexOf('className="app-footer"')}`)
-check('两个更新开关都在界面上',
-  appSource.includes('启动时自动检查更新') && appSource.includes('发现新版本后自动下载'))
+// 底栏只留版本号：更新状态、按钮、开关都搬进设置面板了
+check('底栏不再承担更新', !appSource.includes('foot-state') && !appSource.includes('foot-actions'))
+// 设置入口在机头，点开是一层弹窗（不是系统对话框）
+check('机头有设置入口', appSource.includes('aria-label="设置"'))
+check('更新开关在设置面板里',
+  appSource.indexOf('settings-card') > 0 &&
+    appSource.indexOf('启动时自动检查更新') > appSource.indexOf('settings-card') &&
+    appSource.indexOf('发现新版本后自动下载') > appSource.indexOf('settings-card'))
+// 底栏不报状态之后，「有件事等你」只剩这枚点
+check('有更新时设置按钮亮一枚点',
+  appSource.includes('{updateAlerts ? <span className="dot"'), appSource.includes('className="dot"') ? 'dot 有' : 'dot 缺')
 check('自动下载开关受自动检查约束',
   appSource.includes('disabled={!autoCheck}'))
 check('preload 暴露了更新接口',

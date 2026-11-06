@@ -365,68 +365,98 @@ export async function runPanelChecks(ctx: SmokeContext, win: BrowserWindow): Pro
   )
   smoke('about', { menu: aboutMenu, dialog: aboutDialog, closed: aboutClosed })
 
-  /* 底栏的版本与更新：点「检查更新」-> 发现新版本 -> 点「下载更新」-> 已就绪。
-     假版本号由模块顶层的 WB_TOKEN_METER_FAKE_UPDATE 注入，全程不走网络。 */
+  /* 设置面板里的更新流程：打开设置 → 点「检查更新」→ 发现新版本 → 点「下载更新」→ 已就绪。
+     假版本号由模块顶层的 WB_TOKEN_METER_FAKE_UPDATE 注入，全程不走网络。
+     底栏现在只留版本号，所以「设置打开了吗 / 底栏还有几个子节点」也一并回报。 */
   const settingsBeforeUpdate = { ...(ctx.settings() ?? DEFAULT_SETTINGS) }
 
-  const readFooter = async (): Promise<unknown> =>
+  const openSettings = async (): Promise<void> => {
+    await win.webContents.executeJavaScript(
+      `(() => {
+         const btn = document.querySelector('.header-actions [aria-label="设置"]')
+         if (btn) btn.click()
+       })()`
+    )
+    await wait(250)
+  }
+
+  const readSettings = async (): Promise<unknown> =>
     win.webContents.executeJavaScript(
       `(() => {
+         const card = document.querySelector('.settings-card')
          const footer = document.querySelector('.app-footer')
-         const box = footer ? footer.getBoundingClientRect() : null
+         const box = card ? card.getBoundingClientRect() : null
+         const foot = footer ? footer.getBoundingClientRect() : null
          return {
-           version: document.querySelector('.foot-version')?.textContent || '',
-           state: document.querySelector('.foot-state')?.textContent || '',
-           status: document.querySelector('.foot-state')?.dataset.status || '',
-           actions: [...document.querySelectorAll('.foot-actions button')].map((el) => el.textContent.trim()),
-           switches: [...document.querySelectorAll('.foot-row.switches .switch')].map((el) => ({
+           open: !!card,
+           version: document.querySelector('.settings-version')?.textContent || '',
+           footVersion: document.querySelector('.foot-version')?.textContent || '',
+           state: document.querySelector('.settings-row .settings-row-note')?.textContent || '',
+           status: document.querySelector('.settings-row .settings-row-note')?.dataset.status || '',
+           actions: [...document.querySelectorAll('.settings-row button, .settings-foot button')].map((el) =>
+             el.textContent.trim()
+           ),
+           switches: [...document.querySelectorAll('.settings-card .switch')].map((el) => ({
              label: el.textContent.trim(),
              checked: el.querySelector('input') ? el.querySelector('input').checked : null,
              disabled: el.querySelector('input') ? el.querySelector('input').disabled : null
            })),
-           // 底栏是固定的一条，必须落在视口内且贴着下沿
-           footer: box
+           badge: !!document.querySelector('.header-actions .icon-button .dot'),
+           // 弹层落在视口里；底栏贴着下沿，且只有版本号一个子节点
+           card: box
              ? { top: Math.round(box.top), bottom: Math.round(box.bottom), viewport: window.innerHeight }
-             : null
+             : null,
+           footer: foot
+             ? { top: Math.round(foot.top), bottom: Math.round(foot.bottom), viewport: window.innerHeight }
+             : null,
+           footerChildren: footer ? footer.children.length : 0
          }
        })()`
     )
 
-  const clickFooterButton = async (label: string): Promise<void> => {
+  const clickSettingsAction = async (label: string): Promise<void> => {
     await win.webContents.executeJavaScript(
       `(() => {
-         const btn = [...document.querySelectorAll('.foot-actions button')]
+         const btn = [...document.querySelectorAll('.settings-row button, .settings-foot button')]
            .find((el) => el.textContent.trim() === ${JSON.stringify(label)})
          if (btn) btn.click()
        })()`
     )
   }
 
-  const footerIdle = await readFooter()
-  await clickFooterButton('检查更新')
+  await openSettings()
+  const updateIdle = await readSettings()
+  await clickSettingsAction('检查更新')
   await wait(700)
-  const footerAvailable = await readFooter()
-  await clickFooterButton('下载更新')
+  const updateAvailable = await readSettings()
+  await clickSettingsAction('下载更新')
   await wait(700)
-  const footerDownloaded = await readFooter()
-  shot('window-update.png', await win.webContents.capturePage())
+  const updateDownloaded = await readSettings()
+  shot('window-settings.png', await win.webContents.capturePage())
 
   // 开关要真的落到设置文件里，而不是只在界面上动一下
   const autoCheckWas = ctx.settings()?.autoCheckUpdate ?? true
   await win.webContents.executeJavaScript(
     `(() => {
-       const box = document.querySelector('.foot-row.switches .switch input')
+       const box = document.querySelector('.settings-card .switch input')
        if (box) box.click()
      })()`
   )
   await wait(400)
-  const footerAfterToggle = await readFooter()
+  const updateAfterToggle = await readSettings()
+
+  await clickSettingsAction('完成')
+  await wait(300)
+  const settingsClosed = await win.webContents.executeJavaScript(
+    `(() => !document.querySelector('.settings-card'))()`
+  )
 
   smoke('update', {
-    idle: footerIdle,
-    available: footerAvailable,
-    downloaded: footerDownloaded,
-    afterToggle: footerAfterToggle,
+    idle: updateIdle,
+    available: updateAvailable,
+    downloaded: updateDownloaded,
+    afterToggle: updateAfterToggle,
+    closed: settingsClosed,
     autoCheck: { was: autoCheckWas, now: ctx.settings()?.autoCheckUpdate },
     state: ctx.currentUpdate()
   })

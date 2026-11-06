@@ -514,6 +514,7 @@ button.ghost:hover:not(:disabled) {
 
 /* 纯图标按钮：圆形。拉伸到和相邻按钮同高，一排按钮里不会凹下去 */
 .icon-button {
+  position: relative;
   align-self: stretch;
   width: 30px;
   padding: 0;
@@ -531,6 +532,21 @@ button.ghost:hover:not(:disabled) {
   display: block;
   width: 15px;
   height: 15px;
+}
+
+/*
+ * 有新版本时，设置按钮右上角亮一枚点 —— 底栏已经不报更新状态了，
+ * 这枚点是「有件事等你」唯一的常驻信号。
+ */
+.icon-button .dot {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--pen);
+  box-shadow: 0 0 0 2px var(--paper);
 }
 
 /* ═══════════════════════════════════════════════ 数据源 · 分段控件 */
@@ -748,6 +764,119 @@ button.ghost:hover:not(:disabled) {
   margin-top: var(--space-6);
 }
 
+/* ═══════════════════════════════════════════════ 设置弹层 */
+
+/*
+ * 和「关于」同一套外皮：遮罩 + 白卡 + 18 圆角。
+ * 区别是内容可改 —— 一行状态配一枚按钮，再往下是两条整行可点的开关。
+ */
+.settings-card {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  width: min(460px, calc(100% - 36px));
+  max-height: calc(100% - 48px);
+  overflow-y: auto;
+  padding: var(--space-6);
+  border-radius: var(--radius-lg);
+  background: var(--paper);
+  box-shadow: var(--elev-raised), var(--elev-ring);
+}
+
+.settings-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.settings-title {
+  font-family: var(--font-display);
+  font-size: var(--text-xl);
+  font-weight: 600;
+  letter-spacing: var(--tracking-display);
+}
+
+.settings-version {
+  font-family: var(--font-num);
+  font-size: var(--text-xs);
+  color: var(--meta);
+}
+
+/* 一节设置：小节名 + 若干行。行间靠间距分，不再画线 */
+.settings-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--border-soft);
+}
+
+.settings-group-title {
+  font-size: var(--text-xs);
+  color: var(--meta);
+}
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.settings-row-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.settings-row-name {
+  font-size: var(--text-sm);
+  color: var(--ink);
+}
+
+.settings-row-note {
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.settings-row-note.alert {
+  color: var(--pen);
+}
+
+.settings-row-note[data-status='error'] {
+  color: var(--alarm);
+}
+
+/* 开关整行可点：文字在左、轨道贴右 */
+.settings-switch {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  width: 100%;
+}
+
+.settings-switch-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.settings-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--border-soft);
+}
+
 /* ═══════════════════════════════════════════════════════════ 纸面 */
 
 /*
@@ -792,66 +921,22 @@ button.ghost:hover:not(:disabled) {
 /* ═══════════════════════════════════════════════════════════ 底轨 */
 
 /*
- * 版本与更新固定在窗口底部。滚动区是 .app-body，所以这一行永远看得见。
+ * 只剩版本号：更新动作与那两条开关都搬进设置面板了。
+ * 它钉在窗口底部，滚动区是 .app-body，所以这一行永远看得见。
  */
 .app-footer {
   flex: none;
   display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-  padding: var(--space-3) var(--space-6) var(--space-4);
+  align-items: center;
+  padding: var(--space-3) var(--space-6);
   background: var(--paper);
   border-top: 1px solid var(--border-soft);
 }
 
-.foot-row {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  min-width: 0;
-}
-
 .foot-version {
-  flex: none;
+  font-family: var(--font-num);
   font-size: var(--text-xs);
   color: var(--meta);
-}
-
-.foot-state {
-  flex: 1;
-  min-width: 0;
-  font-size: var(--text-xs);
-  color: var(--muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* 有新版本可装时用强调色 —— 那正是「现在要做的事」 */
-.foot-state.alert {
-  color: var(--pen);
-}
-
-.foot-state[data-status='error'] {
-  color: var(--alarm);
-}
-
-.foot-actions {
-  flex: none;
-  display: flex;
-  gap: var(--space-2);
-}
-
-.foot-actions button {
-  font-size: var(--text-xs);
-  padding: 4px 10px;
-}
-
-.foot-row.switches {
-  gap: var(--space-6);
-  padding-top: var(--space-3);
-  margin-top: var(--space-1);
-  border-top: 1px solid var(--border-soft);
 }
 
 /* ── 开关：iOS 轨道 + 圆钮 ── */
