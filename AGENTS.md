@@ -179,6 +179,10 @@ git push ssh-origin main           # 扔后台
 - **任何 `v*` tag 推上去都会跑一次完整构建 + 发布。别推临时 tag 试手。**
 - **tag 用带注释的**：`git tag -a vX.Y.Z -m "vX.Y.Z：中文摘要"`，
   `git cat-file -t vX.Y.Z` 应返回 `tag`（返回 `commit` 就是误用了轻量 tag）。
+- **用 `-F 文件` 写长注释时，必须加 `--cleanup=whitespace`**：`git tag` 默认按
+  `strip` 清理，把 `#` 开头的行当注释删掉 —— 正文第一行常是 `## 标题`，于是
+  Release 正文会从半句话开始。打完 `git cat-file -p vX.Y.Z | head -12` 检查一眼。
+  （`git commit -F` 默认是 `whitespace`，不会吞；两者不一样。）
 - **已经推过的 tag 不要删了重推**：会再触发一次 run；如果第一次还在跑，
   删 tag 会让它的 checkout（按 tag 名检出）失败，留一个红叉。
 - 手动触发（`workflow_dispatch`）**只把 exe 留档成 artifact，不发 Release**。
