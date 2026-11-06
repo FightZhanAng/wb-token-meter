@@ -17,8 +17,8 @@ export const CAPSULE_THEME_ORDER: CapsuleTheme[] = ['auto', 'paper', 'ink', 'amb
 
 const LABELS: Record<CapsuleTheme, string> = {
   auto: '跟随面板',
-  paper: '记录纸',
-  ink: '深靛',
+  paper: '白牌',
+  ink: '石墨',
   amber: '琥珀夜光',
   carbon: '碳黑'
 }
@@ -31,13 +31,13 @@ export function capsuleThemeLabel(theme: CapsuleTheme): string {
 /**
  * 卡片头部那个按钮里塞得下的短名。
  *
- * 单独写一张表，不靠 `LABELS[theme].slice(0, 2)` —— 那样「记录纸」会变成
- * 「记录」，在按钮上紧挨着一个色块看，更像动词。
+ * 单独写一张表，不靠 `LABELS[theme].slice(0, 2)` —— 那样「白牌」会变成
+ * 「白牌」倒是没问题，但「琥珀夜光」会变成「琥珀」，两处不一致读着别扭。
  */
 const SHORT: Record<CapsuleTheme, string> = {
   auto: '面板',
-  paper: '纸',
-  ink: '深靛',
+  paper: '白',
+  ink: '石墨',
   amber: '琥珀',
   carbon: '碳黑'
 }
@@ -55,8 +55,8 @@ export function capsuleThemeShort(theme: CapsuleTheme): string {
  * CSS 那边写的是小写、这里是十六进制大写），core-test 会去对。
  */
 export const CAPSULE_SOLID_BG: Record<Exclude<CapsuleTheme, 'auto'>, string> = {
-  paper: '#F6F8F5',
-  ink: '#111726',
+  paper: '#FFFFFF',
+  ink: '#000000',
   amber: '#12100B',
   carbon: '#141618'
 }

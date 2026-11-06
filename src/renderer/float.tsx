@@ -146,29 +146,30 @@ function readingsOf(snapshot: Snapshot | null): Readings {
 /* ------------------------------------------------------------ 圆环 */
 
 /**
- * 上下文水位圆环：颜色随水位从墨蓝转琥珀再转红 —— 和面板上那把仪表的分区
+ * 上下文水位圆环：颜色随水位从强调蓝转琥珀再转红 —— 和面板上那把仪表的分区
  * 是同一套语义，两处对得上。
  * 颜色走 style 而不是 SVG 呈现属性：后者不解析 CSS 变量，深色下会留在浅色值。
  */
 function WaterRing({ ratio }: { ratio: number }): JSX.Element {
-  const radius = 13
+  const size = 34
+  const radius = 14
   const circumference = 2 * Math.PI * radius
   const clamped = Math.min(1, Math.max(0, ratio))
-  const color = clamped >= 0.9 ? 'var(--alarm)' : clamped >= 0.7 ? 'var(--warn)' : 'var(--d-in)'
+  const color = clamped >= 0.9 ? 'var(--alarm)' : clamped >= 0.7 ? 'var(--warn)' : 'var(--pen)'
 
   return (
-    <svg className="ring" width="32" height="32" viewBox="0 0 32 32" aria-hidden="true">
-      <circle cx="16" cy="16" r={radius} fill="none" style={{ stroke: 'var(--track)' }} strokeWidth="4" />
+    <svg className="ring" width={size} height={size} viewBox={`0 0 ${size} ${size}`} aria-hidden="true">
+      <circle cx={size / 2} cy={size / 2} r={radius} fill="none" style={{ stroke: 'var(--track)' }} strokeWidth="3.5" />
       <circle
-        cx="16"
-        cy="16"
+        cx={size / 2}
+        cy={size / 2}
         r={radius}
         fill="none"
         style={{ stroke: color }}
-        strokeWidth="4"
+        strokeWidth="3.5"
         strokeLinecap="round"
         strokeDasharray={`${circumference * clamped} ${circumference}`}
-        transform="rotate(-90 16 16)"
+        transform={`rotate(-90 ${size / 2} ${size / 2})`}
       />
     </svg>
   )

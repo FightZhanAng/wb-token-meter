@@ -12,8 +12,9 @@ declare global {
   interface Window {
     /** preload 通过 contextBridge 注入；缺失时界面必须还能渲染 */
     meter?: {
-      getSnapshot(): Promise<Snapshot>
-      refresh(): Promise<Snapshot>
+      /** 首轮采集可能还没成功 —— 那时返回 null，界面该画载入态而不是 0 */
+      getSnapshot(): Promise<Snapshot | null>
+      refresh(): Promise<Snapshot | null>
       openDataDir(): Promise<string>
       /** 在系统浏览器里打开项目主页（地址写死在主进程） */
       openHome(): Promise<string>

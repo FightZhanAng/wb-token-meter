@@ -38,6 +38,7 @@ import {
 import { describeReset, quotaLevel, quotaWindowLabel } from '@shared/opencode-quota'
 import { describeCreditPacks } from '@shared/traecn-credits'
 import { updateBusy, updateNeedsAttention, updateStatusText } from '@shared/update'
+import { applySystemTheme } from './theme'
 
 /* ------------------------------------------------------------ 小工具 */
 
@@ -74,8 +75,10 @@ function levelOf(ratio: number): 'safe' | 'warn' | 'danger' {
 }
 
 /**
- * 记录纸上的一个通道：左边窄栏写通道名，右边放数据，中间那条竖线是脊。
- * 面板上每一块内容都走这里 —— 没有卡片、没有阴影，结构全靠这条脊和横线。
+ * 一块通道卡：白纸 + 一圈细边，浮在浅灰的内容区上。
+ *
+ * 抬头行是「通道名 + 那句实情」，数据在下面 —— 原型里的通道不再有左边那条脊，
+ * 层级由表面与细线承担，卡片本身就是分区的边界。
  */
 function Channel({
   name,
@@ -84,19 +87,19 @@ function Channel({
   children
 }: {
   name: string
-  /** 通道名下面那句实情（更新于 / 累计多少 / 命中率），没有就不写 */
+  /** 抬头行右边那句实情（更新于 / 累计多少 / 命中率），没有就不写 */
   note?: ReactNode
-  /** 正在记录的那个通道：名字前多一枚记录笔色的小方块 */
+  /** 正在记录的那个通道：名字前多一枚会呼吸的强调色圆点 */
   live?: boolean
   children: ReactNode
 }): JSX.Element {
   return (
     <section className={`ch${live ? ' live' : ''}`}>
-      <h2 className="ch-name">{name}</h2>
-      <div className="ch-body">
+      <div className="ch-head">
+        <h2 className="ch-name">{name}</h2>
         {note ? <div className="ch-note">{note}</div> : null}
-        {children}
       </div>
+      <div className="ch-body">{children}</div>
     </section>
   )
 }
@@ -141,28 +144,34 @@ interface BarRow {
   value: number
   color: string
   hint?: string
-  /** 子项（缓存命中、思考）：缩进一格，不靠「·」这类符号提示层级 */
-  sub?: boolean
   /** 覆盖默认的 compact 显示：积分带小数，compact 会把它圆成整数 */
   display?: string
 }
 
-function Bars({ rows }: { rows: BarRow[] }): JSX.Element {
+/**
+ * 四列横条：名字 / 条 / 数值 / 说明。
+ *
+ * 说明必须单独占一列 —— 塞在数值后面（宽度随文案变）会让整列数字锯齿状排。
+ * `stack` 是排行的双行变体：名字与数值走第一行，条子独占第二行，
+ * 于是每行的条都跟列同宽，长短一眼可比。
+ */
+function Bars({ rows, stack }: { rows: BarRow[]; stack?: boolean }): JSX.Element {
   const max = Math.max(1, ...rows.map((row) => row.value))
   return (
-    <div className="bars">
+    <div className={`bars${stack ? ' bars--stack' : ''}`}>
       {rows.map((row) => (
-        <div className={`bar-row${row.sub ? ' sub' : ''}`} key={row.name}>
+        <div className="bar-row" key={row.name}>
           <div className="bar-name" title={row.name}>
             {row.name}
           </div>
           <div className="bar-track">
-            <div className="bar-fill" style={{ width: `${(row.value / max) * 100}%`, background: row.color }} />
+            <div
+              className="bar-fill"
+              style={{ width: `${Math.max(1, (row.value / max) * 100)}%`, background: row.color }}
+            />
           </div>
-          <div className="bar-value">
-            {row.display ?? compact(row.value)}
-            {row.hint ? <em>{row.hint}</em> : null}
-          </div>
+          <div className="bar-value">{row.display ?? compact(row.value)}</div>
+          <div className="bar-hint">{row.hint ?? ''}</div>
         </div>
       ))}
     </div>
@@ -170,17 +179,26 @@ function Bars({ rows }: { rows: BarRow[] }): JSX.Element {
 }
 
 /**
- * 带红线区的仪表。70% / 90% 两条分界印在刻度槽上（CSS 背景），永远看得见；
- * 指针落在哪个区就染哪个区的颜色。这样「红」说的是「进红线区了」，
+ * 带红线区的仪表。70% / 90% 两条分界印在刻度槽上（CSS 的 ::before / ::after），
+ * 永远看得见；指针落在哪个区就染哪个区的颜色。这样「红」说的是「进红线区了」，
  * 而不是「我把整条进度条刷红了」—— 真实仪表就是这么读的。
  */
 function Gauge({ ratio }: { ratio: number }): JSX.Element {
   const clamped = Math.min(1, Math.max(0, ratio))
   return (
-    <div className="gauge" data-level={levelOf(clamped)}>
-      <div className="gauge-fill" style={{ width: `${clamped * 100}%` }} />
-      <div className="gauge-needle" style={{ left: `${clamped * 100}%` }} />
-    </div>
+    <>
+      <div className="gauge" data-level={levelOf(clamped)}>
+        <div className="gauge-fill" style={{ width: `${clamped * 100}%` }} />
+        <div className="gauge-needle" style={{ left: `${clamped * 100}%` }} />
+      </div>
+      {/* 刻度只标四个关键点：0 / 两条红线的位置 / 满。它是尺子，不是数据 */}
+      <div className="gauge-scale" aria-hidden="true">
+        <span>0</span>
+        <span>70</span>
+        <span>90</span>
+        <span>100</span>
+      </div>
+    </>
   )
 }
 
@@ -732,8 +750,14 @@ export default function App(): JSX.Element {
     setBusy(true)
     try {
       const next = force ? await api.refresh() : await api.getSnapshot()
-      setSnapshot(next)
-      setError('')
+      // null 表示这一轮没采到（主进程有意不伪造全 0 快照）。
+      // 这时要保留上一份数据 —— 清空会让人以为用量归零了。
+      if (next) {
+        setSnapshot(next)
+        setError('')
+      } else {
+        setError('这一轮没读到数据，稍后会自动重试。')
+      }
     } catch (cause) {
       setError(String(cause))
     } finally {
@@ -761,6 +785,20 @@ export default function App(): JSX.Element {
     [load]
   )
 
+  /**
+   * 设置一变就把 `<html data-theme>` 重写一遍。
+   *
+   * 实测：Electron 改完 `themeSource` 之后，页面的 `prefers-color-scheme`
+   * 已经变了（`matchMedia().matches` 读到的是新值），但 MediaQueryList 的
+   * change 事件不一定派发 —— 表现就是「外观按钮文字变了，界面颜色没变」。
+   * 所以凡是知道「设置改了」的地方都显式调一次，别指望事件。
+   */
+  const syncTheme = useCallback(() => {
+    applySystemTheme()
+    // 万一浏览器进程还没把新的 prefers-color-scheme 推过来，下一帧再补一次（幂等）
+    window.requestAnimationFrame(applySystemTheme)
+  }, [])
+
   /** 系统 → 浅色 → 深色 → 系统。想要哪一档都能一键点到，不必去翻托盘菜单 */
   const cycleTheme = useCallback(async () => {
     const api = window.meter
@@ -770,10 +808,11 @@ export default function App(): JSX.Element {
     try {
       const saved = await api.updateSettings({ theme: next })
       setTheme(saved.theme)
+      syncTheme()
     } catch (cause) {
       setError(String(cause))
     }
-  }, [theme])
+  }, [theme, syncTheme])
 
   /** 标题栏那枚 GitHub 图标：交给系统浏览器打开，别在应用里嵌一层壳 */
   const openHome = useCallback(async () => {
@@ -810,6 +849,8 @@ export default function App(): JSX.Element {
         setTheme(settings.theme)
         setAutoCheck(settings.autoCheckUpdate)
         setAutoDownload(settings.autoDownloadUpdate)
+        // 托盘菜单、快捷键、别的窗口改外观，走的都是这条广播
+        syncTheme()
       })
       const offUpdate = api.onUpdate((next) => setUpdate(next))
       const timer = window.setInterval(() => setNow(Date.now()), 30_000)
@@ -823,7 +864,7 @@ export default function App(): JSX.Element {
       setError(String(cause))
       return
     }
-  }, [load])
+  }, [load, syncTheme])
 
   // 弹层都能用 Esc 收掉 —— 菜单和弹窗都是「看一眼就关」的东西，
   // 逼用户把鼠标跑回去点遮罩或关闭按钮不值当
@@ -895,20 +936,26 @@ export default function App(): JSX.Element {
   // 主进程说这一轮还没读完（现在只有 traecn 的首次取密钥会这样）。
   // 卡在切源那一刻别误判成「读完是 0」——snapshot.kind 还没跟上 source 时，
   // 新源的那张 pending 快照还没到，此刻该说的是「正在读」而不是任何数字。
+  // 一份都还没拿到（首轮采集在途）同样是「正在读」，不是 0。
   const pending: PendingReason | null =
-    snapshot?.pending ?? (snapshot && snapshot.kind !== source ? 'collect' : null)
+    snapshot?.pending ?? (snapshot === null || snapshot.kind !== source ? 'collect' : null)
 
   const structureRows = useMemo<BarRow[]>(() => {
     if (!totals) return []
     const rows: BarRow[] = [
       { name: '输入', value: totals.inputTokens, color: 'var(--d-in)' },
-      { name: '缓存命中', value: totals.cachedTokens, color: 'var(--d-cache)', sub: true },
+      {
+        name: '缓存命中',
+        value: totals.cachedTokens,
+        color: 'var(--d-cache)',
+        hint: `${percent(totals.cachedTokens, totals.inputTokens)}%`
+      },
       { name: '输出', value: totals.outputTokens, color: 'var(--d-out)' }
     ]
     // Kimi Code / Reasonix / DSH 的 output 里已含思考、没有单独一项；
     // 留着只会是根 0 长度的空条
     if (withReasoning) {
-      rows.push({ name: '思考', value: totals.reasoningTokens, color: 'var(--d-think)', sub: true })
+      rows.push({ name: '思考', value: totals.reasoningTokens, color: 'var(--d-think)' })
     }
     return rows
   }, [totals, withReasoning])
@@ -959,6 +1006,17 @@ export default function App(): JSX.Element {
     if (!sessions.length) return null
     return sessions.map((session, index) => {
       const tokens = session.inputTokens + session.outputTokens
+      /*
+       * 水位不放 meta 里：面板只有 462px，模型标签 + 项目 + 时间 + 次数已经占满一行，
+       * 水位会孤零零掉到第二行，看着像半截排版。它本来就是「这个会话吃掉了多少窗口」，
+       * 归到右侧数字那一列更顺。
+       */
+      const water =
+        session.contextSize > 0
+          ? `${percent(session.contextUsed, session.contextSize)}%`
+          : session.contextRatio != null
+            ? `${Math.round(session.contextRatio * 100)}%`
+            : null
       return (
         <div className="session-row" key={`${session.sessionId}#${index}`}>
           <div className="session-main">
@@ -970,11 +1028,6 @@ export default function App(): JSX.Element {
               <span>{projectLabel(session.projectDir, session.cwd)}</span>
               <span>{relativeTime(session.lastActivity, now)}</span>
               <span>{session.calls} 次</span>
-              {session.contextSize > 0 ? (
-                <span>水位 {percent(session.contextUsed, session.contextSize)}%</span>
-              ) : session.contextRatio != null ? (
-                <span>水位 {Math.round(session.contextRatio * 100)}%</span>
-              ) : null}
             </div>
           </div>
           <div className="session-numbers">
@@ -985,6 +1038,7 @@ export default function App(): JSX.Element {
             {withCredits ? (
               <div className="session-credits">{formatCredits(session.credits)} 积分</div>
             ) : null}
+            {water ? <div className="session-water">水位 {water}</div> : null}
           </div>
         </div>
       )
@@ -1133,7 +1187,7 @@ export default function App(): JSX.Element {
               <ThemeGlyph mode={theme} />
               {themeShort(theme)}
             </button>
-            <button type="button" disabled={busy} onClick={() => void load(true)}>
+            <button type="button" className="primary" disabled={busy} onClick={() => void load(true)}>
               {busy ? '刷新中…' : '刷新'}
             </button>
           </div>
@@ -1335,49 +1389,64 @@ export default function App(): JSX.Element {
               )}
             </Channel>
 
-            {/* 模型分布 */}
+            {/* 模型与项目 —— 同一张卡的两列，各取前五。数值口径跟着账本走 */}
             <Channel
-              name="模型"
+              name="模型 / 项目"
               note={
                 withCredits && withTokens
                   ? `1 积分 ≈ ${tokenPerCredit((totals?.inputTokens ?? 0) + (totals?.outputTokens ?? 0), totals?.credits ?? 0)} token`
-                  : undefined
+                  : '各取前五'
               }
             >
-              {snapshot?.models.length ? (
-                <Bars
-                  rows={snapshot.models.slice(0, 5).map((model) => ({
-                    name: model.model,
-                    value: withTokens ? model.inputTokens + model.outputTokens : model.credits,
-                    display: withTokens ? undefined : formatCredits(model.credits),
-                    color: 'var(--d-rank)',
-                    hint: withCredits
-                      ? withTokens
-                        ? `${Math.round(model.credits)}分`
-                        : `${model.calls} 次`
-                      : `${model.calls} 次`
-                  }))}
-                />
-              ) : (
-                <div className="empty">暂无数据</div>
-              )}
-            </Channel>
-
-            {/* 项目分布 */}
-            <Channel name="项目">
-              {snapshot?.projects.length ? (
-                <Bars
-                  rows={snapshot.projects.slice(0, 5).map((project) => ({
-                    name: projectLabel(project.projectDir, project.cwd),
-                    value: withTokens ? project.inputTokens + project.outputTokens : project.credits,
-                    display: withTokens ? undefined : formatCredits(project.credits),
-                    color: 'var(--d-rank)',
-                    hint: `${project.sessions}会话`
-                  }))}
-                />
-              ) : (
-                <div className="empty">暂无数据</div>
-              )}
+              <div className="rank-grid">
+                <div className="rank-col">
+                  <div className="rank-title">模型</div>
+                  {snapshot?.models.length ? (
+                    <Bars
+                      stack
+                      rows={snapshot.models.slice(0, 5).map((model) => ({
+                        name: model.model,
+                        value: withTokens ? model.inputTokens + model.outputTokens : model.credits,
+                        display: withTokens ? undefined : formatCredits(model.credits),
+                        color: 'var(--d-rank)',
+                        /*
+                         * 有积分的源在右侧补积分。小于 1000 取两位小数 —— 排到后面的模型
+                         * 一次会话就几分钱，取整会全变成 0 分；上千则收成 2.1K。
+                         * 积分为 0 就不报 —— 一排「0 分」既不是数据也不是结论，
+                         * 换成调用次数，至少说得出「谁在用」。
+                         */
+                        hint:
+                          withCredits && withTokens
+                            ? model.credits > 0
+                              ? `${
+                                  model.credits >= 1000 ? compact(model.credits) : formatCredits(model.credits)
+                                } 分`
+                              : `${model.calls} 次`
+                            : `${model.calls} 次`
+                      }))}
+                    />
+                  ) : (
+                    <div className="empty">暂无数据</div>
+                  )}
+                </div>
+                <div className="rank-col">
+                  <div className="rank-title">项目</div>
+                  {snapshot?.projects.length ? (
+                    <Bars
+                      stack
+                      rows={snapshot.projects.slice(0, 5).map((project) => ({
+                        name: projectLabel(project.projectDir, project.cwd),
+                        value: withTokens ? project.inputTokens + project.outputTokens : project.credits,
+                        display: withTokens ? undefined : formatCredits(project.credits),
+                        color: 'var(--d-rank)',
+                        hint: `${project.sessions} 会话`
+                      }))}
+                    />
+                  ) : (
+                    <div className="empty">暂无数据</div>
+                  )}
+                </div>
+              </div>
             </Channel>
 
             {/* 会话排行 */}
@@ -1491,6 +1560,7 @@ export default function App(): JSX.Element {
               checked={autoCheck}
               onChange={(event) => void setUpdateFlag({ autoCheckUpdate: event.target.checked })}
             />
+            <span className="track" aria-hidden="true" />
             启动时自动检查更新
           </label>
           <label className={`switch${autoCheck ? '' : ' muted'}`}>
@@ -1500,6 +1570,7 @@ export default function App(): JSX.Element {
               disabled={!autoCheck}
               onChange={(event) => void setUpdateFlag({ autoDownloadUpdate: event.target.checked })}
             />
+            <span className="track" aria-hidden="true" />
             发现新版本后自动下载
           </label>
         </div>

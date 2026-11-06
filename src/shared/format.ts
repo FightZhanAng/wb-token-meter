@@ -106,18 +106,41 @@ export const SOURCE_ORDER: SourceKind[] = [
   'opencode'
 ]
 
-/** 数据源显示名 */
+/**
+ * 数据源显示名。
+ *
+ * 用 switch 而不是 if 链，是为了让**新增数据源时编译期就报错**（never 那一行）：
+ * 以前最后一个分支是 `return 'Kimi Code'`，新加的源忘了写名字不会报错，
+ * 只会在界面上安静地显示成「Kimi Code」—— 一个看起来完全正常的错误答案。
+ */
 export function sourceLabel(kind: SourceKind): string {
-  if (kind === 'workbuddy') return 'WorkBuddy'
-  if (kind === 'qoder') return 'Qoder CN'
-  if (kind === 'zcode') return 'ZCode'
-  if (kind === 'mimo') return 'MiMo'
-  if (kind === 'reasonix') return 'Reasonix'
-  if (kind === 'dsh') return 'DeepSeek Harness'
-  if (kind === 'traecn') return 'Trae CN'
-  if (kind === 'opencode-desktop') return 'OpenCode'
-  if (kind === 'opencode') return 'OpenCode Go'
-  return 'Kimi Code'
+  switch (kind) {
+    case 'workbuddy':
+      return 'WorkBuddy'
+    case 'qoder':
+      return 'Qoder CN'
+    case 'kimi':
+      return 'Kimi Code'
+    case 'zcode':
+      return 'ZCode'
+    case 'mimo':
+      return 'MiMo'
+    case 'reasonix':
+      return 'Reasonix'
+    case 'dsh':
+      return 'DeepSeek Harness'
+    case 'traecn':
+      return 'Trae CN'
+    case 'opencode-desktop':
+      return 'OpenCode'
+    case 'opencode':
+      return 'OpenCode Go'
+    default: {
+      // SourceKind 加了新成员却没在这里补名字时，这一行会让 typecheck 失败
+      const exhaustive: never = kind
+      return exhaustive
+    }
+  }
 }
 
 /* ------------------------------------------------------------ 外观 */

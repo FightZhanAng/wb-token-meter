@@ -1,9 +1,11 @@
 import { DatabaseSync } from 'node:sqlite'
 import {
+  closeSync,
   copyFileSync,
   existsSync,
   mkdtempSync,
-  readFileSync,
+  openSync,
+  readSync,
   readdirSync,
   rmSync,
   statSync
@@ -151,8 +153,86 @@ export interface FileParseResult {
   title: string
 }
 
-export type ParseCache = Map<string, { mtimeMs: number; size: number; result: FileParseResult }>
+export interface ParseCacheEntry {
+  mtimeMs: number
+  /** 上一次看到的文件大小 —— 判断「变大了」才敢增量 */
+  size: number
+  /** 已经解析完的字节数，**必然停在某个 \n 之后**（半行留给下一轮） */
+  offset: number
+  /** ino:birthtime —— 识别「同一路径换了另一个文件」，变了就必须整份重来 */
+  identity: string
+  result: FileParseResult
+}
 
+export type ParseCache = Map<string, ParseCacheEntry>
+
+const NEWLINE = 0x0a
+
+/** 读 [offset, offset+length) 这一段；失败返回 null，调用方退回缓存里的旧结果 */
+function readRange(file: string, offset: number, length: number): Buffer | null {
+  let fd: number | null = null
+  try {
+    fd = openSync(file, 'r')
+    const buffer = Buffer.allocUnsafe(length)
+    const read = readSync(fd, buffer, 0, length, offset)
+    return read === length ? buffer : buffer.subarray(0, read)
+  } catch {
+    return null
+  } finally {
+    if (fd !== null) {
+      try {
+        closeSync(fd)
+      } catch {
+        /* 关不掉也没别的办法 */
+      }
+    }
+  }
+}
+
+/**
+ * 解析一段完整行（每行都以 \n 结尾），把调用追加进 into。
+ * 返回解析到的最新 title —— 没有新 title 时原样返回 titleSoFar。
+ */
+function parseLines(
+  text: string,
+  sessionId: string,
+  projectDir: string,
+  into: CallRecord[],
+  titleSoFar: string
+): string {
+  let title = titleSoFar
+  for (const line of text.split('\n')) {
+    if (!line) continue
+    if (!title && line.indexOf('"ai-title"') >= 0) {
+      try {
+        const parsed = JSON.parse(line) as Record<string, unknown>
+        if (typeof parsed.aiTitle === 'string') title = parsed.aiTitle
+      } catch {
+        /* 忽略坏行 */
+      }
+    }
+    if (line.indexOf('"usage"') < 0) continue
+    const record = parseUsageLine(line, sessionId, projectDir)
+    if (record) into.push(record)
+  }
+  return title
+}
+
+/**
+ * 解析一份 transcript。
+ *
+ * 长会话的 jsonl 会一直长大，而每 20 秒轮询一次时**绝大多数文件只多了几行**。
+ * 所以缓存里记的不是「解析结果 + 文件戳」，而是「解析到第几个字节」：
+ * mtime 变了就只读新追加的那一段，代价从 O(文件大小) 降到 O(新增字节)。
+ *
+ * 三条安全边界（写错任何一条都会静默丢数据，比不优化更糟）：
+ * 1. **只解析到最后一个 \n**：末尾常有一行正在写、还没写完，把它算进来
+ *    只会得到一条解析失败的记录，而且下一轮还会重复处理半行。
+ * 2. **只允许「变大」**：变小是截断重写，文件被换掉（identity 变）同理，
+ *    两种情况都必须整份重来，不能拿旧 offset 去读新文件。
+ * 3. **offset 只按字节走**：\n 是单字节 0x0A，不会出现在多字节字符中间，
+ *    所以按字节切分对 UTF-8 是安全的。
+ */
 export function parseTranscriptFile(
   file: string,
   sessionId: string,
@@ -166,35 +246,48 @@ export function parseTranscriptFile(
     return { calls: [], title: '' }
   }
 
+  const identity = `${stat.ino}:${stat.birthtimeMs}`
   const cached = cache?.get(file)
-  if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) return cached.result
 
-  let text: string
-  try {
-    text = readFileSync(file, 'utf8')
-  } catch {
-    return { calls: [], title: '' }
-  }
+  if (cached && cached.identity === identity) {
+    // 完全没动过
+    if (cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) return cached.result
 
-  const calls: CallRecord[] = []
-  let title = ''
-  for (const line of text.split('\n')) {
-    if (!line) continue
-    if (!title && line.indexOf('"ai-title"') >= 0) {
-      try {
-        const parsed = JSON.parse(line) as Record<string, unknown>
-        if (typeof parsed.aiTitle === 'string') title = parsed.aiTitle
-      } catch {
-        /* 忽略坏行 */
+    if (stat.size > cached.size) {
+      const delta = readRange(file, cached.offset, stat.size - cached.offset)
+      if (!delta) return cached.result
+
+      // 末尾可能是半行 —— 只吃到最后一个换行为止
+      const lastNewline = delta.lastIndexOf(NEWLINE)
+      if (lastNewline >= 0) {
+        const text = delta.subarray(0, lastNewline + 1).toString('utf8')
+        cached.result.title = parseLines(text, sessionId, projectDir, cached.result.calls, cached.result.title)
+        cached.offset += lastNewline + 1
       }
+      cached.size = stat.size
+      cached.mtimeMs = stat.mtimeMs
+      return cached.result
     }
-    if (line.indexOf('"usage"') < 0) continue
-    const record = parseUsageLine(line, sessionId, projectDir)
-    if (record) calls.push(record)
+    // 变小 / 同大小但 mtime 变了：内容被重写过，下面走全量
   }
+
+  const raw = readRange(file, 0, stat.size)
+  if (!raw) return { calls: [], title: '' }
+
+  // 全量也只吃到最后一个换行，让「半行」在两条路径上的语义一致
+  const lastNewline = raw.lastIndexOf(NEWLINE)
+  const usable = lastNewline >= 0 ? raw.subarray(0, lastNewline + 1) : Buffer.alloc(0)
+  const calls: CallRecord[] = []
+  const title = parseLines(usable.toString('utf8'), sessionId, projectDir, calls, '')
 
   const result: FileParseResult = { calls, title }
-  cache?.set(file, { mtimeMs: stat.mtimeMs, size: stat.size, result })
+  cache?.set(file, {
+    mtimeMs: stat.mtimeMs,
+    size: stat.size,
+    offset: usable.length,
+    identity,
+    result
+  })
   return result
 }
 

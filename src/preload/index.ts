@@ -41,8 +41,12 @@ const initialCapsuleTheme = bootCapsuleTheme()
 
 const api = {
   /* 用量数据 */
-  getSnapshot: (): Promise<Snapshot> => ipcRenderer.invoke('snapshot:get') as Promise<Snapshot>,
-  refresh: (): Promise<Snapshot> => ipcRenderer.invoke('snapshot:refresh') as Promise<Snapshot>,
+  // 采集失败时主进程会返回 null（它不会伪造一份全 0 快照）。契约里必须写明，
+  // 否则渲染层拿到 null 还是会当快照用，界面上就成了「读完了读出 0」。
+  getSnapshot: (): Promise<Snapshot | null> =>
+    ipcRenderer.invoke('snapshot:get') as Promise<Snapshot | null>,
+  refresh: (): Promise<Snapshot | null> =>
+    ipcRenderer.invoke('snapshot:refresh') as Promise<Snapshot | null>,
   openDataDir: (): Promise<string> => ipcRenderer.invoke('data:open-dir') as Promise<string>,
   /** 在系统浏览器里打开项目主页（地址写死在主进程） */
   openHome: (): Promise<string> => ipcRenderer.invoke('app:open-home') as Promise<string>,

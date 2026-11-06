@@ -1,11 +1,7 @@
 import { app, BrowserWindow, ipcMain, nativeTheme, shell } from 'electron'
-import { mkdirSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { CAPSULE_THEME_ORDER } from '../shared/capsule'
 import { collectSnapshot, type ParseCache } from '../shared/collector'
 import { collectDshSnapshot, type DshParseCache } from '../shared/dsh-collector'
-import { SOURCE_ORDER, sourceLabel } from '../shared/format'
 import { collectKimiSnapshot, type KimiParseCache } from '../shared/kimi-collector'
 import { collectMimoSnapshot } from '../shared/mimo-collector'
 import { collectOpencodeSnapshot } from '../shared/opencode-collector'
@@ -15,7 +11,6 @@ import { collectTraeCnSnapshot, probeTraeCnKey, traeCnFileStamp } from '../share
 import { collectZcodeSnapshot } from '../shared/zcode-collector'
 import type {
   AppInfo,
-  CapsuleTheme,
   CreditsInfo,
   FloatState,
   Settings,
@@ -49,46 +44,19 @@ import {
   zcodeDir
 } from './paths'
 import { DEFAULT_SETTINGS, SettingsStore } from './settings'
+import { runSmoke } from './smoke'
+import { SMOKE, smoke } from './smoke/writer'
 import { readTraeCnKey, type TraeCnKeyProbe } from './traecn-key'
-import { TrayController, type MenuChoice } from './tray'
+import { TrayController } from './tray'
 import { UpdateController } from './updater'
 
 /* ------------------------------------------------------------ 冒烟自检 */
 
-// 结论写磁盘而不是 console.log —— Windows 上 GUI 进程不挂控制台，
-// 只靠 stdout 经常什么都看不到，"跑没跑起来"都判断不了。
-const SMOKE = process.env['WB_TOKEN_METER_SMOKE'] === '1'
-const SMOKE_EXIT = process.env['WB_TOKEN_METER_SMOKE_EXIT'] === '1'
-
-// 自检各步骤之间全是 await（截图、executeJavaScript）。渲染进程一旦无响应
-// ——实测过的最常见诱因是 Chromium 的网络服务进程崩溃——这些 await 会永久挂起，
-// 进程既不报错也不退出，调用方只能一直等。正常一轮约 40 秒，给到 2 分钟足够宽松。
-const SMOKE_TIMEOUT_MS = 120_000
-
-/**
- * 切到 traecn 之后等多久量首屏。
- *
- * 要够晚 —— 晚到首帧真的画出来了（否则量到的是空白页，不是「画成了 0」）；
- * 也只要够晚 —— traecn 要扫二十几秒密钥，这段等待**不会**盖住它。800ms
- * 落在两者之间：首屏那一下 refresh() 是同步的，早于它画不出东西。
- */
-const SMOKE_FIRST_PAINT_MS = 800
-
 // 自检时给更新检查注入一个假版本号：既不真去打网络，又能让更新界面被完整渲染到。
 // 必须在 ensureUpdater() 之前设 —— UpdateController 在构造时就把这个值读走了。
+// 这段留在主入口而不是 smoke 模块里，是因为它必须早于任何模块读这个变量。
 if (SMOKE && !process.env['WB_TOKEN_METER_FAKE_UPDATE']) {
   process.env['WB_TOKEN_METER_FAKE_UPDATE'] = '9.9.9'
-}
-
-function smoke(name: string, payload: unknown): void {
-  if (!SMOKE) return
-  try {
-    const dir = join(tmpdir(), 'wbtm-smoke')
-    mkdirSync(dir, { recursive: true })
-    writeFileSync(join(dir, `${name}.json`), JSON.stringify(payload, null, 2), 'utf8')
-  } catch {
-    /* 自检失败不该影响主流程 */
-  }
 }
 
 // 模块最顶层就落一个探针：只有它出现、后续报告缺失，
@@ -230,11 +198,11 @@ function currentTheme(): ThemeMode {
 
 /**
  * 窗口底色是**创建参数**，CSS 管不到它，只能主进程给。
- * 这两个值必须和 styles.css 的 --paper 对上（深色 #0B0E16 / 浅色 #EDF0EC），
+ * 这两个值必须和 styles.css 的 --paper 对上（深色 #000000 / 浅色 #FFFFFF），
  * 否则窗口冒出来的那一帧会先闪一下另一种颜色。core-test 盯着这一对。
  */
 function windowBackground(): string {
-  return nativeTheme.shouldUseDarkColors ? '#0B0E16' : '#EDF0EC'
+  return nativeTheme.shouldUseDarkColors ? '#000000' : '#FFFFFF'
 }
 
 /**
@@ -251,9 +219,9 @@ function windowBackground(): string {
 function titleBarOverlay(): { color: string; symbolColor: string; height: number } {
   return {
     color: '#00000000',
-    // 必须和 styles.css 深色块的 --ink 对上（深色 #E9ECF6 / 浅色 #16211E），
+    // 必须和 styles.css 深色块的 --ink 对上（深色 #F5F5F7 / 浅色 #1D1D1F），
     // 差一档就是「深色主题下三个惨白的按钮挂在机头上」
-    symbolColor: nativeTheme.shouldUseDarkColors ? '#E9ECF6' : '#16211E',
+    symbolColor: nativeTheme.shouldUseDarkColors ? '#F5F5F7' : '#1D1D1F',
     height: CAPTION_HEIGHT
   }
 }
@@ -456,7 +424,10 @@ function refresh(force = false): Snapshot | null {
       snapshot = collectSnapshot({ workbuddyDir: sourceDir(kind), cache: workbuddyCache })
     }
     tray?.update(snapshot)
-    if (mainWindow && !mainWindow.isDestroyed()) {
+    // 面板关着（隐藏 / 已最小化）就不推：一次 send 会让那棵 1500 行的组件树
+    // 重渲染一遍，而用户根本看不见。重新露出来时由 show / restore 补推，
+    // 所以不会停在旧数据上。
+    if (mainWindow && !mainWindow.isDestroyed() && panelIsVisible(mainWindow)) {
       mainWindow.webContents.send('snapshot', snapshot)
     }
     floatWindow?.send('snapshot', snapshot)
@@ -571,6 +542,22 @@ function showMainWindow(): void {
   win.focus()
 }
 
+/**
+ * 面板此刻是不是真的在屏幕上。
+ *
+ * `isVisible()` 在 Windows 上对最小化的窗口仍然返回 true —— 只判它不够，
+ * 否则「最小化后还在每 20 秒重渲染一次」这个优化等于没做。
+ */
+function panelIsVisible(win: BrowserWindow): boolean {
+  return win.isVisible() && !win.isMinimized()
+}
+
+/** 把当前快照补推一次 —— 用来填上「隐藏期间不推送」留下的那段空窗 */
+function pushSnapshot(win: BrowserWindow): void {
+  if (!snapshot || win.isDestroyed() || win.webContents.isDestroyed()) return
+  win.webContents.send('snapshot', snapshot)
+}
+
 function ensureMainWindow(): BrowserWindow {
   if (mainWindow && !mainWindow.isDestroyed()) return mainWindow
 
@@ -607,6 +594,12 @@ function ensureMainWindow(): BrowserWindow {
     event.preventDefault()
     win.hide()
   })
+
+  // 隐藏 / 最小化期间不推快照（见 refresh），所以露出来的这一拍必须补一次：
+  // 否则界面要等下一个 20 秒轮询，用户看到的是刚才那一刻的旧数。
+  // 首次 show 时页面可能还没加载完，send 会丢 —— 渲染层 mount 时会自己取一次。
+  win.on('show', () => pushSnapshot(win))
+  win.on('restore', () => pushSnapshot(win))
 
   win.once('ready-to-show', () => {
     if (SMOKE) {
@@ -709,725 +702,24 @@ function bootstrap(): void {
   const timer = setInterval(refresh, REFRESH_MS)
   timer.unref?.()
 
-  if (SMOKE) {
-    /*
-     * 首屏那一拍单独量：traecn 启动时要扫密钥，那十几秒里界面**不能**画成一个
-     * 假装读完了的 0。这是这套交互的验收点，所以放在自检计时器起跑之前 ——
-     * 后面那些度量跑的时候真值早就到了，量到的只会是稳定态。
-     *
-     * 前提是当前源就是 traecn，否则量到的会是别的源（毫秒级，本来就不该有骨架）。
-     * 自检默认源是 workbuddy，所以先切过去再量。
-     *
-     * **切源就是改用户设置**：渲染层的 switchSource 走的是
-     * `api.updateSettings({ source })`，不是某个只影响本次会话的旁路。所以这里
-     * 必须自己还原 —— 下面切换循环末尾那个 `patchSettings({ source: sourceBefore })`
-     * 救不了场：它的 sourceBefore 是**在 1200ms 之后**才捕获的，那时设置已经被
-     * 这一段改成 traecn 了，还原等于没还原。用户下次启动会停在一个他从没选过的源上。
-     */
-    setTimeout(() => {
-      const win = mainWindow
-      if (!win || win.isDestroyed()) return
-      // 自己动手前先记住原样，还原时只认这一个值 —— 不用下游那个（它捕获得更晚）
-      const sourceAtEntry = settingsStore?.settings.source ?? 'workbuddy'
-      const restore = (): void => {
-        if (settingsStore?.settings.source !== sourceAtEntry) {
-          patchSettings({ source: sourceAtEntry })
-        }
-      }
-      const measure = (): void => {
-        void win.webContents
-          .executeJavaScript(
-            `(() => ({
-               source: document.querySelector('.source-switch .active')?.textContent || '',
-               blocks: document.querySelectorAll('.pending').length,
-               title: document.querySelector('.pending-title')?.textContent || '',
-               headline: [...document.querySelectorAll('.headline-value')].map((el) => el.textContent)
-             }))()`
-          )
-          .then((paint) => {
-            const first = paint as Record<string, unknown>
-            smoke('first-paint', {
-              ...first,
-              // 核心一条：挂着骨架时绝不能同时画着数字 —— 那是「读完了读出 0」
-              ok: (first['blocks'] as number) === 0 || ((first['headline'] as string[]) ?? []).length === 0,
-              // 这一段动过用户设置，报告里必须能自证还原回去了
-              restoredFrom: sourceAtEntry
-            })
-            return win.webContents.capturePage()
-          })
-          .then((image) => {
-            const dir = join(tmpdir(), 'wbtm-smoke')
-            mkdirSync(dir, { recursive: true })
-            writeFileSync(join(dir, 'window-first-paint.png'), image.toPNG())
-          })
-          .catch(() => undefined)
-          // 还原放在最后，且**不挂在 measure 的链上**：截图或度量失败时也要还原，
-          // 否则一次自检失败就把用户设置留在 traecn 上
-          .finally(() => restore())
-      }
-      if (sourceAtEntry === 'traecn') {
-        measure()
-      } else {
-        void win.webContents
-          .executeJavaScript(
-            `(() => {
-               const root = document.querySelector('.source-switch')
-               const label = ${JSON.stringify(sourceLabel('traecn'))}
-               const direct = [...root.querySelectorAll('button')].find((el) => el.textContent.trim() === label)
-               if (direct) direct.click()
-               else root.querySelector('.source-more')?.click()
-             })()`
-          )
-          .then(() => new Promise((resolve) => setTimeout(resolve, 400)))
-          .then(() => win.webContents.executeJavaScript(
-            `(() => {
-               const label = ${JSON.stringify(sourceLabel('traecn'))}
-               const item = [...document.querySelectorAll('.source-menu button')].find((el) => el.textContent.trim() === label)
-               if (item) item.click()
-             })()`
-          ))
-          .then(() => new Promise((resolve) => setTimeout(resolve, SMOKE_FIRST_PAINT_MS)))
-          .then(measure)
-          .catch(() => undefined)
-          // 中途失败（按钮没找到、窗口没了）同样要还原 —— 这条链上的 catch
-          // 不会走进 measure 的 finally
-          .finally(() => restore())
-      }
-    }, 1200)
-
-    // 看门狗：自检挂死时留下证据并主动退出，而不是让调用方干等
-    const watchdog = setTimeout(() => {
-      smoke('timeout', { limit: SMOKE_TIMEOUT_MS, at: Date.now() })
-      if (SMOKE_EXIT) {
-        isQuitting = true
-        app.quit()
-      }
-    }, SMOKE_TIMEOUT_MS)
-    watchdog.unref?.()
-
-    setTimeout(async () => {
-      // 无头环境里，截图 + DOM 度量是唯一能确认「界面真的画出来了」的手段 ——
-      // 窗口 isVisible() 为 true 也可能是空白（工具环境常见，见项目 skill 坑 8）
-      try {
-        const win = mainWindow
-        if (win && !win.isDestroyed()) {
-          const dir = join(tmpdir(), 'wbtm-smoke')
-          mkdirSync(dir, { recursive: true })
-          const image = await win.webContents.capturePage()
-          writeFileSync(join(dir, 'window.png'), image.toPNG())
-          const metrics = await win.webContents.executeJavaScript(
-            `(() => {
-               const heat = document.querySelector('.heatmap')
-               const active = document.querySelector('.source-switch .active')
-               return {
-                 sections: document.querySelectorAll('.ch').length,
-                 theme: document.documentElement.dataset.theme || '',
-                 bodyHeight: document.body.scrollHeight,
-                 title: document.querySelector('.app-title')?.textContent || '',
-                 source: active ? active.textContent : '',
-                 sessionRows: document.querySelectorAll('.session-row').length,
-                 creditRows: document.querySelectorAll('.session-credits').length,
-                 headline: [...document.querySelectorAll('.headline-value')].map((el) => el.textContent),
-                 heatCells: heat ? heat.children.length : 0,
-                 heatWidth: heat ? heat.clientWidth : 0,
-                 heatScrollWidth: heat ? heat.scrollWidth : 0
-               }
-             })()`
-          )
-          smoke('dom', metrics)
-
-          // 再滚到热力图截一张，确认它没有被裁掉
-          await win.webContents.executeJavaScript(
-            `(() => { const el = document.querySelector('.heatmap'); if (el) el.scrollIntoView({ block: 'center' }); })()`
-          )
-          await new Promise((resolve) => setTimeout(resolve, 400))
-          const heatShot = await win.webContents.capturePage()
-          writeFileSync(join(dir, 'window-heat.png'), heatShot.toPNG())
-
-          // 数据源切换的端到端自检：逐个点过去 -> IPC -> 重采 -> 重绘，最后切回原样。
-          // 只在自检里跑，跑完立刻切回去，免得把用户自己的设置改掉。
-          const sourceBefore = settingsStore?.settings.source ?? 'workbuddy'
-          const switches: Array<{ expected: SourceKind; actual: SourceKind | undefined; dom: unknown }> = []
-          /** 切源 1.5 秒后还挂着载入态的源 —— traecn 属预期（扫密钥要二十几秒），其余才是漏 */
-          const stablePendingLeaks: SourceKind[] = []
-          const pendingHeld: Array<{ source: SourceKind; title: string }> = []
-          for (const target of SOURCE_ORDER) {
-            if (target === sourceBefore) continue
-            // 前三个源就是按钮本身，其余收在「更多」下拉里 —— 两条路径都要真的点一遍
-            const label = JSON.stringify(sourceLabel(target))
-            await win.webContents.executeJavaScript(
-              `(() => {
-                 const root = document.querySelector('.source-switch')
-                 if (!root) return
-                 const direct = [...root.querySelectorAll('button')].find((el) => el.textContent.trim() === ${label})
-                 if (direct) direct.click()
-                 else root.querySelector('.source-more')?.click()
-               })()`
-            )
-            await new Promise((resolve) => setTimeout(resolve, 250))
-            await win.webContents.executeJavaScript(
-              `(() => {
-                 const item = [...document.querySelectorAll('.source-menu button')].find((el) => el.textContent.trim() === ${label})
-                 if (item) item.click()
-               })()`
-            )
-            await new Promise((resolve) => setTimeout(resolve, 1500))
-            const switched = await win.webContents.executeJavaScript(
-              `(() => {
-                 const active = document.querySelector('.source-switch .active')
-                 return {
-                   active: active ? active.textContent : '',
-                   subtitle: document.querySelector('.app-subtitle')?.textContent || '',
-                   headline: [...document.querySelectorAll('.headline-value')].map((el) => el.textContent),
-                   sessionRows: document.querySelectorAll('.session-row').length,
-                   creditRows: document.querySelectorAll('.session-credits').length,
-                   contextNote: document.querySelector('.gauge-foot')?.textContent || '',
-                   modelHints: [...document.querySelectorAll('.bar-value em')].map((el) => el.textContent)
-                 }
-               })()`
-            )
-            // 载入态要在切源后立刻量：切到 traecn 时它要去扫密钥，那十几秒里
-            // 界面上不能是一个假装读完了的 0（真值到了之后 .pending 必然为 0，
-            // 所以这里量的就是「稳定态不该有骨架」这一半）。
-            const pendingAfter = await win.webContents.executeJavaScript(
-              `(() => ({
-                 blocks: document.querySelectorAll('.pending').length,
-                 title: document.querySelector('.pending-title')?.textContent || ''
-               }))()`
-            )
-            const pendingTitle = pendingAfter.title
-            // 骨架那一拍单独留张图：它是这套交互唯一「平时看不到」的形态
-            if (pendingAfter.blocks > 0) {
-              const shot = await win.webContents.capturePage()
-              writeFileSync(join(dir, `window-pending-${target}.png`), shot.toPNG())
-            }
-            // 截图前先滚回顶部：自检要能一眼看到「今日」与上下文水位这两张卡
-            await win.webContents.executeJavaScript(
-              `(() => { const el = document.querySelector('.app-body'); if (el) el.scrollTop = 0 })()`
-            )
-            await new Promise((resolve) => setTimeout(resolve, 300))
-            writeFileSync(join(dir, `window-${target}.png`), (await win.webContents.capturePage()).toPNG())
-            switches.push({ expected: target, actual: settingsStore?.settings.source, dom: switched })
-            // 切完一轮之后还挂着骨架 —— 分两种情况，判定相反：
-            // - traecn：1.5 秒远不够（扫密钥 ~21 秒），这时挂着骨架**是对的**
-            // - 其余源：都是毫秒级，真值早该到了，这时还挂着就是漏了
-            // pendingAfter 是 { blocks, title } 对象，比较必须取 .blocks ——
-            // 直接拿对象跟 0 比会走对象转数字得到 NaN，NaN > 0 恒假，
-            // 于是这一整段永远不进分支，pending.ok 永远为真、什么缺陷都测不出来。
-            if (pendingAfter.blocks > 0) {
-              pendingHeld.push({ source: target, title: pendingTitle || '(无标题)' })
-              if (target !== 'traecn') stablePendingLeaks.push(target)
-            }
-          }
-          smoke('source-switch', { from: sourceBefore, switches })
-          smoke('pending', {
-            // 切源后仍挂着骨架的源；traecn 属预期，其余为空才对
-            held: pendingHeld,
-            leaks: stablePendingLeaks,
-            // 关键一条：骨架在的时候绝不能同时画着数字（那是「读完了读出 0」）
-            noFakeZero: pendingHeld.every((entry) => {
-              const dom = switches.find((s) => s.expected === entry.source)?.dom as
-                | { headline?: string[] }
-                | undefined
-              return (dom?.headline ?? []).length === 0
-            }),
-            ok: stablePendingLeaks.length === 0
-          })
-          patchSettings({ source: sourceBefore })
-          await new Promise((resolve) => setTimeout(resolve, 1500))
-
-          // 切回来之后，DOM 里的会话行数必须等于当前快照的会话数。
-          // 多出来就是残留：会话快照里同一个 sessionId 会出现两次，
-          // 列表 key 撞车时 React 对账会漏删，上一批行留在 DOM 里。
-          const afterSwitchBack = await win.webContents.executeJavaScript(
-            `(() => {
-               const c = document.querySelector('.sessions')
-               return {
-                 source: document.querySelector('.source-switch .active')?.textContent || '',
-                 rows: document.querySelectorAll('.session-row').length,
-                 creditRows: document.querySelectorAll('.session-credits').length,
-                 containerChildren: c ? c.children.length : -1
-               }
-             })()`
-          )
-          smoke('after-switch-back', {
-            expected: sourceBefore,
-            actual: settingsStore?.settings.source,
-            expectedRows: Math.min((snapshot?.sessions ?? []).length, 40),
-            dom: afterSwitchBack
-          })
-
-          // 顶栏在最小宽度下不能被撑破：四个数据源按钮 + 刷新挤在一行，
-          // scrollWidth 超过 clientWidth 就是溢出了（窗口默认 560，最小 460）
-          const originalBounds = win.getBounds()
-          win.setSize(460, originalBounds.height)
-          await new Promise((resolve) => setTimeout(resolve, 400))
-          const narrow = await win.webContents.executeJavaScript(
-            `(() => {
-               const header = document.querySelector('.app-header')
-               const actions = document.querySelector('.header-actions')
-               const caption = document.querySelector('.app-caption')
-               const guard = document.querySelector('.app-caption-guard')
-               const rect = (el) => (el ? el.getBoundingClientRect() : null)
-               const actionsRect = rect(actions)
-               const guardRect = rect(guard)
-               const captionRect = rect(caption)
-               return {
-                 viewportWidth: window.innerWidth,
-                 headerClientWidth: header ? header.clientWidth : -1,
-                 headerScrollWidth: header ? header.scrollWidth : -1,
-                 actionsWidth: actionsRect ? Math.round(actionsRect.width) : -1,
-                 subtitle: document.querySelector('.app-subtitle')?.textContent || '',
-                 // 自绘标题栏：标题栏那条只放窗口 chrome，guardWidth 是留给系统三键的
-                 // 宽度，0 就是环境变量没拿到（三键会压到应用内容上）；
-                 // actionsBelowCaption 必须为 true —— 应用的按钮不能跑进标题栏那条
-                 captionHeight: captionRect ? Math.round(captionRect.height) : -1,
-                 guardWidth: guardRect ? Math.round(guardRect.width) : -1,
-                 actionsBelowCaption:
-                   actionsRect && captionRect ? Math.round(actionsRect.top) >= Math.round(captionRect.bottom) : true
-               }
-             })()`
-          )
-          smoke('narrow-header', narrow)
-          win.setSize(originalBounds.width, originalBounds.height)
-          await new Promise((resolve) => setTimeout(resolve, 300))
-
-          // 两套外观各截一张：深色主题只有真看一眼才知道对不对，
-          // 顺手把 dataset.theme 与实测底色回报出来，免得「设置改了但 CSS 没跟上」。
-          const themeBefore = settingsStore?.settings.theme ?? 'system'
-          const themeShots: Array<{ mode: string; actual: string | undefined; dom: unknown }> = []
-          for (const mode of ['dark', 'light'] as const) {
-            patchSettings({ theme: mode })
-            await new Promise((resolve) => setTimeout(resolve, 700))
-            const dom = await win.webContents.executeJavaScript(
-              `(() => {
-                 const body = getComputedStyle(document.body)
-                 // 这套设计押在 Bahnschrift（DIN 血统，Win10+ 自带）上，
-                 // 量一下字宽才知道它到底在不在 —— getComputedStyle 只会把 CSS 原样念回来
-                 const probe = (font) => {
-                   const ctx = document.createElement('canvas').getContext('2d')
-                   ctx.font = '40px ' + font
-                   return Math.round(ctx.measureText('Token 0123456789').width)
-                 }
-                 const counter = document.querySelector('.headline-value')
-                 return {
-                   stamped: document.documentElement.dataset.theme || '',
-                   prefersDark: matchMedia('(prefers-color-scheme: dark)').matches,
-                   background: body.backgroundColor,
-                   color: body.color,
-                   sections: document.querySelectorAll('.ch').length,
-                   themeButton: document.querySelector('.theme-toggle')?.textContent || '',
-                   counterFont: counter ? getComputedStyle(counter).fontFamily.split(',')[0] : '',
-                   fontWidth: {
-                     bahnschrift: probe('Bahnschrift'),
-                     segoe: probe('"Segoe UI"'),
-                     sans: probe('sans-serif')
-                   }
-                 }
-               })()`
-            )
-            writeFileSync(join(dir, `window-${mode}.png`), (await win.webContents.capturePage()).toPNG())
-            themeShots.push({ mode, actual: settingsStore?.settings.theme, dom })
-          }
-          smoke('theme', { before: themeBefore, shots: themeShots })
-          patchSettings({ theme: themeBefore })
-          await new Promise((resolve) => setTimeout(resolve, 400))
-
-          /* 标题栏左角的「关于」：菜单三项 -> 版本弹窗 -> 关闭。
-             版本号与运行环境是主进程答的，所以这里连 IPC 一起验了。 */
-          await win.webContents.executeJavaScript(
-            `(() => { document.querySelector('.about-entry')?.click() })()`
-          )
-          await new Promise((resolve) => setTimeout(resolve, 250))
-          const aboutMenu = await win.webContents.executeJavaScript(
-            `(() => {
-               const menu = document.querySelector('.about-menu')
-               return {
-                 open: !!menu,
-                 items: [...(menu ? menu.querySelectorAll('button') : [])].map((el) => el.textContent.trim())
-               }
-             })()`
-          )
-          writeFileSync(join(dir, 'window-about-menu.png'), (await win.webContents.capturePage()).toPNG())
-
-          await win.webContents.executeJavaScript(
-            `(() => {
-               const btn = [...document.querySelectorAll('.about-menu button')]
-                 .find((el) => el.textContent.trim().startsWith('版本'))
-               if (btn) btn.click()
-             })()`
-          )
-          await new Promise((resolve) => setTimeout(resolve, 300))
-          const aboutDialog = await win.webContents.executeJavaScript(
-            `(() => {
-               const card = document.querySelector('.about-card')
-               return {
-                 open: !!card,
-                 version: document.querySelector('.about-number')?.textContent || '',
-                 rows: [...(card ? card.querySelectorAll('.about-row') : [])].map((el) => el.textContent.trim()),
-                 actions: [...(card ? card.querySelectorAll('.about-actions button') : [])].map((el) =>
-                   el.textContent.trim()
-                 )
-               }
-             })()`
-          )
-          writeFileSync(join(dir, 'window-about-version.png'), (await win.webContents.capturePage()).toPNG())
-
-          await win.webContents.executeJavaScript(
-            `(() => {
-               const btn = [...document.querySelectorAll('.about-actions button')]
-                 .find((el) => el.textContent.trim() === '关闭')
-               if (btn) btn.click()
-             })()`
-          )
-          await new Promise((resolve) => setTimeout(resolve, 200))
-          const aboutClosed = await win.webContents.executeJavaScript(
-            `(() => !document.querySelector('.about-card') && !document.querySelector('.about-menu'))()`
-          )
-          smoke('about', { menu: aboutMenu, dialog: aboutDialog, closed: aboutClosed })
-
-          /* 底栏的版本与更新：点「检查更新」-> 发现新版本 -> 点「下载更新」-> 已就绪。
-             假版本号由模块顶层的 WB_TOKEN_METER_FAKE_UPDATE 注入，全程不走网络。 */
-          const settingsBeforeUpdate = { ...(settingsStore?.settings ?? DEFAULT_SETTINGS) }
-
-          const readFooter = async (): Promise<unknown> =>
-            win.webContents.executeJavaScript(
-              `(() => {
-                 const footer = document.querySelector('.app-footer')
-                 const box = footer ? footer.getBoundingClientRect() : null
-                 return {
-                   version: document.querySelector('.foot-version')?.textContent || '',
-                   state: document.querySelector('.foot-state')?.textContent || '',
-                   status: document.querySelector('.foot-state')?.dataset.status || '',
-                   actions: [...document.querySelectorAll('.foot-actions button')].map((el) => el.textContent.trim()),
-                   switches: [...document.querySelectorAll('.foot-row.switches .switch')].map((el) => ({
-                     label: el.textContent.trim(),
-                     checked: el.querySelector('input') ? el.querySelector('input').checked : null,
-                     disabled: el.querySelector('input') ? el.querySelector('input').disabled : null
-                   })),
-                   // 底栏是固定的一条，必须落在视口内且贴着下沿
-                   footer: box
-                     ? { top: Math.round(box.top), bottom: Math.round(box.bottom), viewport: window.innerHeight }
-                     : null
-                 }
-               })()`
-            )
-
-          const clickFooterButton = async (label: string): Promise<void> => {
-            await win.webContents.executeJavaScript(
-              `(() => {
-                 const btn = [...document.querySelectorAll('.foot-actions button')]
-                   .find((el) => el.textContent.trim() === ${JSON.stringify(label)})
-                 if (btn) btn.click()
-               })()`
-            )
-          }
-
-          const footerIdle = await readFooter()
-          await clickFooterButton('检查更新')
-          await new Promise((resolve) => setTimeout(resolve, 700))
-          const footerAvailable = await readFooter()
-          await clickFooterButton('下载更新')
-          await new Promise((resolve) => setTimeout(resolve, 700))
-          const footerDownloaded = await readFooter()
-          writeFileSync(join(dir, 'window-update.png'), (await win.webContents.capturePage()).toPNG())
-
-          // 开关要真的落到设置文件里，而不是只在界面上动一下
-          const autoCheckWas = settingsStore?.settings.autoCheckUpdate ?? true
-          await win.webContents.executeJavaScript(
-            `(() => {
-               const box = document.querySelector('.foot-row.switches .switch input')
-               if (box) box.click()
-             })()`
-          )
-          await new Promise((resolve) => setTimeout(resolve, 400))
-          const footerAfterToggle = await readFooter()
-
-          smoke('update', {
-            idle: footerIdle,
-            available: footerAvailable,
-            downloaded: footerDownloaded,
-            afterToggle: footerAfterToggle,
-            autoCheck: { was: autoCheckWas, now: settingsStore?.settings.autoCheckUpdate },
-            state: currentUpdate()
-          })
-
-          // 自检动过的设置全部还原，别留给用户
-          patchSettings({
-            autoCheckUpdate: settingsBeforeUpdate.autoCheckUpdate,
-            autoDownloadUpdate: settingsBeforeUpdate.autoDownloadUpdate
-          })
-          await new Promise((resolve) => setTimeout(resolve, 300))
-        }
-
-        // 桌面胶囊单独截一张，并回报 DOM 度量
-        const floatWin = floatWindow?.browserWindow
-        if (floatWin && !floatWin.isDestroyed()) {
-          const dir = join(tmpdir(), 'wbtm-smoke')
-          const image = await floatWin.webContents.capturePage()
-          writeFileSync(join(dir, 'float.png'), image.toPNG())
-
-          // 直接用位图验四角透明 —— 只把 PNG 存下来肉眼分不出「透明」和「白」。
-          // Electron 43 的类型定义把 getBitmap() 标成了 void（运行时其实返回 Buffer），
-          // 这里显式断言，否则 CI 上的 typecheck 会挂。
-          const pixels = image.getBitmap() as unknown as Buffer
-          const size = image.getSize()
-          const alphaAt = (x: number, y: number): number => pixels[(y * size.width + x) * 4 + 3]
-          smoke('float-pixels', {
-            size,
-            corners: {
-              左上: alphaAt(0, 0),
-              右上: alphaAt(size.width - 1, 0),
-              左下: alphaAt(0, size.height - 1),
-              右下: alphaAt(size.width - 1, size.height - 1)
-            },
-            中心: alphaAt(Math.floor(size.width / 2), Math.floor(size.height / 2)),
-            底边: alphaAt(Math.floor(size.width / 2), size.height - 2)
-          })
-
-          const metrics = await floatWin.webContents.executeJavaScript(
-            `(() => {
-               const el = document.querySelector('.capsule')
-               return {
-                 capsule: !!el,
-                 tokens: document.querySelector('.tokens')?.textContent || '',
-                 credits: document.querySelector('.credits')?.textContent || '',
-                 capsuleSize: el ? [el.clientWidth, el.clientHeight] : null,
-                 viewport: [window.innerWidth, window.innerHeight],
-                 theme: document.documentElement.dataset.capsule || ''
-               }
-             })()`
-          )
-          smoke('float-dom', metrics)
-
-          /*
-           * 展开卡片的端到端自检。
-           *
-           * 必须派发真的 pointerdown / pointerup 而不是 el.click()：
-           * 单击是渲染层自己用一对指针事件判出来的（拖动与单击共用一套），
-           * 合成的 click 事件根本走不到那段逻辑 —— 那样测出来的只是「能改状态」，
-           * 测不到「点一下胶囊真的会展开」。
-           */
-          const clickCapsule = `(() => {
-             const el = document.querySelector('.capsule')
-             if (!el) return false
-             const box = el.getBoundingClientRect()
-             const at = {
-               bubbles: true, cancelable: true, button: 0, pointerId: 1, isPrimary: true,
-               clientX: box.left + 8, clientY: box.top + box.height / 2,
-               screenX: 200, screenY: 200
-             }
-             el.dispatchEvent(new PointerEvent('pointerdown', at))
-             el.dispatchEvent(new PointerEvent('pointerup', at))
-             return true
-           })()`
-
-          const collapsedBounds = floatWin.getBounds()
-          const collapsedCapsule = currentFloatState().capsule
-          await floatWin.webContents.executeJavaScript(clickCapsule)
-          await new Promise((resolve) => setTimeout(resolve, 700))
-
-          const cardImage = await floatWin.webContents.capturePage()
-          writeFileSync(join(dir, 'float-card.png'), cardImage.toPNG())
-          const cardDom = await floatWin.webContents.executeJavaScript(
-            `(() => {
-               const card = document.querySelector('.card')
-               const el = document.querySelector('.capsule')
-               return {
-                 card: !!card,
-                 side: card ? card.dataset.side : '',
-                 align: card ? card.dataset.align : '',
-                 cardSize: card ? [card.clientWidth, card.clientHeight] : null,
-                 source: document.querySelector('.card-src')?.textContent || '',
-                 hero: document.querySelector('.hero-value')?.textContent || '',
-                 cells: [...document.querySelectorAll('.cell')].map((el) => el.textContent),
-                 gauge: document.querySelector('.gauge-num')?.textContent || '',
-                 bars: document.querySelectorAll('.spark i').length,
-                 barHeights: [...document.querySelectorAll('.spark i')].map((el) => el.style.height || '0'),
-                 cardScroll: card ? [card.clientHeight, card.scrollHeight] : null,
-                 /*
-                  * 分项高度 —— FLOAT_CARD.height 是写死的，改它之前得知道这 234px
-                  * 到底被谁吃掉了。cardScroll 只能告诉你「溢出多少」，告诉不了
-                  * 「哪一段变胖了」；字体度量一变就在这儿看得出来。
-                  */
-                 sections: card
-                   ? [...card.children].map((node) => [
-                       node.className,
-                       Math.round(node.getBoundingClientRect().height)
-                     ])
-                   : null,
-                 actions: [...document.querySelectorAll('.card-foot button')].map((el) => el.textContent),
-                 pin: (() => {
-                   const el = document.querySelector('.card-icon.pin')
-                   return el
-                     ? {
-                         present: true,
-                         on: el.dataset.on,
-                         pressed: el.getAttribute('aria-pressed'),
-                         title: el.getAttribute('title')
-                       }
-                     : { present: false }
-                 })(),
-                 capsuleSize: el ? [el.clientWidth, el.clientHeight] : null,
-                 viewport: [window.innerWidth, window.innerHeight]
-               }
-             })()`
-          )
-          smoke('float-card', {
-            expanded: currentFloatState().expanded,
-            side: currentFloatState().side,
-            before: collapsedBounds,
-            after: floatWin.getBounds(),
-            dom: cardDom
-          })
-
-          // 收起：卡片再点一次胶囊就该回去，且胶囊的位置不能漂
-          await floatWin.webContents.executeJavaScript(clickCapsule)
-          await new Promise((resolve) => setTimeout(resolve, 500))
-          smoke('float-collapse', {
-            expanded: currentFloatState().expanded,
-            bounds: floatWin.getBounds(),
-            capsuleBefore: collapsedCapsule,
-            capsuleAfter: currentFloatState().capsule
-          })
-
-          /*
-           * 卡片上的置顶开关：要验的是**窗口真的换了层级**，而不是按钮的 class 变了。
-           *
-           * 只看 DOM 的话，「点了有反应」和「窗口置顶了」是两回事 —— 前者任何
-           * 一点样式变化都能满足。所以这里读 BrowserWindow.isAlwaysOnTop()：
-           * 那是 DWM 视角的事实。顺手也确认设置落盘了（重启后要还是这个值）。
-           *
-           * 测完必须复原：把置顶关掉，否则后面那些截图步骤会在最前一层跑，
-           * 报告里的层级前提就不对了。
-           */
-          const alwaysOnTopStep = async (): Promise<{
-            before: boolean
-            after: boolean
-            stored: boolean
-            pressed: string | null
-          }> => {
-            const before = floatWin.isAlwaysOnTop()
-            await floatWin.webContents.executeJavaScript(
-              `(() => { const el = document.querySelector('.card-icon.pin'); if (el) el.click(); return !!el })()`
-            )
-            await new Promise((resolve) => setTimeout(resolve, 400))
-            const after = floatWin.isAlwaysOnTop()
-            const pressed = await floatWin.webContents.executeJavaScript(
-              `document.querySelector('.card-icon.pin')?.getAttribute('aria-pressed') ?? null`
-            )
-            return { before, after, stored: settingsStore?.settings.floatAlwaysOnTop ?? before, pressed }
-          }
-
-          // 先展开卡片（置顶按钮在卡片头上）
-          await floatWin.webContents.executeJavaScript(clickCapsule)
-          await new Promise((resolve) => setTimeout(resolve, 700))
-          const onTopOff = await alwaysOnTopStep()
-          // 再点回来，确认它是个开关而不是单向置位
-          const onTopOn = await alwaysOnTopStep()
-          await smoke('float-always-on-top', {
-            off: onTopOff,
-            back: onTopOn,
-            restored: floatWin.isAlwaysOnTop(),
-            stored: settingsStore?.settings.floatAlwaysOnTop ?? null
-          })
-          // 复原成默认的置顶（true），让后续步骤的层级前提与基线一致
-          if (!floatWin.isAlwaysOnTop()) {
-            await alwaysOnTopStep()
-            await new Promise((resolve) => setTimeout(resolve, 300))
-          }
-
-
-          /*
-           * 每个胶囊主题各截两张：收起态的胶囊、展开态的卡片。
-           * 主题是**独立于面板**的一条轴，所以这里不看 prefers-color-scheme，
-           * 只看 data-capsule 有没有被解析成对应那一档。
-           *
-           * 卡片也必须一起看：它和胶囊用的是同一份令牌，但「胶囊颜色对了」
-           * 推不出「卡片也对了」—— 卡片上一堆底色、分隔线、刻度槽的搭配只有
-           * 亲眼看截图才判得出来，而它恰恰是展开后用户盯着的那一块。
-           * 顺手把每档的 cardScroll 记下来：溢出对主题无关，但换主题会换掉
-           * 字体外的所有东西，多一列冗余的证词不亏。
-           */
-          const themeBefore = settingsStore?.settings.floatTheme ?? 'auto'
-          const themes: Array<{
-            theme: CapsuleTheme
-            resolved: string
-            cardScroll: number[] | null
-            menu: MenuChoice[]
-            menuAgree: boolean
-          }> = []
-          for (const theme of CAPSULE_THEME_ORDER) {
-            patchSettings({ floatTheme: theme })
-            /*
-             * 立刻把菜单读出来，**不给下一次快照留重建的机会** —— 这一条要测的正是
-             * 「设置一变就重建」。菜单里那几项标题带着当前档位（「胶囊主题：深靛」），
-             * 子菜单里还有一个被勾中的项，两个说法必须一致。
-             * 不一致的表现是：圆点被系统挪到了新档位、标题还停在旧档位。
-             */
-            const menu = tray?.describeChoices() ?? []
-            const menuAgree = menu
-              .filter((entry) => entry.label.includes('：'))
-              .every((entry) => entry.label.split('：')[1] === entry.checked)
-            await new Promise((resolve) => setTimeout(resolve, 400))
-            const resolved = await floatWin.webContents.executeJavaScript(
-              `document.documentElement.dataset.capsule || ''`
-            )
-            writeFileSync(join(dir, `float-${theme}.png`), (await floatWin.webContents.capturePage()).toPNG())
-
-            // 点一下展开、再点一下收起 —— 同一个 clickCapsule 脚本就能来回切
-            await floatWin.webContents.executeJavaScript(clickCapsule)
-            await new Promise((resolve) => setTimeout(resolve, 600))
-            writeFileSync(join(dir, `float-card-${theme}.png`), (await floatWin.webContents.capturePage()).toPNG())
-            const cardScroll = await floatWin.webContents.executeJavaScript(
-              `(() => { const c = document.querySelector('.card'); return c ? [c.clientHeight, c.scrollHeight] : null })()`
-            )
-            await floatWin.webContents.executeJavaScript(clickCapsule)
-            await new Promise((resolve) => setTimeout(resolve, 400))
-            themes.push({ theme, resolved, cardScroll, menu, menuAgree })
-          }
-          smoke('float-theme', { before: themeBefore, themes })
-          patchSettings({ floatTheme: themeBefore })
-          await new Promise((resolve) => setTimeout(resolve, 300))
-        }
-      } catch (error) {
-        smoke('capture-error', { message: String(error) })
-      }
-
-      smoke('ready', {
-        at: Date.now(),
-        appId: APP_ID,
-        packaged: app.isPackaged,
-        windowVisible: mainWindow?.isVisible() ?? false,
-        windowDestroyed: mainWindow?.isDestroyed() ?? true,
-        trayCreated: tray !== null,
-        float: currentFloatState(),
-        settings: settingsStore?.settings ?? null,
-        update: currentUpdate(),
-        snapshot: snapshot
-          ? {
-              kind: snapshot.kind,
-              source: snapshot.source,
-              sessions: snapshot.totals.sessions,
-              calls: snapshot.totals.calls,
-              credits: snapshot.totals.credits,
-              inputTokens: snapshot.totals.inputTokens,
-              outputTokens: snapshot.totals.outputTokens,
-              cachedTokens: snapshot.totals.cachedTokens,
-              matchedTraces: snapshot.totals.matchedTraces,
-              totalTraces: snapshot.totals.traces,
-              active: snapshot.active,
-              warnings: snapshot.warnings
-            }
-          : null
-      })
-      clearTimeout(watchdog)
-      if (SMOKE_EXIT) {
-        isQuitting = true
-        app.quit()
-      }
-    }, 4000)
-  }
+  // 自检的全部内容在 ./smoke 里 —— 它是产品代码之外的验收工具，不该继续
+  // 占着启动流程的版面（这一段曾经有 700 行，改任何启动逻辑都得穿过它）。
+  // SMOKE=0 时 runSmoke 自己会立刻返回，所以这里不用再包一层 if。
+  runSmoke({
+    appId: APP_ID,
+    mainWindow: () => mainWindow,
+    floatWindow: () => floatWindow,
+    tray: () => tray,
+    settings: () => settingsStore?.settings ?? null,
+    patchSettings,
+    currentUpdate,
+    floatState: currentFloatState,
+    snapshot: () => snapshot,
+    quit: () => {
+      isQuitting = true
+      app.quit()
+    }
+  })
 }
 
 if (!app.requestSingleInstanceLock()) {
@@ -1498,9 +790,21 @@ ipcMain.handle('settings:update', (_event, patch: Partial<Settings>) => {
   return settingsStore?.settings ?? DEFAULT_SETTINGS
 })
 
+/**
+ * 渲染层传来的数值一律先过这一关。
+ *
+ * `Number(dx) || 0` 挡得住 NaN 和字符串，但挡不住 Infinity —— 而 Infinity
+ * 一旦加进 origin，窗口就被送到屏幕外去了，还会跟着 onMoved 落盘成下次启动的
+ * 位置（重启后 isReachable 才发现，那时用户已经找不到胶囊了）。
+ */
+function finiteOrZero(value: unknown): number {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : 0
+}
+
 // 拖动频率高，走单向消息，不需要回值
 ipcMain.on('float:move', (_event, dx: unknown, dy: unknown) => {
-  floatWindow?.moveBy(Number(dx) || 0, Number(dy) || 0)
+  floatWindow?.moveBy(finiteOrZero(dx), finiteOrZero(dy))
 })
 // 单击胶囊 = 展开 / 收起悬浮卡片（不再直接开面板，那一步挪到卡片里）
 ipcMain.on('float:toggle-card', () => floatWindow?.toggleExpand())

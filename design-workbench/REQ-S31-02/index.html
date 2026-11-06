@@ -1,0 +1,2191 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Token 计量器 · UI 重构原型（REQ-S31-02）</title>
+<meta name="description" content="Token 计量器桌面应用的界面重构原型：十本账本、一套记录仪语法，改用 Apple 设计语言重画。" />
+<style>
+/* ─────────────────────────────────────────────────────────────────────────
+ * design-systems/apple/tokens.css — 逐字内联，产物样式一律引用 var(--token)
+ * ─────────────────────────────────────────────────────────────────── */
+:root {
+  /* ─── Surface (3 levels) ─── */
+  --bg: #ffffff;
+  --surface: #f5f5f7;
+  --surface-warm: #fbfbfd;
+
+  /* ─── Foreground ramp (4 levels) ─── */
+  --fg: #1d1d1f;
+  --fg-2: #424245;
+  --muted: #6e6e73;
+  --meta: #86868b;
+
+  /* ─── Border (2 levels) ─── */
+  --border: #d2d2d7;
+  --border-soft: #e8e8ed;
+
+  /* ─── Accent ─── */
+  --accent: #0071e3;
+  --accent-on: #ffffff; /* white label on the blue fill */
+
+  /* ─── Accent states ─── */
+  --accent-hover: #0077ed;
+  --accent-active: #0066cc;
+
+  /* ─── Semantic ─── */
+  --success: #16a34a;
+  --warn:    #eab308;
+  --danger:  #dc2626;
+
+  /* ─── Typography ─── */
+  --font-display:
+    "SF Pro Display", "SF Pro Icons", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --font-body:
+    "SF Pro Text", "SF Pro Icons", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --font-mono:
+    "SF Mono", ui-monospace, "JetBrains Mono", Menlo, Monaco, Consolas, monospace;
+
+  --text-xs:   12px;   /* Micro UI — fine print, micro labels */
+  --text-sm:   14px;   /* Control Label — buttons, helper labels */
+  --text-base: 17px;   /* Body Primary — Apple's reading baseline */
+  --text-lg:   21px;   /* Link/Action Heading — large promo links */
+  --text-xl:   28px;   /* Card/Product Title — tile-level naming */
+  --text-2xl:  40px;   /* Product Heading — campaign section titles */
+  --text-3xl:  56px;   /* Hero Display L — homepage hero moments */
+  --text-4xl:  80px;   /* Hero Display XL — Environment / store hero */
+
+  --leading-body:  1.47;   /* SF Pro Text body, 17px */
+  --leading-tight: 1.05;   /* Hero Display XL ceiling */
+
+  --tracking-display: -0.015em;
+
+  /* ─── Spacing ─── */
+  --space-1:  4px;
+  --space-2:  8px;
+  --space-3:  12px;
+  --space-4:  16px;
+  --space-5:  20px;
+  --space-6:  24px;
+  --space-8:  32px;
+  --space-12: 48px;
+
+  /* ─── Section rhythm ─── */
+  --section-y-desktop: 100px;
+  --section-y-tablet:  64px;
+  --section-y-phone:   40px;
+
+  /* ─── Radius ─── */
+  --radius-sm:   8px;
+  --radius-md:   12px;
+  --radius-lg:   18px;
+  --radius-pill: 980px;
+
+  /* ─── Elevation (3 levels) ─── */
+  --elev-flat:   none;
+  --elev-ring:   0 0 0 1px var(--border);
+  --elev-raised: 0 12px 32px rgba(0, 0, 0, 0.08);
+
+  /* ─── Focus ring ─── */
+  --focus-ring: 0 0 0 4px color-mix(in oklab, var(--accent), transparent 65%);
+
+  /* ─── Motion ─── */
+  --motion-fast:   150ms;
+  --motion-base:   220ms;
+  --ease-standard: cubic-bezier(0.28, 0, 0.22, 1);
+
+  /* ─── Layout ─── */
+  --container-max:            1024px;
+  --container-gutter-desktop: 22px;
+  --container-gutter-tablet:  18px;
+  --container-gutter-phone:   16px;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * 深色绑定：同一批令牌名，换成 DESIGN.md §2 的暗场档位（Absolute Black 画布、
+ * Graphite Surface 阶梯、High-Luminance Link Blue）。选择器列表里保留 :root，
+ * 所有色值仍只活在令牌块内；组件层永远只写 var(--token)。
+ * 同时支持挂在任意容器上的 [data-theme="dark"]，让面板原型 / 胶囊原型
+ * 可以独立于文档本身换装 —— 对应应用里「面板外观」与「胶囊主题」两条独立的轴。
+ * ─────────────────────────────────────────────────────────────────── */
+:root[data-theme="dark"],
+[data-theme="dark"] {
+  --bg: #000000;            /* Absolute Black —— 暗场画布 */
+  --surface: #1d1d1f;       /* Near-Black Ink 作卡片面，比纯黑多一层 */
+  --surface-warm: #272729;  /* Graphite Surface A */
+
+  --fg: #f5f5f7;
+  --fg-2: #d2d2d7;
+  --muted: #86868b;
+  --meta: #6e6e73;
+
+  --border: #424245;        /* Utility Dark Gray */
+  --border-soft: #28282b;   /* Graphite Surface C */
+
+  --accent: #2997ff;        /* 暗场用高亮度那支蓝 */
+  --accent-on: #000000;     /* 亮蓝底上白字对比不够，换黑字 */
+  --accent-hover: #4aa9ff;
+  --accent-active: #0071e3;
+
+  --elev-ring:   0 0 0 1px var(--border);
+  --elev-raised: 0 12px 32px rgba(0, 0, 0, 0.22);
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * 基础层
+ * ─────────────────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; scroll-behavior: smooth; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-body);
+  font-size: var(--text-base);
+  line-height: var(--leading-body);
+  letter-spacing: -0.01em;
+  transition: background var(--motion-base) var(--ease-standard),
+              color var(--motion-base) var(--ease-standard);
+}
+
+h1, h2, h3, h4 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  letter-spacing: var(--tracking-display);
+  line-height: var(--leading-tight);
+  margin: 0;
+}
+p { margin: 0; }
+code, kbd { font-family: var(--font-mono); font-size: var(--text-sm); }
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { color: var(--accent-hover); }
+
+button {
+  font-family: inherit;
+  font-size: var(--text-sm);
+  color: inherit;
+  cursor: pointer;
+  transition: background var(--motion-fast) var(--ease-standard),
+              color var(--motion-fast) var(--ease-standard),
+              border-color var(--motion-fast) var(--ease-standard),
+              transform var(--motion-fast) var(--ease-standard);
+}
+button:active { transform: scale(0.97); }
+button:focus-visible, a:focus-visible, input:focus-visible, [tabindex]:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+button:disabled { cursor: default; opacity: 0.45; }
+
+.num { font-variant-numeric: tabular-nums; font-feature-settings: "tnum" 1; }
+.mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+
+.wrap {
+  width: 100%;
+  max-width: var(--container-max);
+  margin: 0 auto;
+  padding-inline: var(--container-gutter-desktop);
+}
+.wrap--wide { max-width: 1240px; }
+
+/* ─── 顶部导航：Apple 的窄条半透明工具栏 ─── */
+.doc-nav {
+  position: sticky;
+  top: 0;
+  z-index: 60;
+  background: color-mix(in oklab, var(--bg), transparent 22%);
+  backdrop-filter: saturate(180%) blur(20px);
+  border-bottom: 1px solid var(--border-soft);
+}
+.doc-nav-inner {
+  max-width: var(--container-max);
+  margin: 0 auto;
+  padding: var(--space-3) var(--container-gutter-desktop);
+  display: flex;
+  align-items: center;
+  gap: var(--space-5);
+}
+.doc-brand {
+  font-family: var(--font-display);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  letter-spacing: var(--tracking-display);
+  white-space: nowrap;
+}
+.doc-brand span { color: var(--meta); font-weight: 400; }
+.doc-links {
+  display: flex;
+  gap: var(--space-5);
+  margin-left: auto;
+  font-size: var(--text-xs);
+  color: var(--muted);
+  flex-wrap: wrap;
+}
+.doc-links a { color: var(--muted); }
+.doc-links a:hover { color: var(--fg); }
+
+/* ─── 章节：黑 / 浅灰 / 白 三种画布交替 ─── */
+.chapter { padding-block: var(--section-y-desktop); }
+.chapter--surface { background: var(--surface); }
+.chapter--warm { background: var(--surface-warm); }
+.chapter--ink { background: var(--bg); }
+.chapter + .chapter { border-top: 1px solid var(--border-soft); }
+
+.eyebrow {
+  font-size: var(--text-xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--meta);
+  margin-bottom: var(--space-4);
+}
+.chapter-head { max-width: 720px; margin-bottom: var(--space-12); }
+.chapter-head h2 { font-size: var(--text-2xl); margin-bottom: var(--space-4); }
+.chapter-head p { color: var(--muted); font-size: var(--text-lg); letter-spacing: -0.02em; }
+
+/* ─── Hero ─── */
+.hero {
+  background: var(--bg);
+  padding-block: var(--section-y-desktop) var(--space-12);
+  text-align: center;
+}
+.hero h1 {
+  font-size: var(--text-3xl);
+  margin-bottom: var(--space-5);
+}
+.hero-sub {
+  font-size: var(--text-lg);
+  color: var(--muted);
+  max-width: 640px;
+  margin: 0 auto var(--space-8);
+}
+.hero-cta {
+  display: flex;
+  gap: var(--space-3);
+  justify-content: center;
+  flex-wrap: wrap;
+  margin-bottom: var(--space-12);
+}
+.hero-stats {
+  display: flex;
+  justify-content: center;
+  gap: var(--space-8);
+  flex-wrap: wrap;
+  padding-top: var(--space-8);
+  border-top: 1px solid var(--border-soft);
+}
+.hero-stat { text-align: center; min-width: 120px; }
+.hero-stat b {
+  display: block;
+  font-family: var(--font-display);
+  font-size: var(--text-xl);
+  font-weight: 600;
+  letter-spacing: var(--tracking-display);
+}
+.hero-stat span { font-size: var(--text-xs); color: var(--meta); }
+
+/* ─── 按钮：胶囊是 Apple 的动作签名 ─── */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  border: none;
+  border-radius: var(--radius-pill);
+  padding: var(--space-2) var(--space-4);
+  background: var(--accent);
+  color: var(--accent-on);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.btn:hover:not(:disabled) { background: var(--accent-hover); }
+.btn:active:not(:disabled) { background: var(--accent-active); }
+.btn--ghost {
+  background: transparent;
+  color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+.btn--ghost:hover:not(:disabled) { background: color-mix(in oklab, var(--accent), transparent 92%); }
+.btn--quiet { background: var(--surface); color: var(--fg); }
+.btn--quiet:hover:not(:disabled) { background: var(--surface-warm); }
+.btn--lg { padding: var(--space-3) var(--space-6); font-size: var(--text-base); }
+.btn--sm { padding: var(--space-1) var(--space-3); font-size: var(--text-xs); }
+
+.icon-btn {
+  width: 32px;
+  height: 32px;
+  display: inline-grid;
+  place-items: center;
+  border: none;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--fg-2);
+}
+.icon-btn:hover { background: var(--surface); color: var(--fg); }
+.icon-btn svg { width: 17px; height: 17px; display: block; }
+
+/* ─── 卡片 ─── */
+.card {
+  background: var(--bg);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--elev-ring);
+  padding: var(--space-6);
+}
+.card--raised { box-shadow: var(--elev-raised); }
+.chapter--surface .card { background: var(--bg); }
+
+.grid { display: grid; gap: var(--space-4); }
+.grid--2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.grid--3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+
+/* ─── 语法要点卡 ─── */
+.grammar h3 { font-size: var(--text-xl); margin-bottom: var(--space-3); }
+.grammar p { color: var(--muted); font-size: var(--text-sm); }
+.grammar .card { padding: var(--space-6); }
+.grammar .kicker {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--accent);
+  margin-bottom: var(--space-3);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+ * 面板原型：窗口本体
+ * ═══════════════════════════════════════════════════════════════════════ */
+.stage { display: flex; flex-direction: column; align-items: center; gap: var(--space-6); }
+
+.win {
+  width: 100%;
+  max-width: 880px;
+  background: var(--bg);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--elev-raised), var(--elev-ring);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 机头第一行：窗口 chrome，整条可拖，右端让给系统三键 */
+.win-caption {
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  padding-inline: var(--space-3);
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--surface-warm);
+}
+.win-caption .about-entry {
+  border: none;
+  background: transparent;
+  font-size: var(--text-xs);
+  color: var(--fg-2);
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+}
+.win-caption .about-entry:hover { background: var(--surface); color: var(--fg); }
+.caption-guard {
+  margin-left: auto;
+  display: flex;
+  gap: var(--space-1);
+  color: var(--meta);
+}
+.caption-guard i {
+  width: 30px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-sm);
+  font-style: normal;
+  font-size: var(--text-xs);
+}
+.caption-guard i:hover { background: var(--surface); color: var(--fg); }
+
+/* 机头第二行：身份 + 动作 */
+.win-id {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-4);
+  padding: var(--space-5) var(--space-6) var(--space-3);
+}
+.win-title { font-size: var(--text-xl); }
+.win-sub { font-size: var(--text-xs); color: var(--meta); margin-top: var(--space-1); }
+.win-actions { margin-left: auto; display: flex; align-items: center; gap: var(--space-2); }
+
+/* 机头第三行：数据源 —— 这一页的主导航，独占一行 */
+.win-nav {
+  padding: 0 var(--space-6) var(--space-4);
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+.seg {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  background: var(--surface);
+  border-radius: var(--radius-md);
+  padding: var(--space-1);
+}
+.seg button {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: var(--text-sm);
+  padding: var(--space-1) var(--space-3);
+  border-radius: var(--radius-sm);
+  white-space: nowrap;
+}
+.seg button:hover { color: var(--fg); }
+.seg button[aria-selected="true"] {
+  background: var(--bg);
+  color: var(--fg);
+  font-weight: 600;
+  box-shadow: var(--elev-ring);
+}
+.seg-wrap { position: relative; }
+.menu {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + var(--space-2));
+  left: 0;
+  min-width: 200px;
+  background: var(--bg);
+  border-radius: var(--radius-md);
+  box-shadow: var(--elev-raised), var(--elev-ring);
+  padding: var(--space-2);
+  display: grid;
+  gap: var(--space-1);
+}
+.menu button {
+  border: none;
+  background: transparent;
+  text-align: left;
+  border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--text-sm);
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+.menu button:hover { background: var(--surface); }
+.menu button[aria-selected="true"] { color: var(--accent); font-weight: 600; }
+.menu .hint { color: var(--meta); font-weight: 400; font-size: var(--text-xs); }
+.menu hr { border: none; border-top: 1px solid var(--border-soft); margin: var(--space-1) 0; }
+.backdrop { position: fixed; inset: 0; z-index: 20; }
+
+/* 滚动区 */
+.win-body {
+  padding: 0 var(--space-6) var(--space-6);
+  display: grid;
+  gap: var(--space-4);
+  background: var(--surface);
+  flex: 1;
+}
+
+/* 通道卡 */
+.channel {
+  background: var(--bg);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--elev-ring);
+  padding: var(--space-5) var(--space-6) var(--space-6);
+}
+.channel-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+.channel-name {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.channel-name.live::before {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  margin-right: var(--space-2);
+  vertical-align: middle;
+  animation: pulse 1.8s var(--ease-standard) infinite;
+}
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
+.channel-note { margin-left: auto; font-size: var(--text-xs); color: var(--meta); }
+
+/* 今日：大读数 */
+.counter { display: flex; gap: var(--space-8); flex-wrap: wrap; }
+.counter-main { min-width: 260px; }
+.readout {
+  font-family: var(--font-display);
+  font-size: var(--text-4xl);
+  font-weight: 600;
+  line-height: var(--leading-tight);
+  letter-spacing: var(--tracking-display);
+  font-variant-numeric: tabular-nums;
+}
+.readout--md { font-size: var(--text-2xl); }
+.readout .unit {
+  font-family: var(--font-body);
+  font-size: var(--text-lg);
+  font-weight: 400;
+  color: var(--muted);
+  margin-left: var(--space-2);
+  letter-spacing: -0.02em;
+}
+.readout-sub { font-size: var(--text-sm); color: var(--muted); margin-top: var(--space-2); }
+.readout-sub b { color: var(--fg-2); font-weight: 600; }
+.counter-side { padding-left: var(--space-8); border-left: 1px solid var(--border-soft); }
+
+/* 上下文仪表 */
+.gauge-head { display: flex; align-items: baseline; gap: var(--space-3); margin-bottom: var(--space-3); }
+.gauge-title { font-size: var(--text-base); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gauge-readout { margin-left: auto; font-size: var(--text-xl); font-weight: 600; font-variant-numeric: tabular-nums; }
+.gauge {
+  position: relative;
+  height: 12px;
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  box-shadow: var(--elev-ring);
+  margin: var(--space-4) 0 var(--space-3);
+}
+.gauge-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  transition: width var(--motion-base) var(--ease-standard),
+              background var(--motion-base) var(--ease-standard);
+}
+.gauge[data-level="warn"] .gauge-fill { background: var(--warn); }
+.gauge[data-level="danger"] .gauge-fill { background: var(--danger); }
+.gauge-mark {
+  position: absolute;
+  top: -3px;
+  bottom: -3px;
+  width: 1px;
+  background: var(--danger);
+  opacity: 0.55;
+}
+.gauge-needle {
+  position: absolute;
+  top: -5px;
+  bottom: -5px;
+  width: 3px;
+  border-radius: var(--radius-pill);
+  background: var(--fg);
+  transform: translateX(-50%);
+  transition: left var(--motion-base) var(--ease-standard);
+}
+.gauge-scale { display: flex; justify-content: space-between; font-size: var(--text-xs); color: var(--meta); }
+.gauge-foot { display: flex; gap: var(--space-3); font-size: var(--text-xs); color: var(--muted); margin-top: var(--space-3); }
+.gauge-foot .cwd { margin-left: auto; font-family: var(--font-mono); font-size: var(--text-xs); color: var(--meta); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 46%; }
+
+/* 横向条 */
+/* 横向条：四列定宽网格。数值与说明各自占一列，多行之间才能竖着对齐 ——
+   把 hint 塞在数值后面（宽度随文案变）会让整列数字锯齿状排，读不了第二行。 */
+.bars { display: grid; gap: var(--space-3); }
+.bar-row { display: grid; grid-template-columns: minmax(0, 120px) minmax(0, 1fr) 76px 60px; align-items: center; gap: var(--space-3); }
+.bar-k { font-size: var(--text-sm); color: var(--fg-2); display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
+.bar-k-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bar-dot { width: 8px; height: 8px; border-radius: var(--radius-pill); flex: none; }
+.bar-track { height: 8px; border-radius: var(--radius-pill); background: var(--surface); overflow: hidden; }
+.bar-fill { height: 100%; border-radius: var(--radius-pill); transition: width var(--motion-base) var(--ease-standard); }
+.bar-v { font-size: var(--text-sm); font-variant-numeric: tabular-nums; text-align: right; }
+.bar-hint { font-size: var(--text-xs); color: var(--meta); text-align: right; font-variant-numeric: tabular-nums; }
+
+/* 排行用的双行变体：模型名可以长到十几个字符，单行里给它腾位置就会把条压成一小截。
+   名字与数值走第一行，条子独占第二行 —— 于是每行的条都跟列同宽，长短一眼可比。 */
+.bars--stack .bar-row {
+  grid-template-columns: minmax(0, 1fr) 76px 60px;
+  grid-template-areas: "k v hint" "t t t";
+  row-gap: var(--space-2);
+}
+.bars--stack .bar-k { grid-area: k; }
+.bars--stack .bar-v { grid-area: v; }
+.bars--stack .bar-hint { grid-area: hint; }
+.bars--stack .bar-track { grid-area: t; }
+
+/* 14 天柱 */
+.days { display: flex; align-items: flex-end; gap: var(--space-2); height: 140px; }
+.day-col { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; height: 100%; gap: var(--space-2); }
+.day-bar {
+  width: 100%;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  background: color-mix(in oklab, var(--accent), var(--bg) 62%);
+  transition: height var(--motion-base) var(--ease-standard), background var(--motion-fast) var(--ease-standard);
+}
+.day-bar:hover { background: var(--accent); }
+.day-bar.today { background: var(--accent); }
+.day-label { font-size: var(--text-xs); color: var(--meta); text-align: center; }
+
+/* 活跃点阵 */
+/* 活跃点阵：26 列 × 7 行。要对齐的是**占内容列的比例**，不是绝对像素 ——
+   这块 mock 的画布是 880px（Apple 字号 12/14/17/21/28），通道内容列实测 784px，
+   而真实面板 560px 窗口里那一列只有 431px（560 − 脊 84 − 内边距 30 − 滚动条），
+   即整块 mock 是真实尺度的 1.82 倍。真实那边点阵 11px 见方 + 2px 缝，整块 336px，
+   占内容列 336/431 = 78%；把 11/2 这两个绝对值直接搬进来，在这里只占 43%，
+   点阵就塌成左上角一小坨，和上面铺满整列的 14 天柱完全对不上。
+   按 1.82 倍还原：格子 --space-5（20）、缝 --space-1（4），整块 26×20 + 25×4 = 620，
+   占 784 的 79%，与真实的 78% 对齐。
+   所以这两个数在落地时是 **11 / 2**（src/renderer/styles.css 的 .heatmap），
+   别照抄这里的 20 / 4。同理，把这块 mock 的 max-width 压到 460 去验窄屏是无效的：
+   字号不跟着窗口缩，量出来的溢出和真实 460 窗口不是一回事，窄屏看 styles.css。 */
+.heat { display: flex; gap: var(--space-1); padding-bottom: var(--space-2); }
+.heat-col { flex: none; display: grid; grid-template-rows: repeat(7, var(--space-5)); gap: var(--space-1); }
+.heat-cell {
+  width: var(--space-5);
+  height: var(--space-5);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  box-shadow: var(--elev-ring);
+}
+.heat-cell[data-l="1"] { background: color-mix(in oklab, var(--accent), var(--bg) 78%); box-shadow: none; }
+.heat-cell[data-l="2"] { background: color-mix(in oklab, var(--accent), var(--bg) 55%); box-shadow: none; }
+.heat-cell[data-l="3"] { background: color-mix(in oklab, var(--accent), var(--bg) 28%); box-shadow: none; }
+.heat-cell[data-l="4"] { background: var(--accent); box-shadow: none; }
+/* 今天那一格：用系统唯一的 ring 语法（inset 版），颜色取画布色，
+   这样它是在格子里挖出一圈缺口，而不是往格子外甩一道没定义过的光晕 ——
+   点阵的间隙只有 --space-1，任何外扩的环都会糊到邻居身上。
+   环宽 2px = 真实 .heat-cell.today 的 1px 按同一倍率放大；再粗就要吃掉
+   「今天」小半张脸，它反而变成一片白点里最空的那个。 */
+.heat-cell.today { background: var(--accent); box-shadow: inset 0 0 0 2px var(--bg); }
+.heat-foot { display: flex; align-items: center; gap: var(--space-2); font-size: var(--text-xs); color: var(--meta); margin-top: var(--space-3); }
+.legend { display: flex; gap: var(--space-1); margin-left: auto; }
+/* 图例格子比点阵里的格子小一档（16 vs 20）：图例是「尺子」，不是数据，
+   和点阵同宽会让人以为它在数格子。真实那边同样是小一档（9 vs 11）。 */
+.legend i { width: var(--space-4); height: var(--space-4); border-radius: var(--radius-pill); }
+
+/* 排行双列 */
+.rank-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-6); }
+
+/* 会话列表 */
+.sessions { display: grid; }
+.session {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-2);
+  border-top: 1px solid var(--border-soft);
+  background: transparent;
+  border-left: none; border-right: none; border-bottom: none;
+  text-align: left;
+  width: 100%;
+  border-radius: var(--radius-sm);
+}
+.sessions .session:first-child { border-top: none; }
+.session:hover { background: var(--surface); }
+.session.is-active { background: color-mix(in oklab, var(--accent), transparent 94%); }
+.session-main { min-width: 0; flex: 1; }
+.session-title { font-size: var(--text-sm); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-meta { font-size: var(--text-xs); color: var(--meta); margin-top: var(--space-1); display: flex; gap: var(--space-3); flex-wrap: wrap; }
+.tag {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--fg-2);
+  background: var(--surface);
+  border-radius: var(--radius-sm);
+  padding: 0 var(--space-2);
+}
+.session-nums { text-align: right; }
+.session-v { font-size: var(--text-base); font-weight: 600; font-variant-numeric: tabular-nums; }
+.session-c { font-size: var(--text-xs); color: var(--meta); font-variant-numeric: tabular-nums; }
+
+/* 额度视图 */
+.quota-rows { display: grid; gap: var(--space-5); }
+.quota-row-k { display: flex; align-items: baseline; gap: var(--space-3); font-size: var(--text-sm); margin-bottom: var(--space-2); }
+.quota-row-k .pct { margin-left: auto; font-size: var(--text-lg); font-weight: 600; font-variant-numeric: tabular-nums; }
+.quota-row-k .reset { color: var(--meta); font-size: var(--text-xs); }
+.meta-rows { display: grid; gap: var(--space-2); margin-top: var(--space-5); padding-top: var(--space-4); border-top: 1px solid var(--border-soft); }
+.meta-row { display: flex; gap: var(--space-3); font-size: var(--text-xs); color: var(--muted); }
+.meta-row .k { color: var(--meta); min-width: 64px; }
+.meta-row .v { font-family: var(--font-mono); color: var(--fg-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.notice {
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  font-size: var(--text-sm);
+  background: color-mix(in oklab, var(--warn), transparent 90%);
+  color: var(--fg-2);
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--warn), transparent 65%);
+}
+.notice--danger {
+  background: color-mix(in oklab, var(--danger), transparent 92%);
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--danger), transparent 70%);
+}
+.notice b { color: var(--fg); }
+
+/* 底轨 */
+.win-foot {
+  background: var(--bg);
+  border-top: 1px solid var(--border-soft);
+  padding: var(--space-4) var(--space-6);
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+}
+.foot-version { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--meta); }
+.foot-state { font-size: var(--text-xs); color: var(--muted); }
+.foot-state[data-status="available"], .foot-state[data-status="downloaded"] { color: var(--accent); }
+.foot-state[data-status="error"] { color: var(--danger); }
+.foot-actions { margin-left: auto; display: flex; align-items: center; gap: var(--space-2); }
+.foot-switches {
+  width: 100%;
+  display: flex;
+  gap: var(--space-6);
+  padding-top: var(--space-3);
+  margin-top: var(--space-1);
+  border-top: 1px solid var(--border-soft);
+  flex-wrap: wrap;
+}
+.switch { display: inline-flex; align-items: center; gap: var(--space-3); font-size: var(--text-sm); color: var(--fg-2); cursor: pointer; }
+.switch input { position: absolute; opacity: 0; pointer-events: none; }
+.switch .track {
+  width: 42px;
+  height: 26px;
+  border-radius: var(--radius-pill);
+  background: var(--border);
+  position: relative;
+  transition: background var(--motion-base) var(--ease-standard);
+  flex: none;
+}
+.switch .track::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 20px;
+  height: 20px;
+  border-radius: var(--radius-pill);
+  background: var(--bg);
+  box-shadow: var(--elev-raised);
+  transition: transform var(--motion-base) var(--ease-standard);
+}
+.switch input:checked + .track { background: var(--success); }
+.switch input:checked + .track::after { transform: translateX(16px); }
+.switch input:focus-visible + .track { box-shadow: var(--focus-ring); }
+.switch.muted { opacity: 0.45; }
+
+/* 关于弹层 */
+.dialog-layer { position: relative; }
+.dialog {
+  width: min(420px, 100%);
+  background: var(--bg);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--elev-raised), var(--elev-ring);
+  padding: var(--space-6);
+}
+.dialog-head { display: flex; align-items: baseline; gap: var(--space-3); margin-bottom: var(--space-5); }
+.dialog-head b { font-family: var(--font-display); font-size: var(--text-xl); font-weight: 600; letter-spacing: var(--tracking-display); }
+.dialog-head span { font-family: var(--font-mono); font-size: var(--text-sm); color: var(--meta); }
+.dialog-actions { display: flex; justify-content: flex-end; gap: var(--space-2); margin-top: var(--space-6); }
+
+/* 载入态骨架 */
+.skeleton { display: grid; gap: var(--space-4); }
+.sk-line { height: 12px; border-radius: var(--radius-pill); background: var(--surface); animation: fade 1.2s var(--ease-standard) infinite; }
+.sk-block { height: 72px; border-radius: var(--radius-md); background: var(--surface); animation: fade 1.2s var(--ease-standard) infinite; }
+@keyframes fade { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
+.pending-title { font-size: var(--text-base); font-weight: 600; }
+.pending-hint { font-size: var(--text-sm); color: var(--muted); margin-top: var(--space-2); }
+.empty { font-size: var(--text-sm); color: var(--meta); padding: var(--space-4) 0; }
+
+/* ═══ 胶囊原型 ═══ */
+.capsule-stage {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-8);
+}
+.capsule {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-4);
+  height: 56px;
+  padding: 0 var(--space-5);
+  border-radius: var(--radius-pill);
+  background: var(--bg);
+  box-shadow: var(--elev-raised), var(--elev-ring);
+}
+.capsule .cap-v { font-size: var(--text-xl); font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: var(--tracking-display); }
+.capsule .cap-v em { font-style: normal; font-size: var(--text-xs); color: var(--meta); margin-left: var(--space-1); }
+.capsule .cap-s { font-size: var(--text-xs); color: var(--muted); font-variant-numeric: tabular-nums; }
+.ring { width: 34px; height: 34px; flex: none; }
+.ring circle { fill: none; stroke-width: 3.5; }
+.ring .bg { stroke: var(--surface); }
+.ring .fg { stroke: var(--accent); stroke-linecap: round; transition: stroke-dashoffset var(--motion-base) var(--ease-standard); }
+
+.float-card {
+  width: min(420px, 100%);
+  background: var(--bg);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--elev-raised), var(--elev-ring);
+  padding: var(--space-5);
+  display: grid;
+  gap: var(--space-4);
+}
+.float-head { display: flex; align-items: center; gap: var(--space-3); }
+.live-dot { width: 7px; height: 7px; border-radius: var(--radius-pill); background: var(--accent); animation: pulse 1.8s var(--ease-standard) infinite; }
+.float-src { font-size: var(--text-sm); font-weight: 600; }
+.float-head .spacer { margin-left: auto; display: flex; gap: var(--space-1); }
+.float-hero { display: flex; align-items: flex-end; gap: var(--space-4); }
+.float-cells { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--space-2); }
+.cell { background: var(--surface); border-radius: var(--radius-md); padding: var(--space-3); }
+.cell-k { font-size: var(--text-xs); color: var(--muted); display: flex; align-items: center; gap: var(--space-2); }
+.cell-k i { width: 7px; height: 7px; border-radius: var(--radius-pill); }
+.cell-v { font-size: var(--text-base); font-weight: 600; font-variant-numeric: tabular-nums; margin-top: var(--space-1); }
+.spark { display: flex; align-items: flex-end; gap: var(--space-1); height: 40px; }
+.spark i { flex: 1; background: color-mix(in oklab, var(--accent), var(--bg) 62%); border-radius: var(--radius-sm) var(--radius-sm) 0 0; min-height: 2px; }
+.spark i.zero { background: var(--surface); }
+.spark i.today { background: var(--accent); }
+.float-foot { display: flex; align-items: center; gap: var(--space-2); padding-top: var(--space-3); border-top: 1px solid var(--border-soft); }
+.float-foot .t { font-size: var(--text-xs); color: var(--meta); margin-right: auto; }
+
+/* 状态画廊 */
+.states { display: grid; gap: var(--space-4); }
+.states .card { display: grid; gap: var(--space-4); }
+.states h4 { font-size: var(--text-base); font-weight: 600; }
+.states .why { font-size: var(--text-xs); color: var(--meta); }
+
+/* 令牌速查 */
+.swatches { display: grid; grid-template-columns: repeat(auto-fill, minmax(168px, 1fr)); gap: var(--space-3); }
+.swatch { border-radius: var(--radius-md); box-shadow: var(--elev-ring); overflow: hidden; }
+.swatch .chip { height: 56px; }
+.swatch .label { padding: var(--space-3); background: var(--bg); font-size: var(--text-xs); }
+.swatch .label b { display: block; font-family: var(--font-mono); font-weight: 500; }
+.swatch .label span { color: var(--meta); }
+
+.spectable { width: 100%; border-collapse: collapse; font-size: var(--text-sm); }
+.spectable th { text-align: left; font-size: var(--text-xs); color: var(--meta); font-weight: 500; padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--border); }
+.spectable td { padding: var(--space-3); border-bottom: 1px solid var(--border-soft); vertical-align: top; }
+.spectable td:first-child { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--fg-2); white-space: nowrap; }
+
+.doc-foot { padding: var(--space-12) 0; border-top: 1px solid var(--border-soft); font-size: var(--text-xs); color: var(--meta); }
+.doc-foot .wrap { display: flex; gap: var(--space-4); flex-wrap: wrap; }
+
+/* ─── 响应式 ─── */
+@media (max-width: 1023px) {
+  .chapter { padding-block: var(--section-y-tablet); }
+  .wrap, .wrap--wide, .doc-nav-inner { padding-inline: var(--container-gutter-tablet); }
+  .rank-grid { grid-template-columns: 1fr; }
+  .grid--3 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 700px) {
+  .chapter { padding-block: var(--section-y-phone); }
+  .wrap, .wrap--wide, .doc-nav-inner { padding-inline: var(--container-gutter-phone); }
+  .hero h1 { font-size: var(--text-2xl); }
+  .chapter-head h2 { font-size: var(--text-xl); }
+  .readout { font-size: var(--text-2xl); }
+  .grid--2, .grid--3 { grid-template-columns: 1fr; }
+  .counter-side { padding-left: 0; border-left: none; }
+  .win-id { flex-wrap: wrap; }
+  .bar-row { grid-template-columns: 76px minmax(0, 1fr) 76px 56px; }
+  .rank-grid { gap: var(--space-4); }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }
+}
+</style>
+</head>
+<body>
+
+<nav class="doc-nav">
+  <div class="doc-nav-inner">
+    <div class="doc-brand">Token 计量器 <span>· UI 重构原型</span></div>
+    <div class="doc-links">
+      <a href="#principles">设计语法</a>
+      <a href="#panel">主面板</a>
+      <a href="#anatomy">通道拆解</a>
+      <a href="#capsule">桌面胶囊</a>
+      <a href="#states">状态</a>
+      <a href="#spec">令牌</a>
+      <button type="button" class="btn btn--sm btn--ghost" id="themeBtn">外观：跟随系统</button>
+    </div>
+  </div>
+</nav>
+
+<header class="hero">
+  <div class="wrap">
+    <p class="eyebrow">REQ-S31-02 · 原型 · v0.12.8 之后</p>
+    <h1>十个数据源，一本台账，<br />一台安静的计量器。</h1>
+    <p class="hero-sub">
+      把「多通道记录仪」搬进 Apple 的设计语言：白与浅灰做纸，蓝色只留给动作，
+      大号读数用 SF Pro Display 的紧凑字距，通道之间的层级靠表面与细线，不靠卡片堆叠。
+    </p>
+    <div class="hero-cta">
+      <a class="btn btn--lg" href="#panel">查看主面板原型</a>
+      <a class="btn btn--lg btn--ghost" href="#principles">先看设计语法</a>
+    </div>
+    <div class="hero-stats">
+      <div class="hero-stat"><b class="num">10</b><span>数据源</span></div>
+      <div class="hero-stat"><b class="num">8</b><span>计量通道</span></div>
+      <div class="hero-stat"><b class="num">4</b><span>账本口径</span></div>
+      <div class="hero-stat"><b class="num">2</b><span>面板主题</span></div>
+      <div class="hero-stat"><b class="num">1</b><span>强调色</span></div>
+    </div>
+  </div>
+</header>
+
+<section class="chapter chapter--surface" id="principles">
+  <div class="wrap">
+    <div class="chapter-head">
+      <p class="eyebrow">设计语法</p>
+      <h2>四条规则决定这块界面的样子</h2>
+      <p>重构不改数据口径，只改表达方式。下面四条是这一版所有取舍的依据。</p>
+    </div>
+    <div class="grid grid--2 grammar">
+      <div class="card">
+        <span class="kicker">01 · 表面分层</span>
+        <h3>通道卡浮在浅灰纸上</h3>
+        <p>整块面板是 <code>var(--surface)</code>，每张通道卡是 <code>var(--bg)</code> + 一圈 <code>var(--elev-ring)</code>。
+        需要强调的模块才升一级到 <code>var(--elev-raised)</code>。没有阴影堆叠，也没有装饰性描边 —— 层级由明度差承担。</p>
+      </div>
+      <div class="card">
+        <span class="kicker">02 · 单色动作</span>
+        <h3>蓝色只说「现在」和「可点」</h3>
+        <p><code>var(--accent)</code> 只出现在三处：主行动按钮、当前数据源、今日那根柱子与今天那一格。
+        数据条用蓝色阶（accent → accent+bg）拉开深浅，其余一律走前景灰阶。语义色只在上下文进红线区时露面。</p>
+      </div>
+      <div class="card">
+        <span class="kicker">03 · 机头三行</span>
+        <h3>标题不与系统三键同处一行</h3>
+        <p>第一行是窗口 chrome（整条可拖，右端给「− □ ✕」留位，左角只留一个「关于」）；
+        第二行才是身份与动作；第三行整行给数据源 —— 它是这一页的主导航，挤进标题行只会被压成省略号。</p>
+      </div>
+      <div class="card">
+        <span class="kicker">04 · 读不到 ≠ 0</span>
+        <h3>缺账本的通道整块收起</h3>
+        <p>Qoder CN 没有 token，结构卡整块不出现而不是画一排 0；OpenCode Go 只有额度，面板换成另一套卡片。
+        「读不到」另有载入态与告警条，绝不画成一个看起来正常的 0。</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="chapter" id="panel">
+  <div class="wrap wrap--wide">
+    <div class="chapter-head">
+      <p class="eyebrow">主面板原型 · 可交互</p>
+      <h2>切数据源、刷新、换外观、点会话</h2>
+      <p>这一版原型接的是真实口径：切到只有积分的源，token 通道会整块消失；切到额度源，面板换成另一套卡片。底轨的更新流程也可以一路点到底。</p>
+    </div>
+
+    <div class="stage">
+      <div class="win dialog-layer" id="win" data-theme="light">
+        <!-- 机头 · 第一行：窗口 chrome -->
+        <div class="win-caption">
+          <button type="button" class="about-entry" id="aboutEntry">关于</button>
+          <div class="caption-guard" aria-hidden="true">
+            <i>−</i><i>□</i><i>✕</i>
+          </div>
+        </div>
+
+        <!-- 机头 · 第二行：身份与动作 -->
+        <div class="win-id">
+          <div>
+            <div class="win-title">Token 计量器</div>
+            <div class="win-sub" id="winSub">更新于 —</div>
+          </div>
+          <div class="win-actions">
+            <button type="button" class="icon-btn" title="打开项目主页（GitHub）" aria-label="打开项目主页">
+              <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.6 0 1.5 2.4 1.5 5.6c0 2 1 3.4 2.4 4.4-.1.4-.2 1 .1 1.3.3.3.9.1 1.2-.1.4-.2.7-.5 1.1-.7.5.1 1 .1 1.7.1 1.4 0 2.7-.4 3.6-1.1 1-.7 1.6-1.8 1.9-3 .3-1.3.3-2.7.3-3.9C13.8 2.4 11.7 0 8 0Zm2.6 8.9c-.6.6-1.6.9-2.6.9s-2-.3-2.6-.9c-.3-.3-.4-.8-.2-1.2.2-.4.6-.5 1-.4.4.1.8.5 1.8.5s1.4-.4 1.8-.5c.4-.1.8 0 1 .4.2.4.1.9-.2 1.2Z"/></svg>
+            </button>
+            <button type="button" class="btn btn--quiet btn--sm" id="winThemeBtn" title="外观：跟随系统（点击切换）">外观 · 系统</button>
+            <button type="button" class="btn btn--sm" id="refreshBtn">刷新</button>
+          </div>
+        </div>
+
+        <!-- 机头 · 第三行：数据源主导航 -->
+        <div class="win-nav">
+          <div class="seg" id="segPrimary" role="group" aria-label="数据源"></div>
+          <div class="seg-wrap">
+            <div class="seg"><button type="button" id="moreBtn" aria-haspopup="menu" aria-expanded="false">更多</button></div>
+          </div>
+        </div>
+
+        <!-- 滚动内容区 -->
+        <div class="win-body" id="winBody"></div>
+
+        <!-- 底轨 -->
+        <footer class="win-foot">
+          <span class="foot-version">v0.12.8</span>
+          <span class="foot-state" id="footState" data-status="latest">已是最新版本</span>
+          <span class="foot-actions" id="footActions"></span>
+          <div class="foot-switches">
+            <label class="switch">
+              <input type="checkbox" id="swAutoCheck" checked />
+              <span class="track" aria-hidden="true"></span>
+              启动时自动检查更新
+            </label>
+            <label class="switch" id="swAutoLabel">
+              <input type="checkbox" id="swAutoDl" />
+              <span class="track" aria-hidden="true"></span>
+              发现新版本后自动下载
+            </label>
+          </div>
+        </footer>
+
+        <!-- 关于弹层 -->
+        <div id="aboutLayer"></div>
+      </div>
+
+      <p class="why" style="font-size:var(--text-xs);color:var(--meta);max-width:880px">
+        原型说明：数据为演示用样本，口径与真实应用一致（缓存命中计入输入、积分以账本记录为权威、
+        14 天柱补齐空档、热力图取近 26 周）。真实实现里窗口是无边框 + 自绘标题栏，第一行整条可拖。
+      </p>
+    </div>
+  </div>
+</section>
+
+<section class="chapter chapter--surface" id="anatomy">
+  <div class="wrap">
+    <div class="chapter-head">
+      <p class="eyebrow">通道拆解</p>
+      <h2>每个通道画什么，什么时候收起</h2>
+      <p>通道顺序按「抬头 → 现在 → 历史 → 明细」排。表里写清了各账本口径下的显示差异。</p>
+    </div>
+
+    <div class="card" style="padding:var(--space-6) var(--space-6)">
+      <table class="spectable">
+        <thead>
+          <tr><th>通道</th><th>画什么</th><th>口径差异</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>积分 / 额度</td>
+            <td>云端积分水位、额度包明细；或三个额度窗口的水位与重置时间。</td>
+            <td>Trae CN 的积分在云端、OpenCode Go 只有百分比；其余源这一整块不出现。</td>
+          </tr>
+          <tr>
+            <td>今日</td>
+            <td>主读数 + 输入 / 输出 / 调用次数；右侧副读数。</td>
+            <td>有积分的源右侧报积分与比价；没有积分的换成缓存命中率；没有 token 的主读数直接报积分。</td>
+          </tr>
+          <tr>
+            <td>上下文</td>
+            <td>带红线区的仪表：70% / 90% 两条分界印在刻度槽上，指针进区才染色。</td>
+            <td>模型上限未知时只报已用量，不硬算百分比；只有比例的源按比例画。</td>
+          </tr>
+          <tr>
+            <td>结构</td>
+            <td>输入 / 缓存命中 / 输出 / 思考 的分布条。</td>
+            <td>思考 token 只有部分源单列；没有 token 的源整块收起。</td>
+          </tr>
+          <tr>
+            <td>14 天</td>
+            <td>每日柱状图，空档补 0 高度，今天用强调色。</td>
+            <td>没有 token 的源改画积分柱。</td>
+          </tr>
+          <tr>
+            <td>活跃</td>
+            <td>近 26 周点阵，五级明度，今天加一圈强调色描边。</td>
+            <td>计量单位跟随账本（token 或积分），图例同步换字。</td>
+          </tr>
+          <tr>
+            <td>模型 / 项目</td>
+            <td>双列排行，各取前五。</td>
+            <td>右侧数值按账本切换 token 或积分，hint 报次数 / 会话数。</td>
+          </tr>
+          <tr>
+            <td>会话</td>
+            <td>标题、模型、项目、相对时间、次数、水位；右侧大数与积分。</td>
+            <td>点一行即把它设为「当前会话」，仪表与托盘进度环同步 —— 原型里可以直接点。</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<section class="chapter" id="capsule">
+  <div class="wrap">
+    <div class="chapter-head">
+      <p class="eyebrow">桌面胶囊</p>
+      <h2>贴在别人桌面上的一小块牌子</h2>
+      <p>胶囊与面板是两条独立的外观轴。它比面板更克制：只留一个主读数、一把水位环，展开后才是「一眼看完」的那一层。</p>
+    </div>
+
+    <div class="grid grid--2" style="align-items:start">
+      <div class="card" style="display:grid;gap:var(--space-6)">
+        <div style="display:flex;align-items:center;gap:var(--space-4);flex-wrap:wrap">
+          <div class="capsule" id="capsuleSmall">
+            <svg class="ring" viewBox="0 0 36 36" aria-hidden="true">
+              <circle class="bg" cx="18" cy="18" r="15" />
+              <circle class="fg" cx="18" cy="18" r="15" stroke-dasharray="94.2" stroke-dashoffset="50" transform="rotate(-90 18 18)" />
+            </svg>
+            <div>
+              <div class="cap-v">1.33M<em>token</em></div>
+              <div class="cap-s">46% · 34.2 分</div>
+            </div>
+          </div>
+        </div>
+        <div class="bars" id="capsuleSpecs"></div>
+        <p class="why" style="font-size:var(--text-xs);color:var(--meta)">
+          三档尺寸 152×44 / 198×56 / 252×68；窗口比胶囊四周多 12px 留白，
+          阴影几何四档统一 <code>0 4px 10px</code> 的触达范围，对应这里的 <code>var(--elev-raised)</code> 上限。
+        </p>
+      </div>
+
+      <div class="float-card" data-theme="dark" id="floatCard">
+        <div class="float-head">
+          <i class="live-dot" aria-hidden="true"></i>
+          <span class="float-src" id="floatSrc">WorkBuddy</span>
+          <span class="spacer">
+            <button type="button" class="icon-btn" title="胶囊置顶：开" aria-label="胶囊置顶">
+              <svg viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M6 9.4V3.2M4.1 5.1 6 3.2l1.9 1.9M2.4 10.6h7.2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+            <button type="button" class="icon-btn" title="收起卡片" aria-label="收起卡片">
+              <svg viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M2.6 2.6l6.8 6.8M9.4 2.6l-6.8 6.8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+            </button>
+          </span>
+        </div>
+        <div class="float-hero">
+          <div class="readout readout--md" id="floatValue">1.33M<span class="unit">token</span></div>
+          <div style="margin-left:auto;text-align:right">
+            <div class="readout-sub" id="floatSide"><b>34.2</b> 积分 · 128 次</div>
+            <div class="readout-sub" style="color:var(--meta)" id="floatNote">贴在别人桌面上的那一层，只留一眼看完的东西</div>
+          </div>
+        </div>
+        <div class="float-cells" id="floatCells">
+          <div class="cell"><div class="cell-k"><i style="background:var(--accent)"></i>输入</div><div class="cell-v">1.24M</div></div>
+          <div class="cell"><div class="cell-k"><i style="background:color-mix(in oklab, var(--accent), var(--bg) 45%)"></i>输出</div><div class="cell-v">86.4K</div></div>
+          <div class="cell"><div class="cell-k"><i style="background:var(--fg)"></i>缓存</div><div class="cell-v">1.19M</div></div>
+        </div>
+        <div>
+          <div class="gauge" data-level="ok" id="floatGauge">
+            <div class="gauge-fill" id="floatGaugeFill" style="width:46%"></div>
+            <span class="gauge-mark" style="left:70%"></span>
+            <span class="gauge-mark" style="left:90%"></span>
+            <span class="gauge-needle" id="floatGaugeNeedle" style="left:46%"></span>
+          </div>
+          <div class="gauge-scale"><span>0</span><span>70</span><span>90</span><span>100</span></div>
+          <div class="gauge-foot"><span id="floatGaugeNote">当前会话 46%</span></div>
+        </div>
+        <div>
+          <div class="cell-k" style="margin-bottom:var(--space-2)" id="floatSparkLabel">近 7 天</div>
+          <div class="spark" id="floatSpark"></div>
+        </div>
+        <div class="float-foot">
+          <span class="t" id="floatTime">14:20 · 3 分钟前</span>
+          <button type="button" class="btn btn--ghost btn--sm">刷新</button>
+          <button type="button" class="btn btn--sm">打开面板</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="chapter chapter--surface" id="states">
+  <div class="wrap">
+    <div class="chapter-head">
+      <p class="eyebrow">状态</p>
+      <h2>读不到、没有、出错了 —— 三种说法</h2>
+      <p>界面里出现 0 只有一种可能：真的读到了 0。其余情况各有自己的画法，且都要说人话。</p>
+    </div>
+    <div class="grid grid--2 states">
+      <div class="card">
+        <h4>载入中 · 正在扫内存取密钥</h4>
+        <div class="skeleton">
+          <div class="sk-line" style="width:36%"></div>
+          <div class="sk-block"></div>
+          <div class="sk-line" style="width:72%"></div>
+        </div>
+        <div>
+          <div class="pending-title">正在从 Trae CN 进程读取用量库密钥</div>
+          <div class="pending-hint">大约需要 20 秒。这段时间的数字不是 0，是还没读到 —— 所以这里一个数字都不画。</div>
+        </div>
+        <p class="why">骨架只占位，不填假数；载入完成前禁用刷新，避免叠两轮采集。</p>
+      </div>
+
+      <div class="card">
+        <h4>空态 · 账本里没有这一层</h4>
+        <div class="empty">最近 14 天没有用量</div>
+        <div class="notice">
+          <b>另有 12.40 积分找不到对应的会话明细</b>（1,284 个计费回合中，只有 1,279 个能对上本地记录）。
+          这些多半来自已经清理掉的会话。
+        </div>
+        <p class="why">未归因积分单独列出，不并进会话明细，避免总额平白少一截。</p>
+      </div>
+
+      <div class="card">
+        <h4>取数失败</h4>
+        <div class="notice notice--danger">
+          <b>取数失败</b><br />
+          读不到 <code>~/.zcode/cli/db/db.sqlite</code>：文件被占用，或目录不存在。
+        </div>
+        <div style="display:flex;gap:var(--space-2)">
+          <button type="button" class="btn btn--ghost btn--sm">重试</button>
+          <button type="button" class="btn btn--quiet btn--sm">打开数据目录</button>
+        </div>
+        <p class="why">失败只影响当前数据源，切到别的源照常可用；底轨与更新状态不受牵连。</p>
+      </div>
+
+      <div class="card">
+        <h4>关于 · 版本与环境</h4>
+        <div class="dialog" style="box-shadow:var(--elev-ring)">
+          <div class="dialog-head"><b>Token 计量器</b><span>v0.12.8</span></div>
+          <div class="meta-rows" style="margin-top:0;padding-top:0;border-top:none">
+            <div class="meta-row"><span class="k">运行模式</span><span class="v">安装版（支持自动更新）</span></div>
+            <div class="meta-row"><span class="k">运行环境</span><span class="v">Electron 43.3.0 · Chromium 144</span></div>
+            <div class="meta-row"><span class="k">配置文件</span><span class="v">%APPDATA%\wb-token-meter\wb-token-meter.json</span></div>
+          </div>
+          <div class="dialog-actions">
+            <button type="button" class="btn btn--ghost btn--sm">打开发布页</button>
+            <button type="button" class="btn btn--sm">关闭</button>
+          </div>
+        </div>
+        <p class="why">弹层用应用自己的外皮：系统对话框是另一套皮肤，跟这块记录纸摆在一起像两个程序。</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="chapter" id="spec">
+  <div class="wrap">
+    <div class="chapter-head">
+      <p class="eyebrow">令牌</p>
+      <h2>这一版只用这些值</h2>
+      <p>颜色、字号、圆角、间距、阴影全部取自 Apple 令牌；深色是同一批令牌名的另一组绑定，不是再抄一套结构。</p>
+    </div>
+
+    <div class="swatches" style="margin-bottom:var(--space-12)">
+      <div class="swatch"><div class="chip" style="background:var(--bg);box-shadow:inset 0 0 0 1px var(--border)"></div><div class="label"><b>--bg</b><span>画布 / 卡片面</span></div></div>
+      <div class="swatch"><div class="chip" style="background:var(--surface)"></div><div class="label"><b>--surface</b><span>纸 / 轨道底</span></div></div>
+      <div class="swatch"><div class="chip" style="background:var(--surface-warm)"></div><div class="label"><b>--surface-warm</b><span>chrome 层</span></div></div>
+      <div class="swatch"><div class="chip" style="background:var(--accent)"></div><div class="label"><b>--accent</b><span>动作 / 今天</span></div></div>
+      <div class="swatch"><div class="chip" style="background:var(--fg)"></div><div class="label"><b>--fg</b><span>主读数</span></div></div>
+      <div class="swatch"><div class="chip" style="background:var(--fg-2)"></div><div class="label"><b>--fg-2</b><span>次级文本</span></div></div>
+      <div class="swatch"><div class="chip" style="background:var(--muted)"></div><div class="label"><b>--muted</b><span>说明文本</span></div></div>
+      <div class="swatch"><div class="chip" style="background:var(--meta)"></div><div class="label"><b>--meta</b><span>刻度 / 脚注</span></div></div>
+      <div class="swatch"><div class="chip" style="background:var(--border)"></div><div class="label"><b>--border</b><span>分隔线</span></div></div>
+      <div class="swatch"><div class="chip" style="background:var(--border-soft)"></div><div class="label"><b>--border-soft</b><span>行分隔</span></div></div>
+      <div class="swatch"><div class="chip" style="background:var(--warn)"></div><div class="label"><b>--warn</b><span>≥70% 水位</span></div></div>
+      <div class="swatch"><div class="chip" style="background:var(--danger)"></div><div class="label"><b>--danger</b><span>≥90% 红线区</span></div></div>
+      <div class="swatch"><div class="chip" style="background:var(--success)"></div><div class="label"><b>--success</b><span>开关打开</span></div></div>
+    </div>
+
+    <div class="grid grid--2">
+      <div class="card">
+        <h4 style="font-size:var(--text-base);margin-bottom:var(--space-4)">字号五档 + 展示档</h4>
+        <table class="spectable">
+          <tbody>
+            <tr><td>--text-xs 12</td><td><span style="font-size:var(--text-xs);color:var(--muted)">刻度、脚注、会话 meta</span></td></tr>
+            <tr><td>--text-sm 14</td><td><span style="font-size:var(--text-sm)">按钮、标签、通道名</span></td></tr>
+            <tr><td>--text-base 17</td><td><span style="font-size:var(--text-base)">正文、会话标题</span></td></tr>
+            <tr><td>--text-lg 21</td><td><span style="font-size:var(--text-lg)">章节导语</span></td></tr>
+            <tr><td>--text-xl 28</td><td><span style="font-size:var(--text-xl)">窗口标题</span></td></tr>
+            <tr><td>--text-2xl 40</td><td><span style="font-size:var(--text-2xl);letter-spacing:var(--tracking-display)">卡片标题</span></td></tr>
+            <tr><td>--text-3xl 56</td><td><span style="font-size:var(--text-3xl);letter-spacing:var(--tracking-display)">Hero</span></td></tr>
+            <tr><td>--text-4xl 80</td><td><span style="font-size:var(--text-4xl);letter-spacing:var(--tracking-display);font-weight:600">今日</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="card">
+        <h4 style="font-size:var(--text-base);margin-bottom:var(--space-4)">圆角与层级</h4>
+        <table class="spectable">
+          <tbody>
+            <tr><td>--radius-sm</td><td>刻度、点阵格、分段控件内项</td></tr>
+            <tr><td>--radius-md</td><td>分段控件轨道、告警条、额度包</td></tr>
+            <tr><td>--radius-lg</td><td>通道卡、窗口、弹层</td></tr>
+            <tr><td>--radius-pill</td><td>按钮、仪表槽、开关、胶囊</td></tr>
+            <tr><td>--elev-ring</td><td>默认层级：一圈细线</td></tr>
+            <tr><td>--elev-raised</td><td>浮起层级：窗口、弹层、胶囊</td></tr>
+            <tr><td>--focus-ring</td><td>键盘焦点：强调色光晕</td></tr>
+            <tr><td>--motion-base</td><td>220ms · cubic-bezier(0.28, 0, 0.22, 1)</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer class="doc-foot">
+  <div class="wrap">
+    <span>REQ-S31-02 · token 计量器 UI 重构原型</span>
+    <span style="margin-left:auto">设计系统：Apple · 单文件原型，无外部依赖</span>
+  </div>
+</footer>
+
+<script>
+/* ═══════════════════════════════════════════════════════════════════════
+ * 演示数据 —— 口径与真实应用一致：缓存命中含在输入内、积分以账本记录为权威、
+ * 14 天柱补齐空档、热力图近 26 周。数字本身是样本。
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+/** mulberry32：可复现的伪随机，切源刷新都不会跳数 */
+function prng(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/* ---- 格式化：与 src/shared/format.ts 同口径 ---- */
+function compact(v) {
+  if (!Number.isFinite(v)) return '0';
+  const abs = Math.abs(v);
+  const trim = (n) => {
+    const a = Math.abs(n);
+    return n.toFixed(a >= 100 ? 0 : a >= 10 ? 1 : 2).replace(/\.0+$/, '');
+  };
+  if (abs >= 1e9) return trim(v / 1e9) + 'B';
+  if (abs >= 1e6) return trim(v / 1e6) + 'M';
+  if (abs >= 1e3) return trim(v / 1e3) + 'K';
+  return String(Math.round(v));
+}
+function grouped(v) { return Number.isFinite(v) ? Math.round(v).toLocaleString('en-US') : '0'; }
+function pct(part, whole) { return whole ? Math.round((part / whole) * 1000) / 10 : 0; }
+function creditsFmt(v) { return Number.isFinite(v) ? (v.toFixed(2).replace(/\.?0+$/, '') || '0') : '0'; }
+function rate(tokens, credit) { return credit > 0 ? compact(tokens / credit) : '—'; }
+function relTime(ts, now) {
+  const d = Math.max(0, now - ts);
+  if (d < 6e4) return '刚刚';
+  if (d < 36e5) return Math.floor(d / 6e4) + ' 分钟前';
+  if (d < 864e5) return Math.floor(d / 36e5) + ' 小时前';
+  return Math.floor(d / 864e5) + ' 天前';
+}
+function clock(ts) {
+  const d = new Date(ts);
+  return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+}
+function esc(s) { return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+
+const NOW = Date.now();
+const MIN = 6e4, HOUR = 36e5, DAY = 864e5;
+
+/* ---- 数据源表：与 src/shared/format.ts 的 SOURCE_ORDER 同序 ---- */
+const SOURCES = [
+  { k: 'workbuddy', label: 'WorkBuddy', tokens: true, credits: true, reasoning: true, seed: 11, dir: '~/.workbuddy', primary: true,
+    models: ['claude-opus-4-8', 'claude-sonnet-4-6', 'gpt-5.2-codex', 'kimi-k2.5'],
+    sessions: [['重构面板通道卡，改成 Apple 语法', 'wb-token-meter', 2 * MIN, 128, 0.462], ['对账：积分明细的 key 换成了 conversationRequestId', 'wb-token-meter', 46 * MIN, 64, 0.71], ['胶囊收起时闪一下，改成 setShape 裁剪', 'wb-token-meter', 3 * HOUR, 92, 0.34], ['托盘进度环在水位 90% 后不变色', 'water-reminder', 7 * HOUR, 38, 0.88], ['README 补 macOS 未签名的绕行说明', 'notes', 22 * HOUR, 17, 0.19]] },
+  { k: 'qoder', label: 'Qoder CN', tokens: false, credits: true, reasoning: false, seed: 23, dir: '~/.qoder-cn', primary: true,
+    models: ['qfmodel', 'dfmodel'],
+    sessions: [['把采集只扫 jsonl，不读凭证', 'factory-api', 9 * MIN, 22, 0.58], ['fork 会话重复计账，按 request_id 去重', 'factory-api', 2 * HOUR, 41, 0.63], ['上下文水位只报比例，不编绝对值', 'dsh-pet', 6 * HOUR, 13, 0.27]] },
+  { k: 'kimi', label: 'Kimi Code', tokens: true, credits: false, reasoning: false, seed: 31, dir: '~/.kimi-code', primary: true,
+    models: ['kimi-k2.5', 'kimi-k2.5-turbo'],
+    sessions: [['wire.jsonl 的四个 token 字段互不重叠', 'wb-token-meter', 14 * MIN, 55, 0.52], ['子代理各写各的 wire，归到父会话', 'water-reminder', 5 * HOUR, 28, 0.41]] },
+  { k: 'zcode', label: 'ZCode', tokens: true, credits: false, reasoning: true, sizeUnknown: true, seed: 47, dir: '~/.zcode', primary: true,
+    models: ['glm-4.7', 'deepseek-v3.2', 'kimi-k2'],
+    sessions: [['model_usage 一次请求一行，直接聚合', 'factory-api', 31 * MIN, 73, 0.66], ['远程 provider 不落模型目录，上限未知', 'notes', 9 * HOUR, 19, 0]] },
+  { k: 'mimo', label: 'MiMo', tokens: true, credits: false, reasoning: true, seed: 53, dir: '~/.local/share/mimocode',
+    models: ['mimo-v2-pro', 'mimo-v2-flash'],
+    sessions: [['桌面端账本在 mimocode 的 share 目录', 'dsh-pet', 3 * HOUR, 44, 0.37]] },
+  { k: 'reasonix', label: 'Reasonix', tokens: true, credits: false, reasoning: true, seed: 67, dir: '%APPDATA%\\reasonix\\stats',
+    models: ['rx-o3', 'rx-4o-mini'],
+    sessions: [['新版按天流水单记 reasoning', 'factory-api', 55 * MIN, 61, 0.49], ['会话按 wire 认领，两个不再挤一个池子', 'wb-token-meter', 8 * HOUR, 33, 0.72]] },
+  { k: 'dsh', label: 'DeepSeek Harness', tokens: true, credits: false, reasoning: false, seed: 71, dir: '~/.dsh',
+    models: ['deepseek-reasoner', 'deepseek-chat'],
+    sessions: [['pi-ai 把 reasoning 折进 output，不单列', 'wb-token-meter', 17 * HOUR, 26, 0.31]] },
+  { k: 'traecn', label: 'Trae CN', tokens: true, credits: false, cloud: true, reasoning: true, seed: 83, dir: '%APPDATA%\\Trae CN\\ModularData\\ai-agent',
+    models: ['trae-pro', 'doubao-seed-1.6', 'deepseek-v3.2'],
+    sessions: [['SQLCipher 的密钥要从进程内存里捞', 'factory-api', 4 * MIN, 87, 0.55], ['积分在云端，本地账本一个都不写', 'notes', 4 * HOUR, 24, 0.22]] },
+  { k: 'opencode-desktop', label: 'OpenCode', tokens: true, credits: false, reasoning: true, seed: 97, dir: '~/.local/share/opencode',
+    models: ['claude-opus-4-8', 'gpt-5.2-codex'],
+    sessions: [['2.x 引擎换了新表，今日不再恒为 0', 'wb-token-meter', 26 * MIN, 49, 0.44]] },
+  { k: 'opencode', label: 'OpenCode Go', quota: true, seed: 101, dir: 'opencode.ai/zen/go', models: [], sessions: [] }
+];
+/* 分段控件只放四个，其余进「更多」—— 十个源挤一行会在窗口缩小时互相压 */
+
+const PRIMARY = SOURCES.filter((s) => s.primary).slice(0, 4);
+const MORE = SOURCES.filter((s) => !s.primary);
+
+/* ---- 由种子生成一份完整快照 ---- */
+function buildSnapshot(cfg) {
+  const rnd = prng(cfg.seed * 7919);
+
+  /* 额度型数据源没有本地账本，整套 token 结构都不该造出来 ——
+     造了就会在界面上长出「今日 / 结构 / 会话」这些根本没数据的通道。 */
+  if (cfg.quota) {
+    return { cfg, generatedAt: NOW - 8 * MIN, quota: buildQuota(rnd), sessions: [], days: [], heat: [], models: [], projects: [] };
+  }
+
+  const base = 4e5 + rnd() * 1.4e6;
+  const cacheShare = 0.86 + rnd() * 0.11;
+  const calls = Math.round(24 + rnd() * 140);
+  const input = Math.round(base * (1.6 + rnd()));
+  const cached = Math.round(input * cacheShare);
+  const output = Math.round(base * (0.05 + rnd() * 0.05));
+  const reasoning = cfg.reasoning ? Math.round(output * (0.2 + rnd() * 0.4)) : 0;
+  const creditRate = 1.2e5 + rnd() * 6e5;
+  const todayCredits = cfg.credits ? (input + output) / creditRate : 0;
+
+  const days = [];
+  for (let i = 13; i >= 0; i--) {
+    const d = new Date(NOW - i * DAY);
+    const dow = d.getDay();
+    const idle = dow === 0 || (dow === 6 && rnd() > 0.45);
+    const v = idle && rnd() > 0.35 ? 0 : Math.round(base * (0.35 + rnd() * 1.5));
+    days.push({
+      date: d,
+      label: i === 0 ? '今' : String(d.getDate()),
+      tokens: v,
+      credits: cfg.credits ? v / creditRate : 0,
+      calls: Math.round(v / (base / Math.max(calls, 1)) / 8) + (v ? 1 : 0),
+      isToday: i === 0
+    });
+  }
+  days[13].tokens = input + output;
+  days[13].credits = todayCredits;
+  days[13].calls = calls;
+
+  const heat = [];
+  for (let w = 0; w < 26; w++) {
+    const col = [];
+    for (let d = 0; d < 7; d++) {
+      const daysAgo = (25 - w) * 7 + (6 - d);
+      const r = rnd();
+      let level = r > 0.86 ? 4 : r > 0.66 ? 3 : r > 0.42 ? 2 : r > 0.22 ? 1 : 0;
+      if (daysAgo > 60) level = level > 1 ? level - 1 : 0;
+      col.push({ level, daysAgo });
+    }
+    heat.push(col);
+  }
+  heat[25][new Date().getDay()] = { level: 3, daysAgo: 0, today: true };
+
+  const totalFactor = 8 + rnd() * 14;
+  const models = (cfg.models.length ? cfg.models : ['default']).map((m, i) => ({
+    model: m,
+    tokens: Math.round((input + output) * totalFactor * [0.52, 0.27, 0.14, 0.07][i % 4]),
+    calls: Math.round(calls * totalFactor * [0.5, 0.28, 0.15, 0.07][i % 4]),
+    credits: 0
+  }));
+  models.forEach((m) => { m.credits = cfg.credits ? (m.tokens / creditRate) : 0; });
+
+  const projects = ['wb-token-meter', 'factory-api', 'water-reminder', 'dsh-pet', 'notes'].slice(0, 3 + Math.floor(rnd() * 3))
+    .map((p, i) => {
+      const tokens = Math.round((input + output) * totalFactor * [0.46, 0.24, 0.17, 0.09, 0.04][i]);
+      return {
+        project: p,
+        tokens: tokens,
+        credits: cfg.credits ? tokens / creditRate : 0,
+        sessions: [14, 7, 5, 3, 2][i]
+      };
+    });
+
+  const sessions = cfg.sessions.map(([title, project, ago, sc, ratio], i) => ({
+    title, project, ago,
+    calls: sc,
+    tokens: Math.round((input + output) * [0.34, 0.24, 0.17, 0.12, 0.08, 0.05][i % 6]),
+    credits: cfg.credits ? (input + output) * [0.34, 0.24, 0.17, 0.12, 0.08, 0.05][i % 6] / creditRate : 0,
+    ratio,
+    model: cfg.models[i % Math.max(cfg.models.length, 1)] || 'default'
+  }));
+
+  const totalsTokens = (input + output) * totalFactor;
+  /* 上限未知是真实存在的一种状态：远程 provider 不落模型目录（ZCode），
+     或账本里压根没有 token 绝对值（Qoder CN）—— 这两种都不该硬算出上限。
+     但「已用量」和「上限」是两回事：ZCode 知道用了多少、只是不知道上限，
+     所以 used 仍是实数，不能顺势画成 0。 */
+  const size = (cfg.sizeUnknown || !cfg.tokens) ? 0 : [200000, 128000, 256000][Math.floor(rnd() * 3)];
+  const used = cfg.tokens ? Math.round((size || 200000) * sessions[0].ratio) : 0;
+  /* 只回比例的源（Qoder CN）把比例单独带着，界面按比例画，不去编绝对值 */
+  const activeRatio = cfg.tokens ? 0 : sessions[0].ratio;
+
+  return {
+    cfg,
+    generatedAt: NOW - 3 * MIN,
+    today: { input, cached, output, reasoning, calls, credits: todayCredits, tokens: input + output },
+    totals: {
+      tokens: totalsTokens,
+      input: Math.round(totalsTokens * (input / (input + output))),
+      cached: Math.round(totalsTokens * (cached / (input + output))),
+      calls: Math.round(calls * totalFactor),
+      credits: cfg.credits ? totalsTokens / creditRate : 0,
+      sessions: sessions.length + 6,
+      dbTraces: Math.round(calls * totalFactor * 0.42),
+      matchedTraces: Math.round(calls * totalFactor * 0.42) - (cfg.seed === 11 ? 5 : 0),
+      unattributed: cfg.credits && cfg.seed === 11 ? 12.4 : 0
+    },
+    days, heat, models, projects, sessions,
+    active: { index: 0, title: sessions[0].title, cwd: 'D:\\WorkBuddy\\我的工作台\\wb-token-meter', used: used, size: size, ratio: activeRatio },
+    files: 24 + Math.floor(rnd() * 40),
+    quota: cfg.quota ? buildQuota(rnd) : null,
+    cloud: cfg.cloud ? buildCloud(rnd) : null
+  };
+}
+
+function buildQuota(rnd) {
+  const windows = [
+    { key: '5 小时', pct: Math.round(28 + rnd() * 55), reset: NOW + (2 - rnd()) * HOUR },
+    { key: '本周', pct: Math.round(41 + rnd() * 40), reset: NOW + 3 * DAY },
+    { key: '本月', pct: Math.round(22 + rnd() * 30), reset: NOW + 11 * DAY }
+  ];
+  const history = [];
+  let v = 6;
+  for (let i = 0; i < 26; i++) {
+    v = Math.max(2, Math.min(96, v + rnd() * 9 - 2.4));
+    history.push({ t: NOW - (25 - i) * 2 * HOUR, rolling: v, weekly: v * 0.72, monthly: v * 0.41 });
+  }
+  return { windows, history, fetchedAt: NOW - 8 * MIN, endpoint: 'https://opencode.ai/zen/go/v1/usage', credential: 'auth.json（本地读取，不外传）' };
+}
+
+function buildCloud(rnd) {
+  const total = 3000;
+  const consumed = Math.round(total * (0.32 + rnd() * 0.4));
+  return {
+    consumed, total, percent: Math.round((consumed / total) * 100),
+    packs: [['签到奖励', 900], ['订阅额度', 1500], ['活动赠送', 600]],
+    fetchedAt: NOW - 12 * MIN,
+    endpoint: 'api.trae.cn · user_current_entitlement_list',
+    credential: '从 Trae CN 进程内存取到的登录凭证'
+  };
+}
+
+const SNAPSHOTS = {};
+SOURCES.forEach((s) => { SNAPSHOTS[s.k] = buildSnapshot(s); });
+
+/* ═══════════════════════════════════════════════════════════════════════
+ * 渲染
+ * ═══════════════════════════════════════════════════════════════════════ */
+const state = {
+  source: 'workbuddy',
+  theme: 'system',      // system | light | dark
+  loading: false,
+  activeIndex: 0,
+  update: 'latest',     // latest | checking | available | downloading | downloaded | error | unsupported
+  dlPercent: 0,
+  moreOpen: false,
+  about: false
+};
+
+const el = (id) => document.getElementById(id);
+const winBody = el('winBody');
+
+function currentCfg() { return SOURCES.find((s) => s.k === state.source); }
+function currentSnap() { return SNAPSHOTS[state.source]; }
+
+function levelOf(r) { return r >= 0.9 ? 'danger' : r >= 0.7 ? 'warn' : 'ok'; }
+
+/* ---- 分段控件 ---- */
+function renderSeg() {
+  el('segPrimary').innerHTML = PRIMARY.map((s) =>
+    '<button type="button" role="tab" aria-selected="' + (s.k === state.source) + '" data-src="' + s.k + '">' + esc(s.label) + '</button>'
+  ).join('');
+  const inMore = MORE.find((s) => s.k === state.source);
+  el('moreBtn').textContent = inMore ? inMore.label : '更多';
+  el('moreBtn').setAttribute('aria-selected', inMore ? 'true' : 'false');
+}
+
+function renderMoreMenu() {
+  const host = el('moreBtn').closest('.seg-wrap');
+  const old = host.querySelector('.menu');
+  if (old) old.remove();
+  const oldBd = document.querySelector('.backdrop');
+  if (oldBd) oldBd.remove();
+  if (!state.moreOpen) { el('moreBtn').setAttribute('aria-expanded', 'false'); return; }
+  el('moreBtn').setAttribute('aria-expanded', 'true');
+  const bd = document.createElement('div');
+  bd.className = 'backdrop';
+  bd.addEventListener('click', () => { state.moreOpen = false; renderMoreMenu(); });
+  const menu = document.createElement('div');
+  menu.className = 'menu';
+  menu.setAttribute('role', 'menu');
+  menu.innerHTML = MORE.map((s) => {
+    const hint = s.quota ? '联网额度' : !s.tokens ? '只有积分' : s.cloud ? '本地 token + 云端积分' : '只有 token';
+    return '<button type="button" role="menuitem" aria-selected="' + (s.k === state.source) + '" data-src="' + s.k + '">' +
+      '<span>' + esc(s.label) + '</span><span class="hint">' + hint + '</span></button>';
+  }).join('');
+  host.appendChild(bd);
+  host.appendChild(menu);
+}
+
+/* ---- 通道：积分（云端） ---- */
+function chCloud(s) {
+  const c = s.cloud;
+  const level = levelOf(c.percent / 100);
+  return '<section class="channel">' +
+    '<div class="channel-head"><span class="channel-name">积分</span>' +
+    '<span class="channel-note">更新于 ' + relTime(c.fetchedAt, NOW) + '</span></div>' +
+    '<div class="gauge-head"><div class="gauge-title">云端额度包</div>' +
+    '<div class="gauge-readout">' + c.percent + '%</div></div>' +
+    '<div class="gauge" data-level="' + level + '">' +
+      '<div class="gauge-fill" style="width:' + c.percent + '%"></div>' +
+      '<span class="gauge-mark" style="left:70%"></span><span class="gauge-mark" style="left:90%"></span>' +
+      '<span class="gauge-needle" style="left:' + c.percent + '%"></span></div>' +
+    '<div class="gauge-scale"><span>0</span><span>70</span><span>90</span><span>100</span></div>' +
+    '<div class="gauge-foot"><span>' + grouped(c.consumed) + ' / ' + grouped(c.total) + ' 积分已消耗</span></div>' +
+    '<div class="meta-rows">' +
+      c.packs.map((p) => '<div class="meta-row"><span class="k">' + esc(p[0]) + '</span><span class="v">' + grouped(p[1]) + ' 积分上限</span></div>').join('') +
+      '<div class="meta-row"><span class="k">端点</span><span class="v">' + esc(c.endpoint) + '</span></div>' +
+      '<div class="meta-row"><span class="k">凭证</span><span class="v">' + esc(c.credential) + '</span></div>' +
+    '</div>' +
+    '<div class="notice" style="margin-top:var(--space-4)">积分来自 api.trae.cn 的在线接口 —— 本地账本没有积分字段，只能联网查。</div>' +
+  '</section>';
+}
+
+/* ---- 通道：今日 ---- */
+function chToday(s) {
+  const cfg = s.cfg;
+  let main, side = '';
+  if (!cfg.tokens) {
+    main = '<div class="readout">' + creditsFmt(s.today.credits) + '<span class="unit">积分</span></div>' +
+      '<div class="readout-sub">' + s.today.calls + ' 次调用 · 缓存命中率不适用</div>';
+  } else {
+    main = '<div class="readout">' + compact(s.today.tokens) + '<span class="unit">token</span></div>' +
+      '<div class="readout-sub">输入 <b>' + compact(s.today.input) + '</b> · 输出 <b>' + compact(s.today.output) + '</b> · <b>' + s.today.calls + '</b> 次</div>';
+    side = cfg.credits
+      ? '<div class="readout readout--md">' + creditsFmt(s.today.credits) + '<span class="unit">积分</span></div>' +
+        '<div class="readout-sub">1 积分 ≈ ' + rate(s.today.tokens, s.today.credits) + ' token</div>'
+      : '<div class="readout readout--md">' + pct(s.today.cached, s.today.input) + '%<span class="unit">缓存命中</span></div>' +
+        '<div class="readout-sub">命中 ' + compact(s.today.cached) + ' · 新增 ' + compact(s.today.input - s.today.cached) + '</div>';
+  }
+  return '<section class="channel">' +
+    '<div class="channel-head"><span class="channel-name live">今日</span>' +
+    '<span class="channel-note">' + clock(s.generatedAt) + ' 采样</span></div>' +
+    '<div class="counter"><div class="counter-main">' + main + '</div>' +
+    (side ? '<div class="counter-side">' + side + '</div>' : '') + '</div>' +
+  '</section>';
+}
+
+/* ---- 上下文水位：一个口径只有一处实现，面板与胶囊共用 ----
+ * 三种真实状态：
+ *   known     —— 有绝对值也有上限，正常画仪表并报百分比
+ *   ratioOnly —— 服务端只回比例（Qoder CN），按绝对值不知道，只能按比例画
+ *   unknown   —— 上限读不到（远程 provider 不落模型目录），只报已用量、不硬算百分比 */
+function contextReading(s) {
+  const a = s.active;
+  if (a.size > 0) {
+    const ratio = a.used / a.size;
+    return { ratio, mode: 'known', readout: pct(a.used, a.size) + '%', foot: grouped(a.used) + ' / ' + grouped(a.size) + ' token' };
+  }
+  if (a.ratio > 0) {
+    return { ratio: a.ratio, mode: 'ratioOnly', readout: Math.round(a.ratio * 100) + '%', foot: '服务端只回比例，绝对值不回报' };
+  }
+  return { ratio: 0, mode: 'unknown', readout: compact(a.used) + '<span class="unit">token</span>', foot: '模型上限未知，只报已用量' };
+}
+
+/* ---- 通道：上下文 ---- */
+function chContext(s) {
+  const a = s.active;
+  const r = contextReading(s);
+  return '<section class="channel">' +
+    '<div class="channel-head"><span class="channel-name">上下文</span>' +
+    '<span class="channel-note">' + relTime(s.generatedAt, Date.now()) + '</span></div>' +
+    '<div class="gauge-head"><div class="gauge-title">' + esc(a.title || '未命名会话') + '</div>' +
+    '<div class="gauge-readout">' + r.readout + '</div></div>' +
+    (r.mode === 'unknown'
+      ? '<div class="empty">' + r.foot + '，不硬算百分比</div>'
+      : '<div class="gauge" data-level="' + levelOf(r.ratio) + '">' +
+          '<div class="gauge-fill" style="width:' + (r.ratio * 100).toFixed(1) + '%"></div>' +
+          '<span class="gauge-mark" style="left:70%" title="70% 分界"></span>' +
+          '<span class="gauge-mark" style="left:90%" title="90% 红线"></span>' +
+          '<span class="gauge-needle" style="left:' + (r.ratio * 100).toFixed(1) + '%"></span></div>' +
+        '<div class="gauge-scale"><span>0</span><span>70</span><span>90</span><span>100</span></div>') +
+    '<div class="gauge-foot"><span>' + r.foot + '</span>' +
+    '<span class="cwd" title="' + esc(a.cwd) + '">' + esc(a.cwd) + '</span></div>' +
+  '</section>';
+}
+
+/* ---- 通用条 ---- */
+function barRow(k, v, max, color, value, hint) {
+  const w = max > 0 ? Math.max(1, (v / max) * 100) : 0;
+  /* hint 那一格即使为空也要占位，否则同一组里数值列会左右错位 */
+  return '<div class="bar-row">' +
+    '<span class="bar-k"><i class="bar-dot" style="background:' + color + '"></i><span class="bar-k-label" title="' + esc(k) + '">' + esc(k) + '</span></span>' +
+    '<span class="bar-track"><span class="bar-fill" style="width:' + w.toFixed(1) + '%;background:' + color + '"></span></span>' +
+    '<span class="bar-v">' + value + '</span>' +
+    '<span class="bar-hint">' + (hint ? esc(hint) : '') + '</span>' +
+  '</div>';
+}
+
+const RAMP = ['var(--accent)', 'color-mix(in oklab, var(--accent), var(--bg) 45%)', 'var(--fg)', 'var(--meta)'];
+
+/* ---- 通道：结构 ---- */
+function chStructure(s) {
+  const rows = [
+    ['输入', s.totals.input, RAMP[0]],
+    ['缓存命中', s.totals.cached, RAMP[1]],
+    ['输出', s.totals.tokens - s.totals.input, RAMP[2]]
+  ];
+  if (s.cfg.reasoning) rows.push(['思考', Math.round((s.totals.tokens - s.totals.input) * 0.34), RAMP[3]]);
+  const max = Math.max.apply(null, rows.map((r) => r[1]));
+  return '<section class="channel">' +
+    '<div class="channel-head"><span class="channel-name">结构</span>' +
+    '<span class="channel-note">累计 ' + compact(s.totals.tokens) + ' token' + (s.cfg.credits ? ' · ' + creditsFmt(s.totals.credits) + ' 积分' : '') + '</span></div>' +
+    '<div class="bars">' + rows.map((r) => barRow(r[0], r[1], max, r[2], compact(r[1]),
+      r[0] === '缓存命中' ? pct(s.totals.cached, s.totals.input) + '%' : '')).join('') + '</div>' +
+  '</section>';
+}
+
+/* ---- 通道：14 天 ---- */
+function chDays(s) {
+  const useTokens = s.cfg.tokens;
+  const vals = s.days.map((d) => (useTokens ? d.tokens : d.credits));
+  const max = Math.max.apply(null, vals.concat([1]));
+  const cols = s.days.map((d) => {
+    const v = useTokens ? d.tokens : d.credits;
+    const h = v > 0 ? Math.max(3, (v / max) * 100) : d.isToday ? 3 : 0;
+    const tip = d.date.getFullYear() + '-' + String(d.date.getMonth() + 1).padStart(2, '0') + '-' + String(d.date.getDate()).padStart(2, '0') +
+      ' · ' + (useTokens ? compact(d.tokens) + ' token' : creditsFmt(d.credits) + ' 积分') + ' · ' + d.calls + ' 次';
+    return '<div class="day-col" title="' + esc(tip) + '">' +
+      '<div class="day-bar' + (d.isToday ? ' today' : '') + '" style="height:' + h.toFixed(1) + '%"></div>' +
+      '<div class="day-label">' + d.label + '</div></div>';
+  }).join('');
+  const any = vals.some((v) => v > 0);
+  return '<section class="channel">' +
+    '<div class="channel-head"><span class="channel-name">14 天</span>' +
+    '<span class="channel-note">' + (useTokens
+      ? '缓存命中占输入 ' + pct(s.totals.cached, s.totals.input) + '%'
+      : '累计 ' + creditsFmt(s.totals.credits) + ' 积分') + '</span></div>' +
+    (any ? '<div class="days">' + cols + '</div>' : '<div class="empty">最近 14 天没有用量</div>') +
+  '</section>';
+}
+
+/* ---- 通道：活跃 ---- */
+function chHeat(s) {
+  const useTokens = s.cfg.tokens;
+  const unit = useTokens ? 'token' : '积分';
+  /* 图例单位与今天那格的数值必须同一口径 */
+  const todayValue = useTokens ? compact(s.today.tokens) + ' token' : creditsFmt(s.today.credits) + ' 积分';
+  const cols = s.heat.map((col) =>
+    '<div class="heat-col">' + col.map((c) => {
+      const cls = 'heat-cell' + (c.today ? ' today' : '');
+      const tip = c.daysAgo === 0 ? '今天 · ' + todayValue : c.daysAgo + ' 天前';
+      return '<span class="' + cls + '" data-l="' + c.level + '" title="' + esc(tip) + '"></span>';
+    }).join('') + '</div>'
+  ).join('');
+  return '<section class="channel">' +
+    '<div class="channel-head"><span class="channel-name">活跃</span>' +
+    '<span class="channel-note">近 26 周 · 按' + unit + '深浅</span></div>' +
+    '<div class="heat">' + cols + '</div>' +
+    '<div class="heat-foot"><span>少</span><span class="legend">' +
+      '<i style="background:var(--surface);box-shadow:var(--elev-ring)"></i>' +
+      '<i style="background:color-mix(in oklab, var(--accent), var(--bg) 78%)"></i>' +
+      '<i style="background:color-mix(in oklab, var(--accent), var(--bg) 55%)"></i>' +
+      '<i style="background:color-mix(in oklab, var(--accent), var(--bg) 28%)"></i>' +
+      '<i style="background:var(--accent)"></i>' +
+    '</span><span>多</span></div>' +
+  '</section>';
+}
+
+/* ---- 通道：模型 / 项目 ---- */
+function chRank(s) {
+  const useTokens = s.cfg.tokens;
+  /* 数值口径必须跟着账本走：没有 token 的源在这里也不能报 token */
+  const projVal = (p) => (useTokens ? p.tokens : p.credits);
+  const mMax = Math.max.apply(null, s.models.map((m) => (useTokens ? m.tokens : m.credits)).concat([1]));
+  const pMax = Math.max.apply(null, s.projects.map(projVal).concat([1]));
+  const modelRows = s.models.map((m, i) => barRow(
+    m.model, useTokens ? m.tokens : m.credits, mMax, RAMP[i % RAMP.length],
+    useTokens ? compact(m.tokens) : creditsFmt(m.credits),
+    /* 有积分的源在右侧补积分（取两位 —— 排到后面的模型一次会话就几分钱，取整会全变 0 分）；
+       只有积分的源，大数已经是积分了，hint 就报次数，不把同一个数写两遍 */
+    useTokens && s.cfg.credits ? creditsFmt(m.credits) + ' 分' : m.calls + ' 次'
+  )).join('');
+  const projRows = s.projects.map((p, i) => barRow(
+    p.project, projVal(p), pMax, RAMP[i % RAMP.length],
+    useTokens ? compact(p.tokens) : creditsFmt(p.credits), p.sessions + ' 会话'
+  )).join('');
+  return '<section class="channel">' +
+    '<div class="channel-head"><span class="channel-name">模型 / 项目</span>' +
+    '<span class="channel-note">' + (s.cfg.credits ? '1 积分 ≈ ' + rate(s.totals.tokens, s.totals.credits) + ' token' : '各取前五') + '</span></div>' +
+    '<div class="rank-grid">' +
+      '<div class="bars bars--stack">' + (modelRows || '<div class="empty">暂无数据</div>') + '</div>' +
+      '<div class="bars bars--stack">' + projRows + '</div>' +
+    '</div>' +
+  '</section>';
+}
+
+/* ---- 通道：会话 ---- */
+function chSessions(s) {
+  const useTokens = s.cfg.tokens;
+  const rows = s.sessions.map((x, i) => {
+    const r = x.ratio;
+    /* 大数按 quota → tokens → credits 的优先级取一种，不跟 meta 里的「次数」重复报同一件事 */
+    const big = useTokens ? compact(x.tokens) : creditsFmt(x.credits) + ' 积分';
+    const small = useTokens && s.cfg.credits ? creditsFmt(x.credits) + ' 积分' : '';
+    return '<button type="button" class="session' + (i === state.activeIndex ? ' is-active' : '') + '" data-sess="' + i + '">' +
+      '<span class="session-main">' +
+        '<span class="session-title" style="display:block">' + esc(x.title) + '</span>' +
+        '<span class="session-meta" style="display:flex">' +
+          '<span class="tag">' + esc(x.model) + '</span><span>' + esc(x.project) + '</span>' +
+          '<span>' + relTime(Date.now() - x.ago, Date.now()) + '</span><span>' + x.calls + ' 次调用</span>' +
+          (r > 0 ? '<span>水位 ' + Math.round(r * 100) + '%</span>' : '') +
+        '</span>' +
+      '</span>' +
+      '<span class="session-nums">' +
+        '<span class="session-v" style="display:block">' + big + '</span>' +
+        (small ? '<span class="session-c">' + small + '</span>' : '') +
+      '</span>' +
+    '</button>';
+  }).join('');
+  return '<section class="channel">' +
+    '<div class="channel-head"><span class="channel-name">会话</span>' +
+    '<span class="channel-note">' + s.totals.sessions + ' 个 · ' +
+      (s.cfg.credits ? s.totals.dbTraces + ' 个计费回合' : s.totals.calls + ' 次调用') + '</span></div>' +
+    '<div class="sessions">' + (rows || '<div class="empty">暂无会话</div>') + '</div>' +
+    '<div class="channel-note" style="margin-top:var(--space-3)">点一行即把它设为当前会话，仪表与托盘进度环同步。</div>' +
+  '</section>';
+}
+
+/* ---- 通道：来源（没有 token 的源交代口径） ---- */
+function chSource(s) {
+  return '<section class="channel">' +
+    '<div class="channel-head"><span class="channel-name">来源</span><span class="channel-note">本地读取</span></div>' +
+    '<div class="meta-rows" style="margin-top:0;padding-top:0;border-top:none">' +
+      '<div class="meta-row"><span class="k">目录</span><span class="v">' + esc(s.cfg.dir) + '</span></div>' +
+      '<div class="meta-row"><span class="k">账本</span><span class="v">' + s.files + ' 个会话文件 · ' + grouped(s.totals.calls) + ' 次请求</span></div>' +
+    '</div>' +
+    '<div class="notice" style="margin-top:var(--space-4)">这一本账只回积分与上下文水位，不提供 token 明细 —— ' +
+    '输入 / 输出 / 缓存这些通道没有数据可画，整块收起而不是画成 0。</div>' +
+  '</section>';
+}
+
+/* ---- 视图：额度（OpenCode Go 专用一套） ---- */
+function quotaView(s) {
+  const q = s.quota;
+  const rows = q.windows.map((w) => {
+    const level = levelOf(w.pct / 100);
+    return '<div><div class="quota-row-k"><span>' + w.key + '</span>' +
+      '<span class="reset">' + (w.reset > NOW ? Math.max(1, Math.round((w.reset - NOW) / HOUR)) + ' 小时后重置' : '即将重置') + '</span>' +
+      '<span class="pct">' + w.pct + '%</span></div>' +
+      '<div class="gauge" data-level="' + level + '">' +
+        '<div class="gauge-fill" style="width:' + w.pct + '%"></div>' +
+        '<span class="gauge-mark" style="left:70%"></span><span class="gauge-mark" style="left:90%"></span>' +
+        '<span class="gauge-needle" style="left:' + w.pct + '%"></span></div></div>';
+  }).join('');
+
+  const h = q.history;
+  const W = 640, H = 140;
+  const x = (i) => (i / (h.length - 1)) * W;
+  const y = (v) => H - (v / 100) * H;
+  const line = (key, color, dash) =>
+    '<polyline fill="none" stroke="' + color + '" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ' +
+    (dash ? 'stroke-dasharray="4 4" ' : '') +
+    'points="' + h.map((pt, i) => x(i).toFixed(1) + ',' + y(pt[key]).toFixed(1)).join(' ') + '" />';
+  const grid = [0, 25, 50, 75, 100].map((g) =>
+    '<line x1="0" y1="' + y(g) + '" x2="' + W + '" y2="' + y(g) + '" stroke="var(--border-soft)" stroke-width="1" />'
+  ).join('');
+
+  return '<section class="channel">' +
+      '<div class="channel-head"><span class="channel-name live">额度</span>' +
+      '<span class="channel-note">更新于 ' + relTime(q.fetchedAt, NOW) + '</span></div>' +
+      '<div class="quota-rows">' + rows + '</div>' +
+      '<div class="meta-rows">' +
+        '<div class="meta-row"><span class="k">接口</span><span class="v">' + esc(q.endpoint) + '</span></div>' +
+        '<div class="meta-row"><span class="k">凭证</span><span class="v">' + esc(q.credential) + '</span></div>' +
+        '<div class="meta-row"><span class="k">范围</span><span class="v">只取三个百分比，不读取本地用量文件</span></div>' +
+      '</div>' +
+    '</section>' +
+    '<section class="channel">' +
+      '<div class="channel-head"><span class="channel-name">消耗趋势</span><span class="channel-note">本地采样 · 每 30 分钟一条</span></div>' +
+      '<svg viewBox="0 0 ' + W + ' ' + H + '" style="width:100%;height:160px" preserveAspectRatio="none" role="img" aria-label="额度消耗趋势">' +
+        grid + line('monthly', 'var(--meta)', true) + line('weekly', 'var(--fg-2)', true) + line('rolling', 'var(--accent)', false) +
+      '</svg>' +
+      '<div class="heat-foot">' +
+        '<span><i class="bar-dot" style="background:var(--accent);display:inline-block;margin-right:var(--space-2)"></i>5 小时</span>' +
+        '<span><i class="bar-dot" style="background:var(--fg-2);display:inline-block;margin-right:var(--space-2)"></i>本周</span>' +
+        '<span><i class="bar-dot" style="background:var(--meta);display:inline-block;margin-right:var(--space-2)"></i>本月</span>' +
+      '</div>' +
+      '<div class="notice" style="margin-top:var(--space-4)">接口本身不提供历史，折线是应用运行期间在本地记的采样。</div>' +
+    '</section>';
+}
+
+/* ---- 载入态 ---- */
+function pendingView() {
+  return '<section class="channel">' +
+    '<div class="channel-head"><span class="channel-name live">载入中</span></div>' +
+    '<div class="skeleton">' +
+      '<div class="sk-line" style="width:28%"></div><div class="sk-block" style="height:96px"></div>' +
+      '<div class="sk-line" style="width:62%"></div><div class="sk-block" style="height:64px"></div>' +
+    '</div>' +
+    '<div class="pending-hint">' +
+      (state.source === 'traecn'
+        ? '正在从 Trae CN 进程读取用量库密钥，约 20 秒。这段时间不是 0，是还没读到 —— 所以这里一个数字都不画。'
+        : '正在读取本地账本并聚合这一轮。') +
+    '</div>' +
+  '</section>';
+}
+
+/* ---- 面板主体 ---- */
+function renderBody() {
+  const s = currentSnap();
+  const cfg = s.cfg;
+  const now = Date.now();
+  el('win').setAttribute('data-theme', resolvedTheme());
+  el('winSub').textContent = state.loading
+    ? '正在读取 ' + cfg.label + '…'
+    : '更新于 ' + clock(s.generatedAt) + ' · ' + relTime(s.generatedAt, now) + ' · ' + cfg.label;
+
+  if (state.loading) { winBody.innerHTML = pendingView(); renderFoot(); return; }
+  if (cfg.quota) { winBody.innerHTML = quotaView(s); renderFoot(); renderCapsule(s); return; }
+
+  const parts = [];
+  if (s.cloud) parts.push(chCloud(s));
+  parts.push(chToday(s));
+  parts.push(chContext(s));
+  if (cfg.tokens) parts.push(chStructure(s));
+  parts.push(chDays(s));
+  parts.push(chHeat(s));
+  parts.push(chRank(s));
+  parts.push(chSessions(s));
+  if (!cfg.tokens) parts.push(chSource(s));
+  if (s.totals.unattributed > 0) {
+    parts.push('<div class="notice">另有 <b>' + creditsFmt(s.totals.unattributed) + ' 积分</b> 找不到对应的会话明细' +
+      '（' + grouped(s.totals.dbTraces) + ' 个计费回合中，只有 ' + grouped(s.totals.matchedTraces) + ' 个能对上本地记录）。这些多半来自已经清理掉的会话。</div>');
+  }
+  winBody.innerHTML = parts.join('');
+  renderFoot();
+  renderCapsule(s);
+}
+
+/* ---- 底轨：更新流程可点到底 ---- */
+const UPDATE_TEXT = {
+  latest: '已是最新版本',
+  checking: '正在检查更新…',
+  available: '发现新版本 v0.13.0',
+  downloading: '正在下载 v0.13.0',
+  downloaded: '下载完成，可安装',
+  error: '更新源上找不到版本信息',
+  unsupported: '免安装版不支持自动更新'
+};
+function renderFoot() {
+  const st = state.update;
+  const fs = el('footState');
+  fs.setAttribute('data-status', st);
+  fs.textContent = st === 'downloading' ? UPDATE_TEXT[st] + ' ' + state.dlPercent + '%' : UPDATE_TEXT[st];
+  const a = el('footActions');
+  if (st === 'checking') a.innerHTML = '<button type="button" class="btn btn--quiet btn--sm" disabled>检查中…</button>';
+  else if (st === 'downloading') a.innerHTML = '<button type="button" class="btn btn--quiet btn--sm" disabled>下载中 ' + state.dlPercent + '%</button>' +
+    '<button type="button" class="btn btn--ghost btn--sm" data-act="page">发布页</button>';
+  else if (st === 'downloaded') a.innerHTML = '<button type="button" class="btn btn--sm" data-act="install">重启并安装</button>';
+  else if (st === 'available') a.innerHTML = '<button type="button" class="btn btn--sm" data-act="download">下载更新</button>' +
+    '<button type="button" class="btn btn--ghost btn--sm" data-act="page">发布页</button>';
+  else if (st === 'unsupported') a.innerHTML = '<button type="button" class="btn btn--ghost btn--sm" data-act="page">打开发布页</button>';
+  else if (st === 'error') a.innerHTML = '<button type="button" class="btn btn--ghost btn--sm" data-act="check">重试</button>';
+  else a.innerHTML = '<button type="button" class="btn btn--ghost btn--sm" data-act="check">检查更新</button>';
+}
+
+/* ---- 胶囊与展开卡片：跟随当前源 ---- */
+function renderCapsule(s) {
+  const cfg = s.cfg;
+  const quota = !!cfg.quota;
+  const a = quota ? null : s.active;
+  const reading = quota ? null : contextReading(s);
+  const C = 2 * Math.PI * 15;
+
+  /* 主读数按 quota → tokens → credits 的优先级选一种，单位跟着换 */
+  const main = quota
+    ? s.quota.windows[0].pct + '<em>%</em>'
+    : cfg.tokens ? compact(s.today.tokens) + '<em>token</em>' : creditsFmt(s.today.credits) + '<em>积分</em>';
+  const ringPct = quota ? s.quota.windows[0].pct / 100 : reading.ratio;
+  const sub = quota
+    ? '5 小时额度'
+    : (reading.mode === 'unknown' ? '水位未知' : Math.round(reading.ratio * 100) + '%') +
+      (cfg.credits ? ' · ' + creditsFmt(s.today.credits) + ' 分' : ' · ' + s.today.calls + ' 次');
+
+  el('capsuleSmall').innerHTML =
+    '<svg class="ring" viewBox="0 0 36 36" aria-hidden="true">' +
+      '<circle class="bg" cx="18" cy="18" r="15" />' +
+      '<circle class="fg" cx="18" cy="18" r="15" stroke-dasharray="' + C.toFixed(1) + '" ' +
+      'stroke-dashoffset="' + (C * (1 - ringPct)).toFixed(1) + '" transform="rotate(-90 18 18)" />' +
+    '</svg>' +
+    '<div><div class="cap-v">' + main + '</div><div class="cap-s">' + sub + '</div></div>';
+
+  el('capsuleSpecs').innerHTML = [
+    ['小', '152 × 44', 152], ['中', '198 × 56', 198], ['大', '252 × 68', 252]
+  ].map((r) => barRow(r[0], r[2], 252, 'var(--accent)', r[1], '宽')).join('');
+
+  el('floatSrc').textContent = cfg.label;
+  el('floatTime').textContent = clock(s.generatedAt) + ' · ' + relTime(s.generatedAt, Date.now());
+  el('floatSparkLabel').textContent = quota ? '近 7 次采样' : '近 7 天';
+
+  /* 卡片里的水位：额度源画 5 小时窗口，其余画当前会话；上限未知时不硬算百分比 */
+  el('floatGauge').setAttribute('data-level', levelOf(ringPct));
+  el('floatGaugeFill').style.width = (ringPct * 100).toFixed(1) + '%';
+  el('floatGaugeNeedle').style.left = (ringPct * 100).toFixed(1) + '%';
+  el('floatGaugeNote').textContent = quota
+    ? '5 小时额度窗口 · ' + (s.quota.windows[0].reset > Date.now()
+        ? Math.max(1, Math.round((s.quota.windows[0].reset - Date.now()) / HOUR)) + ' 小时后重置'
+        : '即将重置')
+    : (a.title || '未命名会话') + ' · ' + reading.foot;
+
+  /* 展开卡片：额度源换成三个窗口的读数，其余源报 token / 积分 */
+  const heroValue = quota ? s.quota.windows[0].pct + '%' : cfg.tokens ? compact(s.today.tokens) : creditsFmt(s.today.credits);
+  el('floatValue').innerHTML = heroValue + '<span class="unit">' + (quota ? '额度' : cfg.tokens ? 'token' : '积分') + '</span>';
+  el('floatSide').innerHTML = quota
+    ? '<b>本周</b> ' + s.quota.windows[1].pct + '% · 本月 ' + s.quota.windows[2].pct + '%'
+    : '<b>' + (cfg.credits ? creditsFmt(s.today.credits) + ' 积分' : s.today.calls + ' 次调用') + '</b> · 命中 ' +
+      (cfg.tokens ? pct(s.today.cached, s.today.input) + '%' : '不适用');
+
+  const cells = quota
+    ? [['5 小时', s.quota.windows[0].pct + '%'], ['本周', s.quota.windows[1].pct + '%'], ['本月', s.quota.windows[2].pct + '%']]
+    : [['输入', compact(s.today.input)], ['输出', compact(s.today.output)], ['缓存', compact(s.today.cached)]];
+  el('floatCells').innerHTML = cells.map((c, i) =>
+    '<div class="cell"><div class="cell-k"><i style="background:' + RAMP[i] + '"></i>' + c[0] + '</div>' +
+    '<div class="cell-v">' + c[1] + '</div></div>').join('');
+
+  /* 迷你趋势：额度源画 5 小时窗口的采样，其余画近 7 天柱 */
+  if (quota) {
+    const h = s.quota.history.slice(-7);
+    el('floatSpark').innerHTML = h.map((pt, i) =>
+      '<i class="' + (i === h.length - 1 ? 'today' : '') + '" style="height:' + Math.max(6, pt.rolling).toFixed(0) + '%"></i>').join('');
+  } else {
+    const max = Math.max.apply(null, s.days.map((d) => (cfg.tokens ? d.tokens : d.credits)).concat([1]));
+    el('floatSpark').innerHTML = s.days.slice(-7).map((d) => {
+      const val = cfg.tokens ? d.tokens : d.credits;
+      /* 空档画 2px 灰底：「没数据」和「没干活」要能分辨 */
+      if (val <= 0) return '<i class="zero" style="height:2px"></i>';
+      const h = Math.max(6, (val / max) * 100);
+      return '<i class="' + (d.isToday ? 'today' : '') + '" style="height:' + h.toFixed(0) + '%"></i>';
+    }).join('');
+  }
+}
+
+/* ---- 关于弹层 ---- */
+function renderAbout() {
+  const host = el('aboutLayer');
+  if (!state.about) { host.innerHTML = ''; return; }
+  host.innerHTML = '<div class="backdrop" data-close="1"></div>' +
+    '<div class="menu" style="left:var(--space-3);top:36px;min-width:280px" role="menu">' +
+      '<button type="button" role="menuitem"><span>版本</span><span class="hint">v0.12.8</span></button>' +
+      '<button type="button" role="menuitem"><span>检查更新</span><span class="hint">' + UPDATE_TEXT[state.update] + '</span></button>' +
+      '<hr />' +
+      '<button type="button" role="menuitem"><span>退出</span></button>' +
+    '</div>';
+}
+
+/* ---- 外观：跟随系统 / 浅色 / 深色 ---- */
+const mq = window.matchMedia('(prefers-color-scheme: dark)');
+function resolvedTheme() {
+  if (state.theme === 'system') return mq.matches ? 'dark' : 'light';
+  return state.theme;
+}
+const THEME_LABEL = { system: '跟随系统', light: '浅色', dark: '深色' };
+const THEME_SHORT = { system: '系统', light: '浅色', dark: '深色' };
+function applyTheme() {
+  document.documentElement.setAttribute('data-theme', resolvedTheme());
+  el('themeBtn').textContent = '外观：' + THEME_LABEL[state.theme];
+  el('winThemeBtn').textContent = '外观 · ' + THEME_SHORT[state.theme];
+  el('winThemeBtn').title = '外观：' + THEME_LABEL[state.theme] + '（点击切换）';
+  el('win').setAttribute('data-theme', resolvedTheme());
+}
+function cycleTheme() {
+  const order = ['system', 'light', 'dark'];
+  state.theme = order[(order.indexOf(state.theme) + 1) % 3];
+  applyTheme();
+}
+mq.addEventListener('change', () => { if (state.theme === 'system') applyTheme(); renderBody(); });
+
+/* ---- 刷新：走一遍载入态 ---- */
+function refresh() {
+  if (state.loading) return;
+  state.loading = true;
+  el('refreshBtn').disabled = true;
+  el('refreshBtn').textContent = '刷新中…';
+  renderBody();
+  setTimeout(() => {
+    const s = currentSnap();
+    s.generatedAt = Date.now() - 40 * 1000;
+    state.loading = false;
+    el('refreshBtn').disabled = false;
+    el('refreshBtn').textContent = '刷新';
+    renderBody();
+  }, 1100);
+}
+
+/* ---- 更新流程演示 ---- */
+function runUpdate(act) {
+  if (act === 'page') { state.update = 'unsupported'; renderFoot(); return; }
+  if (act === 'check') {
+    state.update = 'checking'; renderFoot();
+    setTimeout(() => { state.update = 'available'; renderFoot(); }, 1200);
+    return;
+  }
+  if (act === 'download') {
+    state.update = 'downloading'; state.dlPercent = 0; renderFoot();
+    const t = setInterval(() => {
+      state.dlPercent = Math.min(100, state.dlPercent + 7 + Math.round(Math.random() * 9));
+      renderFoot();
+      if (state.dlPercent >= 100) { clearInterval(t); state.update = 'downloaded'; renderFoot(); }
+    }, 260);
+    return;
+  }
+  if (act === 'install') { state.update = 'latest'; renderFoot(); }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+ * 事件
+ * ═══════════════════════════════════════════════════════════════════════ */
+function pickSource(k) {
+  if (k === state.source) return;
+  state.source = k;
+  state.activeIndex = 0;
+  state.moreOpen = false;
+  renderSeg();
+  renderMoreMenu();
+  state.loading = true;
+  renderBody();
+  setTimeout(() => {
+    const s = currentSnap();
+    s.generatedAt = Date.now() - 20 * 1000;
+    state.loading = false;
+    renderBody();
+  }, 620);
+}
+
+document.addEventListener('click', (ev) => {
+  const src = ev.target.closest('[data-src]');
+  if (src) { pickSource(src.getAttribute('data-src')); return; }
+
+  const sess = ev.target.closest('[data-sess]');
+  if (sess) {
+    const s = currentSnap();
+    const i = Number(sess.getAttribute('data-sess'));
+    state.activeIndex = i;
+    const x = s.sessions[i];
+    /* 认领当前会话时不补造上限：上限本来读不到的源，换会话也仍然读不到 */
+    s.active = {
+      index: i,
+      title: x.title,
+      cwd: 'D:\\WorkBuddy\\我的工作台\\wb-token-meter\\' + x.project,
+      used: s.active.size > 0 ? Math.round(s.active.size * x.ratio) : s.active.used,
+      size: s.active.size,
+      ratio: s.active.size > 0 ? 0 : x.ratio
+    };
+    s.generatedAt = Date.now();
+    renderBody();
+    return;
+  }
+
+  const act = ev.target.closest('[data-act]');
+  if (act) { runUpdate(act.getAttribute('data-act')); return; }
+
+  if (ev.target.closest('#moreBtn')) { state.moreOpen = !state.moreOpen; renderMoreMenu(); return; }
+  if (ev.target.closest('#aboutEntry')) { state.about = !state.about; renderAbout(); return; }
+  if (ev.target.closest('[data-close]')) { state.about = false; renderAbout(); return; }
+  if (ev.target.closest('#themeBtn') || ev.target.closest('#winThemeBtn')) { cycleTheme(); return; }
+  if (ev.target.closest('#refreshBtn')) { refresh(); return; }
+
+  if (state.moreOpen && !ev.target.closest('.menu')) { state.moreOpen = false; renderMoreMenu(); }
+});
+
+document.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Escape') {
+    if (state.moreOpen) { state.moreOpen = false; renderMoreMenu(); }
+    if (state.about) { state.about = false; renderAbout(); }
+  }
+});
+
+el('swAutoCheck').addEventListener('change', (ev) => {
+  const on = ev.target.checked;
+  el('swAutoDl').disabled = !on;
+  el('swAutoLabel').classList.toggle('muted', !on);
+});
+
+/* ═══════════════════════════════════════════════════════════════════════
+ * 启动
+ * ═══════════════════════════════════════════════════════════════════════ */
+applyTheme();
+renderSeg();
+renderBody();
+</script>
+</body>
+</html>

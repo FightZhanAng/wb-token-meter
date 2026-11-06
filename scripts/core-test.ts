@@ -20,7 +20,7 @@ import { OpencodeUsage } from '../src/main/opencode-usage'
 import type { OpencodeUsageOptions } from '../src/main/opencode-usage'
 import { ModelsDevCatalog } from '../src/main/modelsdev'
 import { TraeCnUsage } from '../src/main/traecn-usage'
-import { collectSnapshot, localDate, parseUsageLine } from '../src/shared/collector'
+import { collectSnapshot, localDate, parseTranscriptFile, parseUsageLine, type ParseCache } from '../src/shared/collector'
 import {
   collectDshSnapshot,
   decodeZstdFrames,
@@ -239,11 +239,20 @@ if (!hasData) {
     `${snapshot.totals.attributedCredits}/${snapshot.totals.credits}`
   )
 
-  /* 二次扫描应当能命中文件缓存 */
+  /*
+   * 二次扫描（冷缓存，整份重来）应当仍能完成。
+   *
+   * **不能拿 `===` 比条数**：`~/.workbuddy/projects` 是活目录，当前这轮对话一直在往里
+   * 追加，两次扫描之间必然可能多出几行。断言只能钉「没有倒退」——少了才是真出问题。
+   */
   const cachedStart = Date.now()
   const cachedSnapshot = collectSnapshot({ workbuddyDir, cache: new Map() })
   const cachedElapsed = Date.now() - cachedStart
-  check('冷缓存二次扫描仍可完成', cachedSnapshot.totals.calls === snapshot.totals.calls, `${cachedElapsed} ms`)
+  check(
+    '冷缓存二次扫描仍可完成',
+    cachedSnapshot.totals.calls >= snapshot.totals.calls,
+    `${snapshot.totals.calls} → ${cachedSnapshot.totals.calls} 次 / ${cachedElapsed} ms`
+  )
 }
 
 /* ------------------------------------------------------ 3. 交叉校验 */
@@ -1161,11 +1170,15 @@ if (!hasKimi) {
     kimiReal.sessions.every((s, i) => i === 0 || kimiReal.sessions[i - 1].lastActivity >= s.lastActivity)
   )
 
-  /* 二次扫描应当能命中文件缓存 */
+  /* 二次扫描应当仍能完成。同样只要求「没有倒退」，理由见上一条 */
   const kimiCachedStart = Date.now()
   const kimiCached = collectKimiSnapshot({ kimiDir, cache: new Map() })
   const kimiCachedElapsed = Date.now() - kimiCachedStart
-  check('冷缓存二次扫描仍可完成', kimiCached.totals.calls === kimiReal.totals.calls, `${kimiCachedElapsed} ms`)
+  check(
+    '冷缓存二次扫描仍可完成（Kimi）',
+    kimiCached.totals.calls >= kimiReal.totals.calls,
+    `${kimiReal.totals.calls} → ${kimiCached.totals.calls} 次 / ${kimiCachedElapsed} ms`
+  )
 }
 
 check('Kimi 目录不存在不崩', collectKimiSnapshot({ kimiDir: join(homedir(), '.kimi-code-nonexistent') }).sessions.length === 0)
@@ -3832,6 +3845,101 @@ function jsonlLines(path: string): UsageSample[] {
     .split('\n')
     .filter((line) => line.trim())
     .map((line) => JSON.parse(line) as UsageSample)
+}
+
+/* ------------------------------------------------- 文件级增量解析 */
+
+/**
+ * 长会话的 jsonl 每 20 秒可能只多几行，所以缓存命中「文件变大了就从 offset 续读」。
+ * 这条路径一旦写错是**静默丢数据**——界面照常显示，数字只是少了——所以逐条钉死：
+ * 半行不解析、截断要整份重来、换个文件要重来、追加的行一条都不能少。
+ */
+section('transcript 增量解析')
+{
+  const root = mkdtempSync(join(tmpdir(), 'wbtm-incremental-'))
+  const file = join(root, 'sess-1.jsonl')
+  /** 一行能被 parseUsageLine 认下的记录 */
+  const line = (input: number, output: number): string =>
+    JSON.stringify({
+      timestamp: 1789368777394,
+      providerData: {
+        model: 'deepseek-v4.1-flash',
+        traceId: `t${input}`,
+        conversationRequestId: `c${input}`,
+        usage: { inputTokens: input, outputTokens: output }
+      }
+    })
+  const cache: ParseCache = new Map()
+
+  try {
+    writeFileSync(file, `${line(100, 10)}\n${line(200, 20)}\n`, 'utf8')
+    const first = parseTranscriptFile(file, 'sess-1', 'proj', cache)
+    check('首次全量解析', first.calls.length === 2, String(first.calls.length))
+
+    // 同一份文件、一点没动 —— 必须直接命中缓存（连读都不该读）
+    const again = parseTranscriptFile(file, 'sess-1', 'proj', cache)
+    check('没变化时命中缓存', again === first && again.calls.length === 2)
+
+    // 追加一整行：新结果 3 条，老的不能丢
+    writeFileSync(file, `${line(300, 30)}\n`, { flag: 'a' })
+    const appended = parseTranscriptFile(file, 'sess-1', 'proj', cache)
+    check('追加一行后是 3 条', appended.calls.length === 3, String(appended.calls.length))
+    check(
+      '追加后旧记录没丢',
+      appended.calls[0]?.inputTokens === 100 && appended.calls[2]?.inputTokens === 300,
+      appended.calls.map((call) => call.inputTokens).join(',')
+    )
+
+    // 追加一个**没有换行**的半行：不能算一条，offset 也不能推过去
+    writeFileSync(file, '{"providerData":{"usage":{"inputTok', { flag: 'a' })
+    const half = parseTranscriptFile(file, 'sess-1', 'proj', cache)
+    check('半行不算一条', half.calls.length === 3, String(half.calls.length))
+
+    // 补完那半行：这一轮必须把它读进来（证明上一轮确实停在半行之前）
+    writeFileSync(file, 'ens":400,"outputTokens":40}}}\n', { flag: 'a' })
+    const completed = parseTranscriptFile(file, 'sess-1', 'proj', cache)
+    check('补完半行后多出第 4 条', completed.calls.length === 4, String(completed.calls.length))
+    check('补完的正是那一条', completed.calls[3]?.inputTokens === 400, String(completed.calls[3]?.inputTokens))
+
+    // 截断重写：必须整份重来，绝不能拿旧 offset 去读新文件
+    writeFileSync(file, `${line(500, 50)}\n`, 'utf8')
+    const truncated = parseTranscriptFile(file, 'sess-1', 'proj', cache)
+    check(
+      '文件变小后整份重来',
+      truncated.calls.length === 1 && truncated.calls[0]?.inputTokens === 500,
+      String(truncated.calls.length)
+    )
+
+    // 同大小但内容被改写（mtime 变了）：同样不能沿用旧结果
+    writeFileSync(file, `${line(600, 60)}\n`, 'utf8')
+    const bumped = new Date(Date.now() + 5_000)
+    utimesSync(file, bumped, bumped)
+    const rewritten = parseTranscriptFile(file, 'sess-1', 'proj', cache)
+    check(
+      '同大小重写按新内容算',
+      rewritten.calls.length === 1 && rewritten.calls[0]?.inputTokens === 600,
+      String(rewritten.calls[0]?.inputTokens)
+    )
+
+    // ai-title 只在文件早期出现一次：增量之后不能被冲掉
+    const titleFile = join(root, 'sess-title.jsonl')
+    writeFileSync(
+      titleFile,
+      `${JSON.stringify({ type: 'ai-title', aiTitle: '梁山试炼' })}\n${line(700, 70)}\n`,
+      'utf8'
+    )
+    const titled = parseTranscriptFile(titleFile, 'sess-title', 'proj', cache)
+    check('读到 ai-title', titled.title === '梁山试炼', titled.title)
+    writeFileSync(titleFile, `${line(800, 80)}\n`, { flag: 'a' })
+    const titledMore = parseTranscriptFile(titleFile, 'sess-title', 'proj', cache)
+    check(
+      '增量后标题还在',
+      titledMore.title === '梁山试炼' && titledMore.calls.length === 2,
+      `${titledMore.title}/${titledMore.calls.length}`
+    )
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
 }
 
 /**

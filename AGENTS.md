@@ -383,7 +383,10 @@ amber / carbon 有自己整套色板（`--pen` 就是琥珀/红，本来就 ≠ 
 ## 7. 无头验证 UI 的做法
 
 这个项目界面没有测试框架覆盖，但**不能只靠肉眼看截图下结论**。
-流程与踩坑见用户级 skill `electron-gui-verify`；本项目的自检入口是环境变量：
+流程与踩坑见用户级 skill `electron-gui-verify`；自检代码在 `src/main/smoke/` ——
+`panel.ts`（面板）、`capsule.ts`（胶囊）、`writer.ts`（落盘与等待），
+主入口只留一次 `runSmoke()` 调用，别再往 `index.ts` 里塞截图逻辑。
+本项目的自检入口是环境变量：
 
 ```bash
 env -u ELECTRON_RUN_AS_NODE WB_TOKEN_METER_SMOKE=1 WB_TOKEN_METER_SMOKE_EXIT=1 \
@@ -394,8 +397,12 @@ env -u ELECTRON_RUN_AS_NODE WB_TOKEN_METER_SMOKE=1 WB_TOKEN_METER_SMOKE_EXIT=1 \
 **动过标题栏后必看 `narrow-header` 这三项**：`captionHeight`（应为 36）、
 `guardWidth`（> 0）、`actionsBelowCaption`（应为 true）。
 
-四个已踩过的坑：
+五个已踩过的坑：
 
+- **bash 里 `env -u ... electron.exe .` 可能静默不启动**：exit 0、日志空、
+  `%TEMP%\wbtm-smoke\` 连 `boot.json` 都没有。`boot.json` 是模块顶层同步写的，
+  它缺席就说明进程没加载主进程代码，**别去查业务逻辑**。本机用 WorkBuddy 的
+  bash 工具跑就是这样，换 PowerShell 的 `Start-Process -Wait -PassThru` 立刻正常。
 - **整屏截图会被前台窗口坑死**：Windows 的前台锁不允许后台进程抢焦点，
   应用被盖住时整屏里只剩别人家的窗口。改用
   `desktopCapturer.getSources({types:['window']})` 按窗口标题单独截，
@@ -424,3 +431,19 @@ env -u ELECTRON_RUN_AS_NODE WB_TOKEN_METER_SMOKE=1 WB_TOKEN_METER_SMOKE_EXIT=1 \
   **`.workbuddy/` 整个目录不许删** —— 它是项目数据目录，只有里面的 `tmp/` 属于可清理范围。
 - 删除走 .NET（§2.2），**工作区内也走**，不占 safe-delete 那一轮的额度。
   清完复核：目标真没了、该留的还在、`git status` 干净。
+
+---
+
+## 9. 代码规范与 Review
+
+写代码的判断标准见 [docs/code-style.md](docs/code-style.md)，验收清单见
+[docs/review-checklist.md](docs/review-checklist.md)。两条最容易被当成「风格问题」
+而被跳过的硬规则，在这里重复一遍：
+
+- **「读不到」不许画成 0**：采集失败必须有 `pending` / `warning` / `stale`，
+  界面上 0 只能表示真的读到 0。
+- **一个口径只有一处实现**：积分对账只走 `billingKey()` + `creditOf()`，
+  不要在别处自己拼键查表。
+
+本仓库 PR 上没有 CI（`release.yml` 只在推 `v*` 标签时跑），
+所以 typecheck / `test:core` / `test:ci` / `build` 是唯一门禁，别指望自动化兜底。
