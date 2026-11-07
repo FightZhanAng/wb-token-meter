@@ -2,6 +2,7 @@ import { app } from 'electron'
 import { runCapsuleChecks } from './capsule'
 import type { SmokeContext } from './context'
 import { measureFirstPaint, runPanelChecks } from './panel'
+import { runTopmostProbe } from './topmost'
 import { SMOKE, SMOKE_EXIT, SMOKE_TIMEOUT_MS, smoke } from './writer'
 
 export type { SmokeContext } from './context'
@@ -33,6 +34,8 @@ export function runSmoke(ctx: SmokeContext): void {
       const win = ctx.mainWindow()
       if (win && !win.isDestroyed()) await runPanelChecks(ctx, win)
       await runCapsuleChecks(ctx)
+      // 真实层级探针：会开盖板窗口抢焦点，比常规自检重得多，所以按需跑
+      if (process.env['WB_TOKEN_METER_PROBE'] === '1') await runTopmostProbe(ctx)
     } catch (error) {
       smoke('capture-error', { message: String(error) })
     }

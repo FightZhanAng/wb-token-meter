@@ -27,6 +27,18 @@ pnpm gen:icons    # 重新生成图标与 11 帧托盘进度环
 本机有 `~/.workbuddy`、`~/.dsh` 时一部分代码路径在 `test:core` 里根本走不到。
 v0.6.0 第一次打标签就是挂在这上面。
 
+**动到窗口层级（置顶 / 显隐 / setBounds / setShape）要额外跑真实层级探针**：
+
+```bash
+env -u ELECTRON_RUN_AS_NODE WB_TOKEN_METER_SMOKE=1 WB_TOKEN_METER_SMOKE_EXIT=1 \
+  WB_TOKEN_METER_PROBE=1 node_modules/electron/dist/electron.exe . --user-data-dir=<隔离目录>
+# 看 %TEMP%\wbtm-smoke\topmost.json 的 ok / failures
+```
+
+它开一个普通窗口盖住胶囊再截屏，判的是**屏幕上谁在上面**。普通自检里那条
+`float-always-on-top` 读的是 `BrowserWindow.isAlwaysOnTop()` —— Electron 自己
+那份状态，窗口被盖住时照样返回 true，**不能当证据**。
+
 ### pnpm 跑不动的时候，直接调二进制
 
 `pnpm <script>` 会先做依赖状态检查。一旦判定 `node_modules` 与 lockfile 不一致，

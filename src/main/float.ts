@@ -18,6 +18,10 @@ const VISIBLE_FALLBACK_MS = 700
 const POSITION_FLUSH_MS = 400
 /** 收起握手：等渲染层画完的兜底时限，超时照样缩窗 */
 const PENDING_COLLAPSE_MS = 200
+/** 几何安定下来多久之后补一次置顶（拖动时每帧都在变，按最后一次算） */
+const TOPMOST_SETTLE_MS = 160
+/** 置顶被吃掉时的重试档位。实测隔几秒再设一定吃得下，所以最后一档给得够大 */
+const TOPMOST_RETRY_MS = [120, 400, 1000]
 
 /**
  * 实心底色模式下窗口自己的底色。
@@ -71,6 +75,10 @@ export class FloatWindow {
   private anchorReady = false
   /** 创建时用的底色模式，用来判断是否需要重建窗口 */
   private createdSolid: boolean | null = null
+  /** 待执行的置顶补偿（去抖 + 重试共用一条） */
+  private topmostTimer: NodeJS.Timeout | null = null
+  /** 已经重试过几次；压上了就归零 */
+  private topmostRetries = 0
 
   /**
    * 胶囊在屏幕上的位置（左上角）—— **唯一真相**。
@@ -197,6 +205,9 @@ export class FloatWindow {
       this.createdSolid = null
       if (this.pendingCollapse) clearTimeout(this.pendingCollapse)
       this.pendingCollapse = null
+      if (this.topmostTimer) clearTimeout(this.topmostTimer)
+      this.topmostTimer = null
+      this.topmostRetries = 0
       this.appliedShape = null
       this.appliedBounds = null
     })
@@ -323,8 +334,67 @@ export class FloatWindow {
 
     // 尺寸档位变了要重算窗口（展开态下卡片也跟着换），位置由 origin 推
     this.applyPlacement()
-    win.setAlwaysOnTop(settings.floatAlwaysOnTop, 'floating')
+    this.applyAlwaysOnTop()
     win.setOpacity(clampOpacity(settings.floatOpacity))
+  }
+
+  /**
+   * 把「始终置顶」压下去，并确认它真的压上了。
+   *
+   * 单次 `setAlwaysOnTop(true)` 在 Windows 上**不完全可靠**：紧跟在一串
+   * `setBounds` / `setShape` 之后时会被吃掉 —— 调用返回了、`isAlwaysOnTop()`
+   * 读回来还是 false，而设置里明明写着 true。之后没有谁会再设它，于是胶囊
+   * 一直浮不上去，直到下一次改设置或重启。实测见过连着两次设不上、隔几秒
+   * 再设就好的情况，所以「有时不生效」是这条链路。
+   *
+   * 处理办法是不信任单次调用：设完读回来；不对就 false/true 再来一遍
+   * （同一个值重复设会被当成 no-op，先清掉才有效）；仍然不对就排一次延迟重试。
+   */
+  private applyAlwaysOnTop(): void {
+    const win = this.win
+    if (!win || win.isDestroyed()) return
+    const wanted = this.readSettings().floatAlwaysOnTop
+
+    win.setAlwaysOnTop(wanted, 'floating')
+    if (!wanted || win.isAlwaysOnTop()) {
+      this.topmostRetries = 0
+      return
+    }
+
+    // 没吃上：先取消再设，绕开「值没变就当 no-op」那条短路
+    win.setAlwaysOnTop(false)
+    win.setAlwaysOnTop(wanted, 'floating')
+    if (win.isAlwaysOnTop()) {
+      this.topmostRetries = 0
+      return
+    }
+
+    if (this.topmostRetries >= TOPMOST_RETRY_MS.length) return
+    const delay = TOPMOST_RETRY_MS[this.topmostRetries]
+    this.topmostRetries++
+    if (this.topmostTimer) clearTimeout(this.topmostTimer)
+    this.topmostTimer = setTimeout(() => {
+      this.topmostTimer = null
+      this.applyAlwaysOnTop()
+    }, delay)
+    this.topmostTimer.unref?.()
+  }
+
+  /**
+   * 几何变了之后补一次置顶。
+   *
+   * 拖动时 applyPlacement 一秒钟要跑几十次，所以按「最后一次之后 160ms」来算；
+   * 窗口不可见时不做 —— 露出来那一刻 present() 会接手。
+   */
+  private scheduleTopmost(): void {
+    const win = this.win
+    if (!win || win.isDestroyed() || !win.isVisible()) return
+    if (this.topmostTimer) clearTimeout(this.topmostTimer)
+    this.topmostTimer = setTimeout(() => {
+      this.topmostTimer = null
+      this.applyAlwaysOnTop()
+    }, TOPMOST_SETTLE_MS)
+    this.topmostTimer.unref?.()
   }
 
   /**
@@ -372,10 +442,13 @@ export class FloatWindow {
     if (this.readyTimeout) clearTimeout(this.readyTimeout)
     if (this.positionTimer) clearTimeout(this.positionTimer)
     if (this.pendingCollapse) clearTimeout(this.pendingCollapse)
+    if (this.topmostTimer) clearTimeout(this.topmostTimer)
     this.visibleFallback = null
     this.readyTimeout = null
     this.positionTimer = null
     this.pendingCollapse = null
+    this.topmostTimer = null
+    this.topmostRetries = 0
     this.appliedShape = null
     this.appliedBounds = null
     if (this.win && !this.win.isDestroyed()) this.win.destroy()
@@ -431,18 +504,27 @@ export class FloatWindow {
        * 的来源（屏幕上闪出来的是内容还停在展开态的那块旧纹理）。
        */
       const boundsKey = `${placement.bounds.x},${placement.bounds.y},${placement.bounds.width},${placement.bounds.height}`
-      if (boundsKey !== this.appliedBounds) {
+      const boundsChanged = boundsKey !== this.appliedBounds
+      if (boundsChanged) {
         this.appliedBounds = boundsKey
         win.setBounds(placement.bounds)
       }
+      let shapeChanged = false
       if (shapeMode) {
         // region 没变就不重设 —— 拖拽时每帧 setShape 是无谓的系统调用
         const key = JSON.stringify(placement.shape)
         if (key !== this.appliedShape) {
           this.appliedShape = key
           win.setShape(placement.shape ?? [])
+          shapeChanged = true
         }
       }
+      /*
+       * 几何或形状一动，Windows 就可能把 topmost 清掉，而且清得没有规律：
+       * 同样的尺寸变更，有时吃得下、有时吃不下（见 applyAlwaysOnTop 的说明）。
+       * 所以每次真的动过就补一刀。
+       */
+      if (boundsChanged || shapeChanged) this.scheduleTopmost()
     }
     return { capsule: placement.capsule, side: placement.side }
   }
@@ -474,6 +556,12 @@ export class FloatWindow {
     // 是在可见态设的，所以那条路从没暴露过这个坑。
     win.setAlwaysOnTop(settings.floatAlwaysOnTop, 'floating')
     win.setOpacity(clampOpacity(settings.floatOpacity))
+    /*
+     * 显隐这一下最容易把 topmost 丢掉，而 isAlwaysOnTop() 未必看得出来
+     * （它读的是 Electron 自己那份状态）。所以不管读回来是什么，过了这一拍
+     * 再压一次 —— 这是兜底，别因为上面已经有 setAlwaysOnTop 就删掉。
+     */
+    this.scheduleTopmost()
 
     if (this.visibleFallback) clearTimeout(this.visibleFallback)
     this.visibleFallback = setTimeout(() => {
@@ -481,7 +569,7 @@ export class FloatWindow {
       // 透明窗口在部分环境 showInactive 后不可见，回退到带焦点的 show()
       win.show()
       // 这次 show 之前窗口仍不可见，topmost 还会再丢一次 —— 同一个坑补第二刀
-      win.setAlwaysOnTop(this.readSettings().floatAlwaysOnTop, 'floating')
+      this.applyAlwaysOnTop()
     }, VISIBLE_FALLBACK_MS)
   }
 }

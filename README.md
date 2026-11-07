@@ -498,6 +498,7 @@ pnpm dist          # 打包 Windows 安装包与免安装版到 release/
 | `WB_TOKEN_METER_OPENCODE_KEY` | 直接指定额度查询用的 key（测试用），给了就不读 `auth.json` |
 | `WB_TOKEN_METER_SMOKE=1` | 冒烟自检：把启动状态写到 `%TEMP%\wbtm-smoke\` |
 | `WB_TOKEN_METER_SMOKE_EXIT=1` | 自检报告写完后自动退出 |
+| `WB_TOKEN_METER_PROBE=1` | 与 `WB_TOKEN_METER_SMOKE=1` 一起用：多跑一遍**胶囊置顶的真实层级探针**（开盖板窗口 + 截屏），结论在 `topmost.json` 的 `ok` 里 |
 | `WB_TOKEN_METER_FAKE_UPDATE=9.9.9` | 把更新检查钉在一个假版本上，不走网络 —— 自检靠它驱动更新界面 |
 
 启动后**不会弹主窗口** —— 看右下角的托盘图标：单击打开面板，右键出菜单，
@@ -653,6 +654,15 @@ resize，Windows 的合成器会滞留旧画面一两百毫秒、切换瞬间还
 纹理从头到尾没变过。region 外的部分超出屏幕也无害，所以收起态只钳胶囊本身的位置。
 solid 降级模式（透明不可见时的逃生通道）没有这套待遇 —— 窗口照旧真的缩放，
 收起走「渲染层先拆卡片、画完一帧再缩窗」的握手时序。
+
+**置顶不是设一次就算数的**：`setAlwaysOnTop(true)` 紧跟在一串 `setBounds` /
+`setShape` 之后时，Windows 会把它吃掉 —— 调用返回成功、读回来还是没置顶，
+而设置里明明写着 true；之后没有谁会再设它，胶囊就一直浮不上去，表现就是
+「有时不置顶」。所以每次几何安定下来、以及每次显隐之后都会补一刀，并读回
+`isAlwaysOnTop()` 校验：没吃上就 false/true 再来一遍（同一个值重复设会被当成
+no-op），仍然不行就按 120 / 400 / 1000ms 重试（见 `FloatWindow.applyAlwaysOnTop`）。
+`isAlwaysOnTop()` 只能当参考，要证「真的压在最上层」得跑
+`WB_TOKEN_METER_PROBE=1` 那套真实层级探针。
 
 ![胶囊](docs/preview-float.png)
 
